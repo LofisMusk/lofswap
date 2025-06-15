@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>lofswap</class>
+ <widget class="QMainWindow" name="lofswap">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>673</width>
+    <height>580</height>
+   </rect>
+  </property>
+  <property name="windowTitle">
+   <string>Lofswap Wallet</string>
+  </property>
+  <widget class="QWidget" name="centralwidget">
+   <layout class="QVBoxLayout" name="mainLayout">
+    <item>
+     <widget class="QTabWidget" name="tabWidget">
+      <property name="currentIndex">
+       <number>0</number>
+      </property>
+      <widget class="QWidget" name="sendTab">
+       <attribute name="title">
+        <string>Wyślij</string>
+       </attribute>
+       <layout class="QVBoxLayout" name="sendLayout">
+        <item>
+         <widget class="QLineEdit" name="recipientEdit">
+          <property name="placeholderText">
+           <string>Adres odbiorcy</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QDoubleSpinBox" name="amountSpinBox">
+          <property name="decimals">
+           <number>8</number>
+          </property>
+          <property name="maximum">
+           <double>1000000.000000000000000</double>
+          </property>
+          <property name="value">
+           <double>0.000000000000000</double>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="sendButton">
+          <property name="text">
+           <string>Wyślij</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </widget>
+      <widget class="QWidget" name="receiveTab">
+       <attribute name="title">
+        <string>Odbierz</string>
+       </attribute>
+       <layout class="QVBoxLayout" name="receiveLayout">
+        <item>
+         <widget class="QPushButton" name="generateButton">
+          <property name="text">
+           <string>Wygeneruj adres</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QLineEdit" name="addressDisplay">
+          <property name="readOnly">
+           <bool>true</bool>
+          </property>
+          <property name="placeholderText">
+           <string>Twój adres</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QLabel" name="qrLabel">
+          <property name="text">
+           <string>(Tutaj będzie kod QR)</string>
+          </property>
+          <property name="alignment">
+           <set>Qt::AlignmentFlag::AlignCenter</set>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </widget>
+      <widget class="QWidget" name="txTab">
+       <attribute name="title">
+        <string>Transakcje</string>
+       </attribute>
+       <layout class="QVBoxLayout" name="txLayout">
+        <item>
+         <widget class="QTextEdit" name="logOutput">
+          <property name="readOnly">
+           <bool>true</bool>
+          </property>
+          <property name="placeholderText">
+           <string>Logi transakcji</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </widget>
+     </widget>
+    </item>
+   </layout>
+  </widget>
+  <widget class="QMenuBar" name="menubar">
+   <property name="geometry">
+    <rect>
+     <x>0</x>
+     <y>0</y>
+     <width>673</width>
+     <height>21</height>
+    </rect>
+   </property>
+   <widget class="QMenu" name="menunigga">
+    <property name="title">
+     <string>nigga</string>
+    </property>
+   </widget>
+   <addaction name="menunigga"/>
+  </widget>
+  <widget class="QStatusBar" name="statusbar"/>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

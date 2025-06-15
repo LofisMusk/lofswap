@@ -1,0 +1,79 @@
+{
+	"configurations" : 
+	[
+		{
+			"directories" : 
+			[
+				{
+					"build" : ".",
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-.-Debug-f3c80c8126873d0881e5.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.16"
+					},
+					"projectIndex" : 0,
+					"source" : ".",
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2
+					]
+				}
+			],
+			"name" : "Debug",
+			"projects" : 
+			[
+				{
+					"directoryIndexes" : 
+					[
+						0
+					],
+					"name" : "lofswap_wallet",
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2
+					]
+				}
+			],
+			"targets" : 
+			[
+				{
+					"directoryIndex" : 0,
+					"id" : "lofswap_wallet::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-lofswap_wallet-Debug-3d7bf18cfd0138f434b0.json",
+					"name" : "lofswap_wallet",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "lofswap_wallet_autogen::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-lofswap_wallet_autogen-Debug-319d4ddab11695d69e66.json",
+					"name" : "lofswap_wallet_autogen",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "lofswap_wallet_autogen_timestamp_deps::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-lofswap_wallet_autogen_timestamp_deps-Debug-75364ed5b3f1273f96f3.json",
+					"name" : "lofswap_wallet_autogen_timestamp_deps",
+					"projectIndex" : 0
+				}
+			]
+		}
+	],
+	"kind" : "codemodel",
+	"paths" : 
+	{
+		"build" : "Z:/lofswap/wallet/lofswap_wallet/build/Desktop_Qt_6_9_0_MinGW_64_bit-Debug",
+		"source" : "Z:/lofswap/wallet/lofswap_wallet"
+	},
+	"version" : 
+	{
+		"major" : 2,
+		"minor" : 7
+	}
+}
