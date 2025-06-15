@@ -4,6 +4,7 @@
 #include "network.h"
 #include <iostream>
 #include <nlohmann/json.hpp>
+#include <sstream>
 
 int main(int argc, char* argv[]) {
     Blockchain chain;
@@ -60,7 +61,7 @@ int main(int argc, char* argv[]) {
         if (cmd == "exit") break;
         else if (cmd == "print") chain.printChain();
         else if (cmd == "save") chain.saveToFile("chain.json");
-        else if (cmd == "peers") std::cout << "Podłączonych: N/A\n";
+        else if (cmd == "peers") printConnectedPeers(network);
         else if (cmd.rfind("connect", 0) == 0) {
             std::string ip;
             int port;
@@ -82,6 +83,9 @@ int main(int argc, char* argv[]) {
             Transaction tx = {from, to, amount};
             chain.addTransactionToMempool(tx);
             network.broadcast(nlohmann::json{{"type", "NEW_TX"}, {"data", tx.toJson()}}.dump());
+        }
+        else {
+            std::cout << "Dostępne komendy: connect <ip> <port>, peers, tx, print, get, save, exit\n";
         }
     }
 

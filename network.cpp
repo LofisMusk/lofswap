@@ -1,6 +1,7 @@
 #include "network.h"
 #include <iostream>
 #include <nlohmann/json.hpp>
+#include <algorithm>
 
 using boost::asio::ip::tcp;
 
@@ -70,9 +71,8 @@ void Network::handleSession(std::shared_ptr<tcp::socket> socket,
             }
         }
     } catch (std::exception& e) {
-        std::cerr << "⚠️ Peer " << remote_ip << ":" << remote_port
-                  << " disconnected: " << e.what() << std::endl;
-
+        std::cerr << "⚠️ Peer " << remote_ip << ":" << remote_port << " disconnected: " << e.what() << std::endl;
+        // Remove peer from list
         peers_.erase(std::remove_if(peers_.begin(), peers_.end(), [&](const PeerInfo& p) {
             return p.socket == socket;
         }), peers_.end());
@@ -84,12 +84,24 @@ void Network::broadcast(const std::string& message) {
         try {
             boost::asio::write(*peer.socket, boost::asio::buffer(message + "\n"));
         } catch (...) {
-            std::cerr << "⚠️ Nie udało się wysłać do "
-                      << peer.address << ":" << peer.port << std::endl;
+            std::cerr << "⚠️ Nie udało się wysłać do " << peer.address << ":" << peer.port << std::endl;
         }
     }
 }
 
 std::vector<PeerInfo> Network::getPeers() const {
     return peers_;
+}
+
+// Komenda do wypisania peerów
+void printConnectedPeers(const Network& network) {
+    auto peers = network.getPeers();
+    if (peers.empty()) {
+        std::cout << "(brak aktywnych peerów)" << std::endl;
+        return;
+    }
+    std::cout << "Połączone peery (" << peers.size() << "):\n";
+    for (const auto& peer : peers) {
+        std::cout << " - " << peer.address << ":" << peer.port << std::endl;
+    }
 }
