@@ -6,8 +6,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>835</width>
-    <height>306</height>
+    <width>846</width>
+    <height>430</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -21,38 +21,69 @@
        <number>0</number>
       </property>
       <widget class="QWidget" name="sendTab">
+       <property name="enabled">
+        <bool>true</bool>
+       </property>
        <attribute name="title">
         <string>Wyślij</string>
        </attribute>
-       <layout class="QVBoxLayout" name="sendLayout">
-        <item>
-         <widget class="QDoubleSpinBox" name="amountSpinBox">
-          <property name="decimals">
-           <number>8</number>
-          </property>
-          <property name="maximum">
-           <double>1000000.000000000000000</double>
-          </property>
-          <property name="value">
-           <double>0.000000000000000</double>
-          </property>
-         </widget>
-        </item>
-        <item>
-         <widget class="QLineEdit" name="recipientEdit">
-          <property name="placeholderText">
-           <string>Adres odbiorcy</string>
-          </property>
-         </widget>
-        </item>
-        <item>
-         <widget class="QPushButton" name="sendButton">
-          <property name="text">
-           <string>Wyślij</string>
-          </property>
-         </widget>
-        </item>
-       </layout>
+       <widget class="QLineEdit" name="recipientEdit">
+        <property name="enabled">
+         <bool>true</bool>
+        </property>
+        <property name="geometry">
+         <rect>
+          <x>9</x>
+          <y>9</y>
+          <width>431</width>
+          <height>24</height>
+         </rect>
+        </property>
+        <property name="frame">
+         <bool>true</bool>
+        </property>
+        <property name="alignment">
+         <set>Qt::AlignmentFlag::AlignLeading|Qt::AlignmentFlag::AlignLeft|Qt::AlignmentFlag::AlignVCenter</set>
+        </property>
+        <property name="placeholderText">
+         <string>Adres odbiorcy</string>
+        </property>
+        <property name="clearButtonEnabled">
+         <bool>false</bool>
+        </property>
+       </widget>
+       <widget class="QDoubleSpinBox" name="amountSpinBox">
+        <property name="geometry">
+         <rect>
+          <x>9</x>
+          <y>39</y>
+          <width>431</width>
+          <height>25</height>
+         </rect>
+        </property>
+        <property name="decimals">
+         <number>1</number>
+        </property>
+        <property name="maximum">
+         <double>1000000.000000000000000</double>
+        </property>
+        <property name="value">
+         <double>0.000000000000000</double>
+        </property>
+       </widget>
+       <widget class="QPushButton" name="sendButton">
+        <property name="geometry">
+         <rect>
+          <x>9</x>
+          <y>70</y>
+          <width>431</width>
+          <height>24</height>
+         </rect>
+        </property>
+        <property name="text">
+         <string>Wyślij</string>
+        </property>
+       </widget>
       </widget>
       <widget class="QWidget" name="receiveTab">
        <attribute name="title">
@@ -114,7 +145,7 @@
     <rect>
      <x>0</x>
      <y>0</y>
-     <width>835</width>
+     <width>846</width>
      <height>21</height>
     </rect>
    </property>

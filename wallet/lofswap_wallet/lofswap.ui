@@ -6,8 +6,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>673</width>
-    <height>580</height>
+    <width>846</width>
+    <height>430</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -27,8 +27,20 @@
        <layout class="QVBoxLayout" name="sendLayout">
         <item>
          <widget class="QLineEdit" name="recipientEdit">
+          <property name="enabled">
+           <bool>true</bool>
+          </property>
+          <property name="frame">
+           <bool>true</bool>
+          </property>
+          <property name="alignment">
+           <set>Qt::AlignmentFlag::AlignLeading|Qt::AlignmentFlag::AlignLeft|Qt::AlignmentFlag::AlignVCenter</set>
+          </property>
           <property name="placeholderText">
            <string>Adres odbiorcy</string>
+          </property>
+          <property name="clearButtonEnabled">
+           <bool>false</bool>
           </property>
          </widget>
         </item>
@@ -51,6 +63,19 @@
            <string>Wyślij</string>
           </property>
          </widget>
+        </item>
+        <item>
+         <spacer name="verticalSpacer">
+          <property name="orientation">
+           <enum>Qt::Orientation::Vertical</enum>
+          </property>
+          <property name="sizeHint" stdset="0">
+           <size>
+            <width>20</width>
+            <height>40</height>
+           </size>
+          </property>
+         </spacer>
         </item>
        </layout>
       </widget>
@@ -114,16 +139,10 @@
     <rect>
      <x>0</x>
      <y>0</y>
-     <width>673</width>
+     <width>846</width>
      <height>21</height>
     </rect>
    </property>
-   <widget class="QMenu" name="menunigga">
-    <property name="title">
-     <string>nigga</string>
-    </property>
-   </widget>
-   <addaction name="menunigga"/>
   </widget>
   <widget class="QStatusBar" name="statusbar"/>
  </widget>
