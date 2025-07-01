@@ -143,7 +143,7 @@ fn main() {
 
     println!("Wallet CLI – dostępne polecenia: create-wallet, import-wallet <priv>, import-wallet-dat <plik>, export-wallet <priv> <plik>, default-wallet, send <to> <amount> [peers], balance [address], faucet <address>, exit");
     loop {
-        print!("> ");
+        // usunięte: print!("> ");
         let _ = io::stdout().flush();
         let mut input = String::new();
         if io::stdin().read_line(&mut input).is_ok() {
@@ -151,7 +151,30 @@ fn main() {
             if args.is_empty() {
                 continue;
             }
-
+            match args[0] {
+                "--help" | "help" => {
+                    println!("Dostępne polecenia:");
+                    println!("  create-wallet");
+                    println!("  import-wallet <privatny_klucz>");
+                    println!("  import-wallet-dat <plik.dat>");
+                    println!("  export-wallet <privatny_klucz> <plik.dat>");
+                    println!("  default-wallet");
+                    println!("  send <adres_docelowy> <ilość> [liczba_node'ów]");
+                    println!("  balance [adres_publiczny]");
+                    println!("  faucet <adres_publiczny>");
+                    println!("  exit");
+                },
+                "default-wallet" => {
+                    if let Some(sk) = load_default_wallet() {
+                        let secp = Secp256k1::new();
+                        let pk = PublicKey::from_secret_key(&secp, &sk);
+                        println!("Domyślny portfel:");
+                        println!("Private Key: {}", hex::encode(sk.secret_bytes()));
+                        println!("Public Key: {}", pk);
+                    } else {
+                        println!("Brak ustawionego domyślnego portfela.");
+                    }
+                },
                 "import-wallet-dat" if args.len() == 2 => {
                     if let Ok(mut file) = File::open(args[1]) {
                         let mut buf = Vec::new();
