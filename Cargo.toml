@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "blockchain-core",
+    "wallet-cli",
+    "node-cli"
+]
