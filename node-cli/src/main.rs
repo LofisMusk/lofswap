@@ -18,13 +18,13 @@ use serde_json;
 #[tokio::main]
 async fn main() {
     let blockchain = Arc::new(Mutex::new(load_chain()));
-    let mempool = Arc::new(Mutex::new(Vec::<Transaction>::new()));
 
     // uruchom serwer TCP
     let blockchain_clone = blockchain.clone();
     tokio::spawn(async move {
         let listener = TcpListener::bind("0.0.0.0:6000").await.unwrap();
         println!("Node nasłuchuje na porcie 6000");
+
         loop {
             if let Ok((mut stream, _)) = listener.accept().await {
                 let mut buffer = vec![0; 2048];
@@ -46,37 +46,38 @@ async fn main() {
                             }
                         }
                         let _ = stream.write_all(balance.to_string().as_bytes()).await;
+
                     } else if let Ok(tx) = serde_json::from_slice::<Transaction>(input) {
                         let mut chain = blockchain_clone.lock().await;
                         if is_tx_valid(&tx, &chain) {
                             println!("✓ Transakcja zaakceptowana do mempoola");
-                             if let Ok(mut file) = OpenOptions::new().create(true).append(true).open("mempool.json") {
-                            let _ = writeln!(file, "{}", serde_json::to_string(&tx).unwrap());
+                            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open("mempool.json") {
+                                let _ = writeln!(file, "{}", serde_json::to_string(&tx).unwrap());
+                            }
                         } else {
-                            println!("✗ Błędna transakcja odrzucona");
+                            println!("✗ Błędna transakcja odrzucona (invalid signature or double spend)");
                         }
+
+                    } else if input_str.starts_with("/register/") {
+                        let new_addr = input_str.trim().replace("/register/", "");
+                        if !add_node_to_file(&new_addr) {
+                            println!("✓ Dodano nowy node: {}", new_addr);
+                            broadcast_nodes_file().await;
+                        }
+                        let _ = stream.write_all(b"OK").await;
+
+                    } else if input_str.starts_with("/nodes_update/") {
+                        let nodes_data = input_str.trim().replace("/nodes_update/", "");
+                        std::fs::write("nodes.txt", nodes_data).unwrap();
+                        println!("✓ Zaktualizowano nodes.txt z sieci");
+
+                    } else {
+                        println!("✗ Odrzucono nie-poprawny JSON transakcji");
                     }
-                } else if input_str.starts_with("/register/") {
-                    let new_addr = input_str.trim().replace("/register/", "");
-                    if !add_node_to_file(&new_addr) {
-                        println!("✓ Dodano nowy node: {}", new_addr);
-                        broadcast_nodes_file().await;
-                    }
-                    let _ = stream.write_all(b"OK").await;
-                    continue;
-                } else if input_str.starts_with("/nodes_update/") {
-                    let nodes_data = input_str.trim().replace("/nodes_update/", "");
-                    std::fs::write("nodes.txt", nodes_data).unwrap();
-                    println!("✓ Zaktualizowano nodes.txt z sieci");
-                    continue;
                 }
             }
         }
-    }});
-
-    // AUTOMATYCZNA SYNC PO URUCHOMIENIU
-    let arc_chain = blockchain.clone();
-    sync_chain(&arc_chain).await;
+    });
 
     // CLI pętla
     println!("Witaj w nodzie blockchain. Dostępne polecenia: mine, sync, exit, print-chain, list-peers, clear-chain");
@@ -97,6 +98,7 @@ async fn main() {
                     .filter_map(|line| serde_json::from_str(line).ok())
                     .filter(|tx| is_tx_valid(tx, &chain))
                     .collect();
+                std::fs::remove_file("mempool.json").unwrap_or(());
 
                 if all_txs.is_empty() {
                     println!("Brak ważnych transakcji do wykopania.");
@@ -125,25 +127,25 @@ async fn main() {
                 }
             }
             "list-peers" => {
-            if let Ok(file) = File::open("nodes.txt") {
-                let reader = BufReader::new(file);
-                println!("Znane nody:");
-                for line in reader.lines().flatten() {
-                    let addr = line.trim();
-                    let mut status = "offline";
-                    if let Ok(mut addrs) = addr.to_socket_addrs() {
-                        if let Some(sock_addr) = addrs.find(|a| a.is_ipv4() || a.is_ipv6()) {
-                            if StdTcpStream::connect_timeout(&sock_addr, std::time::Duration::from_millis(300)).is_ok() {
-                                status = "online";
+                if let Ok(file) = File::open("nodes.txt") {
+                    let reader = BufReader::new(file);
+                    println!("Znane nody:");
+                    for line in reader.lines().flatten() {
+                        let addr = line.trim();
+                        let mut status = "offline";
+                        if let Ok(mut addrs) = addr.to_socket_addrs() {
+                            if let Some(sock_addr) = addrs.find(|a| a.is_ipv4() || a.is_ipv6()) {
+                                if StdTcpStream::connect_timeout(&sock_addr, std::time::Duration::from_millis(300)).is_ok() {
+                                    status = "online";
+                                }
                             }
                         }
+                        println!("- {} ({})", addr, status);
                     }
-                    println!("- {} ({})", addr, status);
+                } else {
+                    println!("Brak pliku nodes.txt");
                 }
-            } else {
-                println!("Brak pliku nodes.txt");
             }
-}
             "clear-chain" => {
                 std::fs::remove_file("blockchain.json").unwrap_or(());
                 println!("Blockchain został usunięty.");
@@ -158,7 +160,6 @@ async fn main() {
 }
 
 fn is_tx_valid(tx: &Transaction, chain: &[Block]) -> bool {
-        // coinbase (nagroda za blok)
     if tx.from.is_empty() && tx.signature == "reward" {
         return true;
     }
@@ -269,15 +270,5 @@ async fn broadcast_nodes_file() {
                 let _ = stream.shutdown().await;
             }
         }
-    }
-}
-
-// Możesz dodać do CLI lub wywołać po sync:
-async fn register_my_node(my_addr: &str, known_node: &str) {
-    if let Ok(mut stream) = TcpStream::connect(known_node).await {
-        let msg = format!("/register/{}", my_addr);
-        let _ = stream.write_all(msg.as_bytes()).await;
-        let mut buf = [0u8; 16];
-        let _ = stream.read(&mut buf).await;
     }
 }
