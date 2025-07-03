@@ -19,4 +19,4 @@ jobs:
     - name: Build
       run: cargo build --workspace
     - name: Test
-      run: ls
+      run: cd target/debug ./node-cli
