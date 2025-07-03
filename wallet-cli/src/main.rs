@@ -141,9 +141,9 @@ fn main() {
     let peer_count = Arc::new(Mutex::new(0));
     let count_clone = Arc::clone(&peer_count);
 
-    println!("Wallet CLI – dostępne polecenia: create-wallet, import-wallet <priv>, import-wallet-dat <plik>, export-wallet <priv> <plik>, default-wallet, send <to> <amount> [peers], balance [address], faucet <address>, exit");
+    println!("Wallet CLI – dostępne polecenia: create-wallet, import-wallet <priv>, import-wallet <plik>, export-wallet <priv> <plik>, default-wallet, send <to> <amount> [peers], balance [address], faucet <address>, exit");
     loop {
-        // usunięte: print!("> ");
+        print!("> ");
         let _ = io::stdout().flush();
         let mut input = String::new();
         if io::stdin().read_line(&mut input).is_ok() {
@@ -156,7 +156,7 @@ fn main() {
                     println!("Dostępne polecenia:");
                     println!("  create-wallet");
                     println!("  import-wallet <privatny_klucz>");
-                    println!("  import-wallet-dat <plik.dat>");
+                    println!("  import-wallet <plik.dat>");
                     println!("  export-wallet <privatny_klucz> <plik.dat>");
                     println!("  default-wallet");
                     println!("  send <adres_docelowy> <ilość> [liczba_node'ów]");
@@ -175,7 +175,7 @@ fn main() {
                         println!("Brak ustawionego domyślnego portfela.");
                     }
                 },
-                "import-wallet-dat" if args.len() == 2 => {
+                "import-wallet" if args.len() == 2 => {
                     if let Ok(mut file) = File::open(args[1]) {
                         let mut buf = Vec::new();
                         if file.read_to_end(&mut buf).is_ok() {
