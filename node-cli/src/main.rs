@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     fs::OpenOptions,
-    io::{self, BufRead, Write},
+    io::{self, Write},
     net::{TcpStream as StdTcpStream, ToSocketAddrs},
     path::Path,
     sync::Arc,
