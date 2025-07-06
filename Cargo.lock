@@ -421,6 +421,7 @@ dependencies = [
  "blockchain-core",
  "clap",
  "hex",
+ "rand",
  "secp256k1",
  "serde",
  "serde_json",

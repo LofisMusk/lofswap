@@ -1,163 +1,190 @@
-// === /node-cli/src/main.rs ===
+// === node-cli/src/main.rs ===
 use blockchain_core::{Block, Transaction};
-use std::sync::Arc;
-use tokio::sync::Mutex;
-use tokio::net::{TcpListener, TcpStream};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use std::fs::{File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Write};
-use std::net::{TcpStream as StdTcpStream, ToSocketAddrs};
-use std::path::Path;
-use std::time::Duration;
-use tokio::time::sleep;
-use secp256k1::{Secp256k1, Message, PublicKey};
-use secp256k1::ecdsa::Signature;
-use sha2::{Digest, Sha256};
+use secp256k1::{ecdsa::Signature, Message, PublicKey, Secp256k1};
 use serde_json;
+use sha2::{Digest, Sha256};
+use std::{
+    collections::HashMap,
+    fs::OpenOptions,
+    io::{self, BufRead, Write},
+    net::{TcpStream as StdTcpStream, ToSocketAddrs},
+    path::Path,
+    sync::Arc,
+    time::Duration,
+};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    sync::Mutex,
+    time::sleep,
+};
+
+// ───── ustawienia ─────────────────────────────────────────────
+const LISTEN_PORT: u16 = 6000;
+const BOOTSTRAP_NODES: &[&str] = &[
+    "mekambe.ddns.net:6000",
+    "mekambe.ddns.net:6001",
+];
+// ──────────────────────────────────────────────────────────────
+
+fn balances(chain: &[Block]) -> HashMap<String, i128> {
+    let mut map = HashMap::new();
+    for block in chain {
+        for tx in &block.transactions {
+            if !tx.from.is_empty() {
+                *map.entry(tx.from.clone()).or_insert(0) -= tx.amount as i128;
+            }
+            *map.entry(tx.to.clone()).or_insert(0) += tx.amount as i128;
+        }
+    }
+    map
+}
 
 #[tokio::main]
 async fn main() {
     let blockchain = Arc::new(Mutex::new(load_chain()));
+    let peers     = Arc::new(Mutex::new(load_peers()));
 
-    // uruchom serwer TCP
-    let blockchain_clone = blockchain.clone();
-    tokio::spawn(async move {
-        let listener = TcpListener::bind("0.0.0.0:6000").await.unwrap();
-        println!("Node nasłuchuje na porcie 6000");
+    // ─── 1. Serwer TCP (nasłuch na LISTEN_PORT) ───────────────
+    {
+        let blockchain = blockchain.clone();
+        let peers      = peers.clone();
+        tokio::spawn(async move {
+            let addr = format!("0.0.0.0:{LISTEN_PORT}");
+            let listener = TcpListener::bind(addr).await.expect("bind");
+            println!("Node nasłuchuje na porcie {LISTEN_PORT}");
 
-        loop {
-            if let Ok((mut stream, _)) = listener.accept().await {
-                let mut buffer = vec![0; 2048];
-                if let Ok(n) = stream.read(&mut buffer).await {
-                    let input = &buffer[..n];
-                    let input_str = String::from_utf8_lossy(input);
+            loop {
+                if let Ok((mut stream, _)) = listener.accept().await {
+                    let mut buf = vec![0; 4096];
+                    if let Ok(n) = stream.read(&mut buf).await {
+                        let slice = &buf[..n];
+                        let txt   = String::from_utf8_lossy(slice);
 
-                    if input_str.starts_with("/balance/") {
-                        let address = input_str.trim().replace("/balance/", "");
-                        let chain = blockchain_clone.lock().await;
-                        let mut balance: i64 = 0;
-                        for block in chain.iter() {
-                            for tx in &block.transactions {
-                                if tx.to == address {
-                                    balance += tx.amount as i64;
-                                } else if tx.from == address {
-                                    balance -= tx.amount as i64;
+                        if txt.starts_with("/balance/") {
+                            // ----- saldo -----
+                            let addr = txt.trim().replace("/balance/", "");
+                            let chain = blockchain.lock().await;
+                            let mut bal: i128 = 0;
+                            for b in chain.iter() {
+                                for t in &b.transactions {
+                                    if t.to == addr { bal += t.amount as i128 }
+                                    if t.from == addr { bal -= t.amount as i128 }
                                 }
                             }
-                        }
-                        let _ = stream.write_all(balance.to_string().as_bytes()).await;
-
-                    } else if let Ok(tx) = serde_json::from_slice::<Transaction>(input) {
-                        let mut chain = blockchain_clone.lock().await;
-                        if is_tx_valid(&tx, &chain) {
-                            println!("✓ Transakcja zaakceptowana do mempoola");
-                            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open("mempool.json") {
-                                let _ = writeln!(file, "{}", serde_json::to_string(&tx).unwrap());
+                            let _ = stream.write_all(bal.to_string().as_bytes()).await;
+                        } else if txt.trim() == "/peers" {
+                            // ----- zwróć listę peerów -----
+                            let p = peers.lock().await;
+                            let _ = stream.write_all(serde_json::to_string(&*p).unwrap().as_bytes()).await;
+                        } else if let Ok(tx) = serde_json::from_slice::<Transaction>(slice) {
+                            // ----- transakcja -----
+                            let chain = blockchain.lock().await;
+                            if is_tx_valid(&tx, &chain) {
+                                println!("✓ TX do mempoolu");
+                                if let Ok(mut f) = OpenOptions::new().create(true).append(true).open("mempool.json") {
+                                    let _ = writeln!(f, "{}", serde_json::to_string(&tx).unwrap());
+                                }
+                            } else {
+                                println!("✗ TX odrzucony (podpis / saldo)");
                             }
-                        } else {
-                            println!("✗ Błędna transakcja odrzucona (invalid signature or double spend)");
                         }
-
-                    } else if input_str.starts_with("/register/") {
-                        let new_addr = input_str.trim().replace("/register/", "");
-                        if !add_node_to_file(&new_addr) {
-                            println!("✓ Dodano nowy node: {}", new_addr);
-                            broadcast_nodes_file().await;
-                        }
-                        let _ = stream.write_all(b"OK").await;
-
-                    } else if input_str.starts_with("/nodes_update/") {
-                        let nodes_data = input_str.trim().replace("/nodes_update/", "");
-                        std::fs::write("nodes.txt", nodes_data).unwrap();
-                        println!("✓ Zaktualizowano nodes.txt z sieci");
-
-                    } else {
-                        println!("✗ Odrzucono nie-poprawny JSON transakcji");
                     }
+                }
+            }
+        });
+    }
+
+    // ─── 2. Peer-discovery z BOOTSTRAP_NODES ──────────────────
+    for &boot in BOOTSTRAP_NODES {
+        if let Ok(mut s) = TcpStream::connect(boot).await {
+            let _ = s.write_all(b"/peers").await;
+            let mut buf = vec![0; 4096];
+            if let Ok(n) = s.read(&mut buf).await {
+                if let Ok(list) = serde_json::from_slice::<Vec<String>>(&buf[..n]) {
+                    let mut p = peers.lock().await;
+                    for peer in list {
+                        if !p.contains(&peer) {
+                            println!("Dodano peer z bootstrapu: {peer}");
+                            p.push(peer);
+                        }
+                    }
+                    save_peers(&p);
                 }
             }
         }
-    });
+    }
 
-    // CLI pętla
-    println!("Witaj w nodzie blockchain. Dostępne polecenia: mine, sync, exit, print-chain, list-peers, clear-chain");
+    // ─── 3. CLI ────────────────────────────────────────────────
+    println!("Komendy: mine | sync | print-chain | list-peers | clear-chain | exit");
     loop {
         print!("> ");
-        let _ = std::io::Write::flush(&mut std::io::stdout());
-        let mut input = String::new();
-        let stdin = io::stdin();
-        stdin.lock().read_line(&mut input).unwrap();
-        let input = input.trim();
-
-        match input {
+        let _ = io::stdout().flush();
+        let mut line = String::new();
+        io::stdin().read_line(&mut line).unwrap();
+        match line.trim() {
             "mine" => {
                 let mut chain = blockchain.lock().await;
-                let mempool_data = std::fs::read_to_string("mempool.json").unwrap_or_default();
-                let all_txs: Vec<Transaction> = mempool_data
+
+                // wczytaj mempool
+                let parsed: Vec<Transaction> = std::fs::read_to_string("mempool.json")
+                    .unwrap_or_default()
                     .lines()
-                    .filter_map(|line| serde_json::from_str(line).ok())
-                    .filter(|tx| is_tx_valid(tx, &chain))
+                    .filter_map(|l| serde_json::from_str(l).ok())
                     .collect();
-                std::fs::remove_file("mempool.json").unwrap_or(());
 
-                if all_txs.is_empty() {
-                    println!("Brak ważnych transakcji do wykopania.");
-                    continue;
+                // selekcja
+                let mut bal = balances(&chain);
+                let mut chosen = Vec::new();
+                for tx in parsed {
+                    if tx.from.is_empty() { chosen.push(tx); continue; }
+                    let e = bal.entry(tx.from.clone()).or_insert(0);
+                    if *e >= tx.amount as i128 {
+                        *e -= tx.amount as i128;
+                        *bal.entry(tx.to.clone()).or_insert(0) += tx.amount as i128;
+                        chosen.push(tx);
+                    } else {
+                        println!("✗ TX {} pominięty – saldo {}", tx.signature, e);
+                    }
                 }
+                if chosen.is_empty() { println!("Brak TX"); continue; }
+                let _ = std::fs::remove_file("mempool.json");
 
-                let prev_hash = chain.last().unwrap().hash.clone();
-                let new_block = Block::new(chain.len() as u64, all_txs, prev_hash);
-                println!("Wykopano nowy blok: {}", new_block.hash);
-                chain.push(new_block.clone());
+                let prev = chain.last().unwrap().hash.clone();
+                let block = Block::new(chain.len() as u64, chosen, prev);
+                println!("Nowy blok: {}", block.hash);
+                chain.push(block.clone());
                 save_chain(&chain);
-                broadcast_to_known_nodes(&new_block).await;
+                broadcast_to_known_nodes(&block).await;
                 sleep(Duration::from_secs(1)).await;
             }
-            "sync" => {
-                let arc_chain = blockchain.clone();
-                sync_chain(&arc_chain).await;
-            }
+            "sync" => sync_chain(&blockchain).await,
             "print-chain" => {
-                let chain = blockchain.lock().await;
-                for block in chain.iter() {
-                    println!("Blok #{} | hash: {}", block.index, block.hash);
-                    for tx in &block.transactions {
-                        println!("  {} -> {} : {}", tx.from, tx.to, tx.amount);
-                    }
+                let c = blockchain.lock().await;
+                for b in c.iter() {
+                    println!("#{} hash: {}", b.index, b.hash);
                 }
             }
             "list-peers" => {
-                if let Ok(file) = File::open("nodes.txt") {
-                    let reader = BufReader::new(file);
-                    println!("Znane nody:");
-                    for line in reader.lines().flatten() {
-                        let addr = line.trim();
-                        let mut status = "offline";
-                        if let Ok(mut addrs) = addr.to_socket_addrs() {
-                            if let Some(sock_addr) = addrs.find(|a| a.is_ipv4() || a.is_ipv6()) {
-                                if StdTcpStream::connect_timeout(&sock_addr, std::time::Duration::from_millis(300)).is_ok() {
-                                    status = "online";
-                                }
-                            }
-                        }
-                        println!("- {} ({})", addr, status);
-                    }
-                } else {
-                    println!("Brak pliku nodes.txt");
+                let p = peers.lock().await;
+                for peer in p.iter() {
+                    let status = peer
+                        .to_socket_addrs()
+                        .ok()
+                        .and_then(|mut i| i.next())
+                        .and_then(|a| StdTcpStream::connect_timeout(&a, Duration::from_millis(300)).ok())
+                        .map(|_| "online").unwrap_or("offline");
+                    println!("{peer} ({status})");
                 }
             }
-            "clear-chain" => {
-                std::fs::remove_file("blockchain.json").unwrap_or(());
-                println!("Blockchain został usunięty.");
-            }
-            "exit" => {
-                println!("Zamykam nod...");
-                break;
-            }
-            _ => println!("Nieznane polecenie. Użyj: mine, sync, exit, print-chain, list-peers, clear-chain"),
+            "clear-chain" => { let _ = std::fs::remove_file("blockchain.json"); println!("Chain usunięty"); }
+            "exit" => break,
+            _ => println!("?"),
         }
     }
 }
+/* ---- reszta pliku: is_tx_valid, save_chain, load_chain, load_peers,
+        save_peers, broadcast_to_known_nodes, sync_chain – bez zmian ---- */
 
 fn is_tx_valid(tx: &Transaction, chain: &[Block]) -> bool {
     if tx.from.is_empty() && tx.signature == "reward" {
@@ -169,6 +196,20 @@ fn is_tx_valid(tx: &Transaction, chain: &[Block]) -> bool {
         Ok(pk) => pk,
         Err(_) => return false,
     };
+
+    let mut balance: i64 = 0;
+    for block in chain {
+        for btx in &block.transactions {
+            if btx.to == tx.from {
+                balance += btx.amount as i64;
+            } else if btx.from == tx.from {
+                balance -= btx.amount as i64;
+            }
+        }
+    }
+    if balance < tx.amount as i64 {
+        return false;
+    }
 
     let msg_data = format!("{}{}{}", tx.from, tx.to, tx.amount);
     let hash = Sha256::digest(msg_data.as_bytes());
@@ -212,8 +253,22 @@ fn load_chain() -> Vec<Block> {
     }
 }
 
+fn load_peers() -> Vec<String> {
+    if Path::new("peers.json").exists() {
+        let json = std::fs::read_to_string("peers.json").unwrap();
+        serde_json::from_str(&json).unwrap_or_else(|_| vec![])
+    } else {
+        vec![]
+    }
+}
+
+fn save_peers(peers: &Vec<String>) {
+    let json = serde_json::to_string_pretty(peers).unwrap();
+    std::fs::write("peers.json", json).unwrap();
+}
+
 async fn broadcast_to_known_nodes(block: &Block) {
-    if let Ok(list) = std::fs::read_to_string("nodes.txt") {
+    if let Ok(list) = std::fs::read_to_string("peers.json") {
         for line in list.lines() {
             if let Ok(mut stream) = TcpStream::connect(line).await {
                 let json = serde_json::to_string(block).unwrap();
@@ -225,7 +280,7 @@ async fn broadcast_to_known_nodes(block: &Block) {
 }
 
 async fn sync_chain(blockchain: &Arc<Mutex<Vec<Block>>>) {
-    if let Ok(list) = std::fs::read_to_string("nodes.txt") {
+    if let Ok(list) = std::fs::read_to_string("peers.json") {
         for line in list.lines() {
             if let Ok(mut stream) = TcpStream::connect(line).await {
                 let _ = stream.write_all(b"/chain").await;
@@ -237,37 +292,9 @@ async fn sync_chain(blockchain: &Arc<Mutex<Vec<Block>>>) {
                             *local_chain = peer_chain;
                             save_chain(&local_chain);
                             println!("✓ Chain synchronized and saved from node {}", line);
-                        } else {
-                            println!("✗ Node {} miał krótszy chain – pomijam", line);
                         }
                     }
                 }
-            }
-        }
-    }
-}
-
-fn add_node_to_file(addr: &str) -> bool {
-    let path = "nodes.txt";
-    let mut nodes = std::fs::read_to_string(path).unwrap_or_default()
-        .lines().map(|l| l.trim().to_string()).collect::<Vec<_>>();
-    if nodes.iter().any(|a| a == addr) {
-        return true; // już jest
-    }
-    nodes.push(addr.to_string());
-    let content = nodes.join("\n");
-    std::fs::write(path, content).unwrap();
-    false // dodano nowy
-}
-
-async fn broadcast_nodes_file() {
-    if let Ok(list) = std::fs::read_to_string("nodes.txt") {
-        for line in list.lines() {
-            if let Ok(mut stream) = TcpStream::connect(line).await {
-                let nodes_content = std::fs::read_to_string("nodes.txt").unwrap();
-                let msg = format!("/nodes_update/\n{}", nodes_content);
-                let _ = stream.write_all(msg.as_bytes()).await;
-                let _ = stream.shutdown().await;
             }
         }
     }

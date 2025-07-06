@@ -1,252 +1,190 @@
 // === /wallet-cli/src/main.rs ===
+//! Wallet CLI – oparty wyłącznie o mechanizm `peers.json` + `BOOTSTRAP_NODES`.
+//! Usunięto wszystkie ścieżki korzystające z `nodes.txt`.
+
 use blockchain_core::Transaction;
 use rand::seq::IndexedRandom;
 use secp256k1::{Secp256k1, SecretKey, PublicKey, Message};
-use sha2::Digest;
-use rand::{thread_rng, seq::SliceRandom};
-use std::fs::File;
-use std::io::{self, BufRead, BufReader, Write, Read};
-use std::net::TcpStream;
-use std::collections::HashSet;
-use hex;
+use sha2::{Digest, Sha256};
+use std::fs::{self, File};
+use std::io::{self, Read, Write};
+use std::net::{TcpStream, SocketAddr};
+use std::path::Path;
+use std::time::Duration;
 use serde_json;
 
+static BOOTSTRAP_NODES: &[&str] = &[
+    "31.135.167.5:6000",
+    "31.135.167.5:6001",
+];
+
+// ---------- domyślny portfel ----------
+const DEFAULT_WALLET: &str = ".default_wallet";
+fn save_default_wallet(sk:&SecretKey){ let _ = fs::write(DEFAULT_WALLET, hex::encode(sk.secret_bytes())); }
+fn load_default_wallet() -> Option<SecretKey> {
+    fs::read_to_string(DEFAULT_WALLET)
+        .ok()
+        .and_then(|h| hex::decode(h.trim()).ok())
+        .and_then(|b| {
+            if b.len() == 32 {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&b);
+                SecretKey::from_byte_array(arr).ok()
+            } else {
+                None
+            }
+        })
+}
+
+// ---------- Peers ----------
+fn load_peers() -> Vec<String> {
+    if Path::new("peers.json").exists() {
+        if let Ok(txt) = fs::read_to_string("peers.json") {
+            if let Ok(v) = serde_json::from_str::<Vec<String>>(&txt) {
+                if !v.is_empty() { return v; }
+            }
+        }
+    }
+    BOOTSTRAP_NODES.iter().map(|s| s.to_string()).collect()
+}
+
+fn connect_and_send(addr:&str,data:&[u8])->io::Result<()> {
+    let sock:SocketAddr = addr.parse().map_err(|_| io::Error::new(io::ErrorKind::Other,"bad addr"))?;
+    let mut s = TcpStream::connect_timeout(&sock,Duration::from_millis(800))?;
+    s.write_all(data)?;
+    Ok(())
+}
+
+fn broadcast(json:&[u8],min_peers:usize){
+    let peers=load_peers();
+    if peers.is_empty(){ println!("✗ Brak znanych nodów"); return; }
+    let mut rng=rand::rng();
+    let selected:Vec<String>=peers.choose_multiple(&mut rng,min_peers.max(1)).cloned().collect();
+    let mut ok=0;
+    for p in &selected {
+        match connect_and_send(p,json){
+            Ok(_) => { println!("✓ Wysłano do {}",p); ok+=1; },
+            Err(_) => println!("✗ Nie udało się połączyć z {}",p),
+        }
+    }
+    if ok<min_peers { println!("⚠️ Wysłano tylko do {ok}/{min_peers} nodów"); }
+}
+
+// ---------- Transakcje ----------
+fn build_tx(sk:&SecretKey,to:&str,amount:u64)->Transaction{
+    let secp=Secp256k1::new();
+    let pk=PublicKey::from_secret_key(&secp,sk);
+    let preimage=format!("{}{}{}",pk,to,amount);
+    let hash=Sha256::digest(preimage.as_bytes());
+    let sig=secp.sign_ecdsa(Message::from_slice(&hash).unwrap(),sk);
+    Transaction{ from:pk.to_string(), to:to.into(), amount, signature:hex::encode(sig.serialize_compact()) }
+}
+
+fn send_default(to:&str,amount:u64,min_peers:usize){
+    if let Some(sk)=load_default_wallet(){ let tx=build_tx(&sk,to,amount); let payload=serde_json::to_vec(&tx).unwrap(); broadcast(&payload,min_peers); }
+    else { println!("✗ Brak domyślnego portfela"); }
+}
+fn send_priv(priv_hex:&str,to:&str,amount:u64,min_peers:usize){
+    if let Ok(sk)=SecretKey::from_slice(&hex::decode(priv_hex).unwrap_or_default()){ let tx=build_tx(&sk,to,amount); let payload=serde_json::to_vec(&tx).unwrap(); broadcast(&payload,min_peers); }
+    else { println!("✗ Niepoprawny klucz prywatny"); }
+}
+
+// ---------- Saldo ----------
+fn balance(addr:&str){
+    let query=format!("/balance/{}",addr);
+    for p in load_peers(){
+        if let Ok(mut s)=TcpStream::connect_timeout(&p.parse().unwrap(),Duration::from_millis(800)){
+            if s.write_all(query.as_bytes()).is_ok(){
+                let mut buf=String::new();
+                if s.read_to_string(&mut buf).is_ok(){ println!("Saldo {}: {}",addr,buf.trim()); return; }
+            }
+        }
+    }
+    println!("✗ Brak odpowiedzi z nodów");
+}
+
+// ---------- Faucet ----------
+fn faucet(addr:&str){
+    let tx=Transaction{ from:String::new(), to:addr.into(), amount:1000, signature:"reward".into() };
+    let data=serde_json::to_vec(&tx).unwrap();
+    for p in load_peers(){ if connect_and_send(&p,&data).is_ok(){ println!("✓ Faucet do {} via {}",addr,p); return; } }
+    println!("✗ Faucet nie powiódł się – brak działających nodów");
+}
+
+// ---------- Import / eksport ----------
+fn import_dat(path:&str){ let mut buf=[0u8;32]; if File::open(path).and_then(|mut f|f.read_exact(&mut buf)).is_ok(){ if let Ok(sk)=SecretKey::from_slice(&buf){ let pk=PublicKey::from_secret_key(&Secp256k1::new(),&sk); save_default_wallet(&sk); println!("✓ Zaimportowano plik. Public Key: {}",pk); return; } } println!("✗ Nie udało się zaimportować"); }
+fn export_dat(path:&str){ if let Some(sk)=load_default_wallet(){ if fs::write(path,sk.secret_bytes()).is_ok(){ println!("✓ Zapisano do {}",path);} else { println!("✗ Błąd zapisu"); } } else { println!("✗ Brak domyślnego portfela"); } }
+
+// ---------- CLI ----------
+fn help(){ println!("Komendy:\n  help\n  create-wallet\n  import-priv <hex>\n  import-dat <plik>\n  export-dat <plik>\n  default-wallet\n  send <to> <amount> [n=2]\n  send-priv <priv> <to> <amount> [n=2]\n  balance [address]\n  faucet <address>\n  exit"); }
+
+// Dodano funkcję create_wallet
 fn create_wallet() {
     let secp = Secp256k1::new();
-    let (secret_key, public_key) = secp.generate_keypair(&mut thread_rng());
-    println!("Private Key: {}", hex::encode(secret_key.secret_bytes()));
-    println!("Public Key: {}", public_key);
+    let mut rng = rand::thread_rng();
+    let (sk, pk) = secp.generate_keypair(&mut rng);
+    save_default_wallet(&sk);
+    println!("✓ Utworzono nowy portfel.");
+    println!("Private: {}", hex::encode(sk.secret_bytes()));
+    println!("Public : {}", pk);
 }
 
-fn export_wallet(private_key: &str, filename: &str) {
-    if let Ok(bytes) = hex::decode(private_key) {
-        if let Ok(mut file) = File::create(filename) {
-            if file.write_all(&bytes).is_ok() {
-                println!("✓ Portfel zapisany do pliku: {}", filename);
-                return;
+// Dodano funkcję import_priv
+fn import_priv(priv_hex: &str) {
+    match hex::decode(priv_hex) {
+        Ok(bytes) => match SecretKey::from_slice(&bytes) {
+            Ok(sk) => {
+                let pk = PublicKey::from_secret_key(&Secp256k1::new(), &sk);
+                save_default_wallet(&sk);
+                println!("✓ Zaimportowano klucz prywatny. Public Key: {}", pk);
             }
-        }
-    }
-    println!("✗ Nie udało się zapisać portfela");
-}
-
-fn import_wallet(key: &str) {
-    let secret_key = SecretKey::from_slice(&hex::decode(key).unwrap()).unwrap();
-    let secp = Secp256k1::new();
-    let public_key = PublicKey::from_secret_key(&secp, &secret_key);
-    println!("Public Key: {}", public_key);
-}
-
-fn send_tx(from_priv: &str, to: &str, amount: u64, peers: usize) {
-    let secp = Secp256k1::new();
-    let secret_key = SecretKey::from_slice(&hex::decode(from_priv).unwrap()).unwrap();
-    let public_key = PublicKey::from_secret_key(&secp, &secret_key);
-
-    let tx_content = format!("{}{}{}", public_key, to, amount);
-    let hash = sha2::Sha256::digest(tx_content.as_bytes());
-    let msg = Message::from_slice(&hash).unwrap();
-    let sig = secp.sign_ecdsa(msg, &secret_key);
-    let tx = Transaction {
-        from: format!("{}", public_key),
-        to: to.to_string(),
-        amount,
-        signature: hex::encode(sig.serialize_compact()),
-    };
-
-    let json = serde_json::to_string(&tx).unwrap();
-
-    if let Ok(file) = File::open("nodes.txt") {
-        let reader = BufReader::new(file);
-        let all_nodes: Vec<String> = reader.lines().flatten().collect();
-        let mut rng = thread_rng();
-        let mut sent_to = HashSet::new();
-
-        for node in all_nodes.choose_multiple(&mut rng, peers) {
-            if sent_to.contains(node) {
-                continue;
-            }
-
-            if let Ok(mut stream) = TcpStream::connect(node.trim()) {
-                let _ = stream.write_all(json.as_bytes());
-                println!("✓ Transakcja wysłana do noda: {}", node.trim());
-                sent_to.insert(node.clone());
-            }
-        }
-
-        if sent_to.is_empty() {
-            println!("✗ Nie udało się połączyć z żadnym nodem z nodes.txt");
-        }
-    } else {
-        println!("✗ Brak pliku nodes.txt");
+            Err(_) => println!("✗ Niepoprawny klucz prywatny"),
+        },
+        Err(_) => println!("✗ Niepoprawny format hex"),
     }
 }
 
-fn show_balance(address: &str) {
-    let query = format!("/balance/{}", address);
-    if let Ok(file) = File::open("nodes.txt") {
-        let reader = BufReader::new(file);
-        for line in reader.lines().flatten() {
-            if let Ok(mut stream) = TcpStream::connect(line.trim()) {
-                let _ = stream.write_all(query.as_bytes());
-                let mut buf = String::new();
-                if let Ok(_) = stream.read_to_string(&mut buf) {
-                    println!("Saldo portfela {}: {}", address, buf.trim());
-                    return;
-                }
-            }
-        }
-        println!("✗ Nie udało się odczytać salda z żadnego noda");
-    } else {
-        println!("✗ Brak pliku nodes.txt");
-    }
-}
-
-fn faucet_transfer(address: &str) {
-    let tx = Transaction {
-        from: String::from(""),
-        to: address.to_string(),
-        amount: 1000,
-        signature: String::from("reward"),
-    };
-
-    let json = serde_json::to_string(&tx).unwrap();
-    if let Ok(file) = File::open("nodes.txt") {
-        let reader = BufReader::new(file);
-        for line in reader.lines().flatten() {
-            if let Ok(mut stream) = TcpStream::connect(line.trim()) {
-                let _ = stream.write_all(json.as_bytes());
-                println!("✓ Przelano 1000 tokenów do portfela: {}", address);
-                return;
-            }
-        }
-        println!("✗ Nie udało się połączyć z żadnym nodem z nodes.txt");
-    } else {
-        println!("✗ Brak pliku nodes.txt");
-    }
-}
-
-fn load_default_wallet() -> Option<SecretKey> {
-    if let Ok(hex_str) = std::fs::read_to_string(".default_wallet") {
-        if let Ok(bytes) = hex::decode(hex_str.trim()) {
-            return SecretKey::from_slice(&bytes).ok();
-        }
-    }
-    None
-}
-
-fn main() {
-    use std::sync::{Arc, Mutex};
-    use std::thread;
-
-    let peer_count = Arc::new(Mutex::new(0));
-    let count_clone = Arc::clone(&peer_count);
-
-    println!("Wallet CLI – dostępne polecenia: create-wallet, import-wallet <priv>, import-wallet <plik>, export-wallet <priv> <plik>, default-wallet, send <to> <amount> [peers], balance [address], faucet <address>, exit");
+fn main(){ println!("Wallet CLI (peers.json + bootstrap)");
     loop {
-        print!("> ");
-        let _ = io::stdout().flush();
-        let mut input = String::new();
-        if io::stdin().read_line(&mut input).is_ok() {
-            let args: Vec<&str> = input.trim().split_whitespace().collect();
-            if args.is_empty() {
-                continue;
+        print!("> "); let _=io::stdout().flush();
+        let mut line=String::new(); if io::stdin().read_line(&mut line).is_err(){continue;}
+        let a:Vec<&str>=line.trim().split_whitespace().collect(); if a.is_empty(){continue;}
+        match a[0] {
+            "help" => help(),
+            "create-wallet" => create_wallet(),
+            "import-priv" if a.len() == 2 => import_priv(a[1]),
+            "import-dat" if a.len() == 2 => import_dat(a[1]),
+            "export-dat" if a.len() == 2 => export_dat(a[1]),
+            "default-wallet" => {
+                if let Some(sk) = load_default_wallet() {
+                    let pk = PublicKey::from_secret_key(&Secp256k1::new(), &sk);
+                    println!("Private: {}", hex::encode(sk.secret_bytes()));
+                    println!("Public : {}", pk);
+                } else { println!("Brak domyślnego portfela"); }
             }
-            match args[0] {
-                "--help" | "help" => {
-                    println!("Dostępne polecenia:");
-                    println!("  create-wallet");
-                    println!("  import-wallet <privatny_klucz>");
-                    println!("  import-wallet <plik.dat>");
-                    println!("  export-wallet <privatny_klucz> <plik.dat>");
-                    println!("  default-wallet");
-                    println!("  send <adres_docelowy> <ilość> [liczba_node'ów]");
-                    println!("  balance [adres_publiczny]");
-                    println!("  faucet <adres_publiczny>");
-                    println!("  exit");
-                },
-                "default-wallet" => {
-                    if let Some(sk) = load_default_wallet() {
-                        let secp = Secp256k1::new();
-                        let pk = PublicKey::from_secret_key(&secp, &sk);
-                        println!("Domyślny portfel:");
-                        println!("Private Key: {}", hex::encode(sk.secret_bytes()));
-                        println!("Public Key: {}", pk);
-                    } else {
-                        println!("Brak ustawionego domyślnego portfela.");
-                    }
-                },
-                "import-wallet" if args.len() == 2 => {
-                    if let Ok(mut file) = File::open(args[1]) {
-                        let mut buf = Vec::new();
-                        if file.read_to_end(&mut buf).is_ok() {
-                            if let Ok(sk) = SecretKey::from_slice(&buf) {
-                                std::fs::write(".default_wallet", hex::encode(sk.secret_bytes())).unwrap();
-                                let secp = Secp256k1::new();
-                                let pk = PublicKey::from_secret_key(&secp, &sk);
-                                println!("✓ Portfel z pliku zaimportowany i ustawiony jako domyślny:");
-                                println!("Public Key: {}", pk);
-                            }
-                        }
-                    }
-                },
-                "export-wallet" if args.len() == 3 => export_wallet(args[1], args[2]),
-                "create-wallet" => {
-                    if std::path::Path::new(".default_wallet").exists() {
-                        println!("⚠️  Domyślny portfel już istnieje. Jeśli go nie zapiszesz, środki mogą przepaść.");
-                    }
-                    let secp = Secp256k1::new();
-                    let (secret_key, public_key) = secp.generate_keypair(&mut thread_rng());
-                    std::fs::write(".default_wallet", hex::encode(secret_key.secret_bytes())).unwrap();
-                    println!("Private Key: {}", hex::encode(secret_key.secret_bytes()));
-                    println!("Public Key: {}", public_key);
-                },
-                "import-wallet" if args.len() == 2 => {
-                    let secret_key = SecretKey::from_slice(&hex::decode(args[1]).unwrap()).unwrap();
-                    let secp = Secp256k1::new();
-                    let public_key = PublicKey::from_secret_key(&secp, &secret_key);
-                    std::fs::write(".default_wallet", hex::encode(secret_key.secret_bytes())).unwrap();
-                    println!("Public Key: {}", public_key);
-                },
-                "send" if args.len() >= 3 => {
-                    let peers = if args.len() >= 4 {
-                        args[3].parse().unwrap_or(2)
-                    } else {
-                        2
-                    };
-                    let to = args[1];
-                    let amount = args[2].parse().unwrap_or(0);
-                    if let Some(sk) = load_default_wallet() {
-                        send_tx(&hex::encode(sk.secret_bytes()), to, amount, peers);
-                    } else {
-                        println!("✗ Brak załadowanego domyślnego portfela.");
-                    }
-                },
-                "balance" if args.len() == 2 => show_balance(args[1]),
-                "balance" => {
-                    if let Some(sk) = load_default_wallet() {
-                        let secp = Secp256k1::new();
-                        let pk = PublicKey::from_secret_key(&secp, &sk);
-                        show_balance(&format!("{}", pk));
-                    } else {
-                        println!("✗ Brak załadowanego domyślnego portfela.");
-                    }
-                },
-                "export-wallet" if args.len() == 3 => export_wallet(args[1], args[2]),
-                "create-wallet" => create_wallet(),
-                "import-wallet" if args.len() == 2 => import_wallet(args[1]),
-                "send" if args.len() >= 4 => {
-                    let peers = if args.len() >= 5 {
-                        args[4].parse().unwrap_or(2)
-                    } else {
-                        2
-                    };
-                    send_tx(args[1], args[2], args[3].parse().unwrap_or(0), peers)
-                },
-                "balance" if args.len() == 2 => show_balance(args[1]),
-                "faucet" if args.len() == 2 => faucet_transfer(args[1]),
-                "exit" => break,
-                _ => println!("Nieznane polecenie lub błędne argumenty"),
+            "send" if a.len() >= 3 => {
+                if let Ok(amount) = a[2].parse() {
+                    let n = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(2);
+                    send_default(a[1], amount, n);
+                } else { println!("Nieprawidłowa kwota"); }
             }
+            "send-priv" if a.len() >= 4 => {
+                if let Ok(amount) = a[3].parse() {
+                    let n = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(2);
+                    send_priv(a[1], a[2], amount, n);
+                } else { println!("Nieprawidłowa kwota"); }
+            }
+            "balance" => {
+                if a.len() == 2 { balance(a[1]); }
+                else if let Some(sk) = load_default_wallet() {
+                    let pk = PublicKey::from_secret_key(&Secp256k1::new(), &sk);
+                    balance(&pk.to_string());
+                } else { println!("Brak domyślnego portfela"); }
+            }
+            "faucet" if a.len() == 2 => faucet(a[1]),
+            "exit" => break,
+            _ => println!("Nieznana komenda – wpisz 'help'"),
         }
     }
 }
+

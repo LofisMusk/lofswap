@@ -2,3 +2,6 @@ target
 node-cli/target
 wallet-cli/target
 blockchain-core/target
+mempool.json
+blockchain.json
+peers.json
