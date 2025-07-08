@@ -109,7 +109,13 @@ async fn main() {
         let peers      = peers.clone();
         tokio::spawn(async move {
             let addr = format!("0.0.0.0:{LISTEN_PORT}");
-            let listener = TcpListener::bind(addr).await.expect("bind");
+            let listener = match TcpListener::bind(addr).await {
+                Ok(l) => l,
+                Err(e) => {
+                    eprintln!("[DEBUG] Failed to bind to port {LISTEN_PORT}: {e}. The port may be closed, in use, or blocked by a firewall.");
+                    return;
+                }
+            };
             println!("Node nasłuchuje na porcie {LISTEN_PORT}");
 
             loop {
