@@ -7,7 +7,7 @@ use std::{
     collections::HashMap,
     fs::OpenOptions,
     io::{self, Write},
-    net::{TcpStream as StdTcpStream, ToSocketAddrs},
+    net::{IpAddr, TcpStream as StdTcpStream, ToSocketAddrs},
     path::Path,
     sync::Arc,
     time::Duration,
@@ -19,6 +19,62 @@ use tokio::{
     time::sleep,
 };
 
+use igd::{search_gateway, PortMappingProtocol};
+use local_ip_address::local_ip;
+use tokio::task::spawn_blocking;
+
+pub async fn setup_upnp(listen_port: u16) {
+    // szukamy bramki w spawnie blokującym
+    let gw = match spawn_blocking(|| search_gateway(Default::default())).await {
+        Ok(Ok(gw)) => gw,
+        _ => {
+            eprintln!("UPnP: nie znaleziono bramki");
+            return;
+        }
+    };
+
+    // lokalny adres IPv4
+    let IpAddr::V4(lan_ip) = local_ip().expect("IP").into() else {
+        eprintln!("Brak IPv4 w LAN – UPnP pominięte");
+        return;
+    };
+
+    let lifetime = 3600u32;
+
+    let gw = Arc::new(gw);
+
+    if let Err(e) = gw.clone().add_port(
+        PortMappingProtocol::TCP,
+        listen_port,        // external
+        std::net::SocketAddrV4::new(lan_ip, listen_port), // internal addr (SocketAddrV4)
+        lifetime,           // lease duration
+        "lofswap node",    // description
+    ) {
+        eprintln!("UPnP add_port: {e}");
+        return;
+    }
+    println!("✓ UPnP: {listen_port} => {lan_ip}:{listen_port}");
+
+    // odnawiaj mapping co 55 min
+    let gw = gw.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(lifetime as u64 - 300)).await;
+            let gw = gw.clone();
+            let _ = spawn_blocking(move || {
+                gw.add_port(
+                    PortMappingProtocol::TCP,
+                    listen_port,
+                    std::net::SocketAddrV4::new(lan_ip, listen_port),
+                    lifetime,
+                    "lofswap node",
+                )
+            })
+            .await;
+        }
+    });
+}
+
 // ───── ustawienia ─────────────────────────────────────────────
 const LISTEN_PORT: u16 = 6000;
 const BOOTSTRAP_NODES: &[&str] = &[
@@ -26,6 +82,8 @@ const BOOTSTRAP_NODES: &[&str] = &[
     "mekambe.ddns.net:6001",
 ];
 // ──────────────────────────────────────────────────────────────
+
+
 
 fn balances(chain: &[Block]) -> HashMap<String, i128> {
     let mut map = HashMap::new();
