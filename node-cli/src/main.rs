@@ -100,6 +100,8 @@ fn balances(chain: &[Block]) -> HashMap<String, i128> {
 
 #[tokio::main]
 async fn main() {
+    println!("[DEBUG] Attempting UPnP port mapping...");
+    setup_upnp(LISTEN_PORT).await;
     let blockchain = Arc::new(Mutex::new(load_chain()));
     let peers     = Arc::new(Mutex::new(load_peers()));
 
