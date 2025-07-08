@@ -135,6 +135,9 @@ async fn main() {
                             // ----- zwróć listę peerów -----
                             let p = peers.lock().await;
                             let _ = stream.write_all(serde_json::to_string(&*p).unwrap().as_bytes()).await;
+                        } else if txt.trim() == "/chain" {
+                            let chain = blockchain.lock().await;
+                            let _ = stream.write_all(serde_json::to_string(&*chain).unwrap().as_bytes()).await;
                         } else if let Ok(tx) = serde_json::from_slice::<Transaction>(slice) {
                             // ----- transakcja -----
                             let chain = blockchain.lock().await;
