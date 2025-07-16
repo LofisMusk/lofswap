@@ -18,63 +18,31 @@ use tokio::{
     sync::Mutex,
     time::sleep,
 };
-
-use igd::{search_gateway, PortMappingProtocol};
-use local_ip_address::local_ip;
-use tokio::task::spawn_blocking;
-
-pub async fn setup_upnp(listen_port: u16) {
-    // szukamy bramki w spawnie blokującym
-    let gw = match spawn_blocking(|| search_gateway(Default::default())).await {
-        Ok(Ok(gw)) => gw,
-        _ => {
-            eprintln!("UPnP: nie znaleziono bramki");
-            return;
-        }
-    };
-
-    // lokalny adres IPv4
-    let IpAddr::V4(lan_ip) = local_ip().expect("IP").into() else {
-        eprintln!("Brak IPv4 w LAN – UPnP pominięte");
-        return;
-    };
-
-    let lifetime = 3600u32;
-
-    let gw = Arc::new(gw);
-
-    if let Err(e) = gw.clone().add_port(
-        PortMappingProtocol::TCP,
-        listen_port,        // external
-        std::net::SocketAddrV4::new(lan_ip, listen_port), // internal addr (SocketAddrV4)
-        lifetime,           // lease duration
-        "lofswap node",    // description
-    ) {
-        eprintln!("UPnP add_port: {e}");
-        return;
+tokio::spawn(async move {
+    loop {
+        setup_upnp(listen_port); // ponowne ustawienie
+        tokio::time::sleep(Duration::from_secs(1800)).await; // co 30 minut
     }
-    println!("✓ UPnP: {listen_port} => {lan_ip}:{listen_port}");
+});
 
-    // odnawiaj mapping co 55 min
-    let gw = gw.clone();
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(Duration::from_secs(lifetime as u64 - 300)).await;
-            let gw = gw.clone();
-            let _ = spawn_blocking(move || {
-                gw.add_port(
-                    PortMappingProtocol::TCP,
-                    listen_port,
-                    std::net::SocketAddrV4::new(lan_ip, listen_port),
-                    lifetime,
-                    "lofswap node",
-                )
-            })
-            .await;
+
+
+use easy_upnp::{add_ports, UpnpConfig, PortMappingProtocol};
+fn setup_upnp(port: u16) {
+    let cfg = UpnpConfig {
+        address: None,
+        port,
+        protocol: PortMappingProtocol::TCP,
+        duration: 30,
+        comment: "lofswap node".to_string(),
+    };
+    for result in add_ports(std::iter::once(cfg)) {
+        match result {
+            Ok(()) => println!("✓ UPnP: port {} przekierowany", port),
+            Err(e) => eprintln!("⚠️ UPnP error: {}", e),
         }
-    });
+    }
 }
-
 // ───── ustawienia ─────────────────────────────────────────────
 const LISTEN_PORT: u16 = 6000;
 const BOOTSTRAP_NODES: &[&str] = &[
@@ -101,7 +69,7 @@ fn balances(chain: &[Block]) -> HashMap<String, i128> {
 #[tokio::main]
 async fn main() {
     println!("[DEBUG] Attempting UPnP port mapping...");
-    setup_upnp(LISTEN_PORT).await;
+    setup_upnp(LISTEN_PORT);
     let blockchain = Arc::new(Mutex::new(load_chain()));
     let peers     = Arc::new(Mutex::new(load_peers()));
 
