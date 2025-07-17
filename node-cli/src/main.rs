@@ -4,13 +4,7 @@ use secp256k1::{ecdsa::Signature, Message, PublicKey, Secp256k1};
 use serde_json;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
-    fs::OpenOptions,
-    io::{self, Write},
-    net::{IpAddr, TcpStream as StdTcpStream, ToSocketAddrs},
-    path::Path,
-    sync::Arc,
-    time::Duration,
+    collections::HashMap, fs::OpenOptions, io::{self, Write}, net::{IpAddr, TcpStream as StdTcpStream, ToSocketAddrs}, path::Path, result, sync::Arc, time::Duration
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -18,31 +12,63 @@ use tokio::{
     sync::Mutex,
     time::sleep,
 };
-tokio::spawn(async move {
-    loop {
-        setup_upnp(listen_port); // ponowne ustawienie
-        tokio::time::sleep(Duration::from_secs(1800)).await; // co 30 minut
-    }
-});
+use easy_upnp::{add_ports, delete_ports, UpnpConfig, PortMappingProtocol};
 
-
-
-use easy_upnp::{add_ports, UpnpConfig, PortMappingProtocol};
-fn setup_upnp(port: u16) {
-    let cfg = UpnpConfig {
+pub async fn setup_upnp(port: u16) -> Result<(), ()> {
+    let cfg = Arc::new(UpnpConfig {
         address: None,
         port,
         protocol: PortMappingProtocol::TCP,
-        duration: 30,
+        duration: 3600, // 1 godzina
         comment: "lofswap node".to_string(),
-    };
-    for result in add_ports(std::iter::once(cfg)) {
-        match result {
-            Ok(()) => println!("✓ UPnP: port {} przekierowany", port),
-            Err(e) => eprintln!("⚠️ UPnP error: {}", e),
-        }
+    });
+
+    // Rejestracja handlera SIGINT/SIGTERM (Ctrl+C) do usunięcia portu
+    {
+        let cfg_for_cleanup = cfg.clone();
+        ctrlc::set_handler(move || {
+            let cleanup_cfg = UpnpConfig {
+                address: cfg_for_cleanup.address.clone(),
+                port: cfg_for_cleanup.port,
+                protocol: cfg_for_cleanup.protocol,
+                duration: cfg_for_cleanup.duration,
+                comment: cfg_for_cleanup.comment.clone(),
+            };
+            for result in delete_ports(std::iter::once(cleanup_cfg)) {
+                match result {
+                    Ok(_) => println!("🔌 UPnP: port {} usunięty", port),
+                    Err(e) => eprintln!("⚠️ Błąd usuwania UPnP: {}", e),
+                }
+            }
+            std::process::exit(0);
+        }).expect("Nie udało się ustawić handlera SIGINT");
     }
+
+    // Główna pętla odświeżania przekierowania portu
+    loop {
+        let current_cfg = UpnpConfig {
+            address: cfg.address.clone(),
+            port: cfg.port,
+            protocol: cfg.protocol,
+            duration: cfg.duration,
+            comment: cfg.comment.clone(),
+        };
+
+        for result in add_ports(std::iter::once(current_cfg)) {
+            match result {
+                Ok(()) => println!("✓ UPnP: port {} przekierowany", port),
+                Err(e) => eprintln!("⚠️ UPnP błąd: {}", e),
+            }
+        }
+
+        sleep(Duration::from_secs(55 * 60)).await;
+    }
+
+    // Nigdy tu nie trafimy, ale kompilator wymaga zwrotu
+    #[allow(unreachable_code)]
+    Ok(())
 }
+
 // ───── ustawienia ─────────────────────────────────────────────
 const LISTEN_PORT: u16 = 6000;
 const BOOTSTRAP_NODES: &[&str] = &[
@@ -69,7 +95,12 @@ fn balances(chain: &[Block]) -> HashMap<String, i128> {
 #[tokio::main]
 async fn main() {
     println!("[DEBUG] Attempting UPnP port mapping...");
-    setup_upnp(LISTEN_PORT);
+tokio::spawn(async move {
+    match setup_upnp(LISTEN_PORT).await {
+        Ok(_) => println!("[DEBUG] UPnP port mapping setup complete."),
+        Err(_) => eprintln!("[DEBUG] UPnP setup failed. Continuing without UPnP."),
+    }
+});
     let blockchain = Arc::new(Mutex::new(load_chain()));
     let peers     = Arc::new(Mutex::new(load_peers()));
 
@@ -336,3 +367,4 @@ async fn sync_chain(blockchain: &Arc<Mutex<Vec<Block>>>) {
         }
     }
 }
+
