@@ -22,8 +22,7 @@ pub async fn setup_upnp(port: u16) -> Result<(), ()> {
         duration: 3600, // 1 godzina
         comment: "lofswap node".to_string(),
     });
-
-    // Rejestracja handlera SIGINT/SIGTERM (Ctrl+C) do usunięcia portu
+ // TODO: remove this and move logging into the main method
     {
         let cfg_for_cleanup = cfg.clone();
         ctrlc::set_handler(move || {
@@ -95,6 +94,7 @@ fn balances(chain: &[Block]) -> HashMap<String, i128> {
 #[tokio::main]
 async fn main() {
     println!("[DEBUG] Attempting UPnP port mapping...");
+    // TODO: make this work
 tokio::spawn(async move {
     match setup_upnp(LISTEN_PORT).await {
         Ok(_) => println!("[DEBUG] UPnP port mapping setup complete."),
