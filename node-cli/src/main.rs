@@ -1,17 +1,10 @@
 // === node-cli/src/main.rs ===
 use blockchain_core::{Block, Transaction};
-use secp256k1::{Message, PublicKey, Secp256k1, ecdsa::Signature};
+use secp256k1::{ecdsa::Signature, Message, PublicKey, Secp256k1};
 use serde_json;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
-    fs::OpenOptions,
-    io::{self, Write},
-    net::{IpAddr, TcpStream as StdTcpStream, ToSocketAddrs},
-    path::Path,
-    result,
-    sync::Arc,
-    time::Duration,
+    collections::HashMap, fs::OpenOptions, io::{self, Write}, net::{IpAddr, TcpStream as StdTcpStream, ToSocketAddrs}, path::Path, result, sync::Arc, time::Duration
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -19,35 +12,71 @@ use tokio::{
     sync::Mutex,
     time::sleep,
 };
-//use easy_upnp::{add_ports, delete_ports, UpnpConfig, PortMappingProtocol};
-use ctrlc;
-use igd::{PortMappingProtocol, aio::search_gateway};
-use local_ip_address::local_ip;
-use std::net::SocketAddrV4;
+use easy_upnp::{add_ports, delete_ports, UpnpConfig, PortMappingProtocol};
 
-pub async fn setup_upnp(port: u16) -> Result<(), Box<dyn std::error::Error>> {
-    let gateway = search_gateway(Default::default()).await?;
-    let local_ip = local_ip_address::local_ip()?; // ← musisz mieć `local_ip_address` crate
+pub async fn setup_upnp(port: u16) -> Result<(), ()> {
+    let cfg = Arc::new(UpnpConfig {
+        address: None,
+        port,
+        protocol: PortMappingProtocol::TCP,
+        duration: 3600, // 1 godzina
+        comment: "lofswap node".to_string(),
+    });
+ // TODO: remove this and move logging into the main method
+    {
+        let cfg_for_cleanup = cfg.clone();
+        ctrlc::set_handler(move || {
+            let cleanup_cfg = UpnpConfig {
+                address: cfg_for_cleanup.address.clone(),
+                port: cfg_for_cleanup.port,
+                protocol: cfg_for_cleanup.protocol,
+                duration: cfg_for_cleanup.duration,
+                comment: cfg_for_cleanup.comment.clone(),
+            };
+            for result in delete_ports(std::iter::once(cleanup_cfg)) {
+                match result {
+                    Ok(_) => println!("🔌 UPnP: port {} usunięty", port),
+                    Err(e) => eprintln!("⚠️ Błąd usuwania UPnP: {}", e),
+                }
+            }
+            std::process::exit(0);
+        }).expect("Nie udało się ustawić handlera SIGINT");
+    }
 
-    let ip = match local_ip {
-        std::net::IpAddr::V4(ipv4) => ipv4,
-        _ => return Err("Only IPv4 supported".into()),
-    };
+    // Główna pętla odświeżania przekierowania portu
+    loop {
+        let current_cfg = UpnpConfig {
+            address: cfg.address.clone(),
+            port: cfg.port,
+            protocol: cfg.protocol,
+            duration: cfg.duration,
+            comment: cfg.comment.clone(),
+        };
 
-    let socket = SocketAddrV4::new(ip, port);
+        for result in add_ports(std::iter::once(current_cfg)) {
+            match result {
+                Ok(()) => println!("✓ UPnP: port {} przekierowany", port),
+                Err(e) => eprintln!("⚠️ UPnP błąd: {}", e),
+            }
+        }
 
-    gateway
-        .add_port(PortMappingProtocol::TCP, port, socket, 3600, "lofswap node")
-        .await?;
+        sleep(Duration::from_secs(55 * 60)).await;
+    }
 
-    println!("✓ Port {} przekierowany na {}", port, socket);
+    // Nigdy tu nie trafimy, ale kompilator wymaga zwrotu
+    #[allow(unreachable_code)]
     Ok(())
 }
 
 // ───── ustawienia ─────────────────────────────────────────────
 const LISTEN_PORT: u16 = 6000;
-const BOOTSTRAP_NODES: &[&str] = &["mekambe.ddns.net:6000", "mekambe.ddns.net:6001"];
+const BOOTSTRAP_NODES: &[&str] = &[
+    "mekambe.ddns.net:6000",
+    "mekambe.ddns.net:6001",
+];
 // ──────────────────────────────────────────────────────────────
+
+
 
 fn balances(chain: &[Block]) -> HashMap<String, i128> {
     let mut map = HashMap::new();
@@ -65,25 +94,32 @@ fn balances(chain: &[Block]) -> HashMap<String, i128> {
 #[tokio::main]
 async fn main() {
     println!("[DEBUG] Attempting UPnP port mapping...");
+<<<<<<< HEAD
     if let Err(e) = setup_upnp(LISTEN_PORT).await {
         eprintln!("[DEBUG] UPnP port mapping failed. Continuing without it, make sure to manually forward port 6000 in order to connect to the lofswap network");
     };
+=======
+>>>>>>> parent of 0bc47e9 (upnp update)
     // TODO: make this work
+tokio::spawn(async move {
+    match setup_upnp(LISTEN_PORT).await {
+        Ok(_) => println!("[DEBUG] UPnP port mapping setup complete."),
+        Err(_) => eprintln!("[DEBUG] UPnP setup failed. Continuing without UPnP."),
+    }
+});
     let blockchain = Arc::new(Mutex::new(load_chain()));
-    let peers = Arc::new(Mutex::new(load_peers()));
+    let peers     = Arc::new(Mutex::new(load_peers()));
 
     // ─── 1. Serwer TCP (nasłuch na LISTEN_PORT) ───────────────
     {
         let blockchain = blockchain.clone();
-        let peers = peers.clone();
+        let peers      = peers.clone();
         tokio::spawn(async move {
             let addr = format!("0.0.0.0:{LISTEN_PORT}");
             let listener = match TcpListener::bind(addr).await {
                 Ok(l) => l,
                 Err(e) => {
-                    eprintln!(
-                        "[DEBUG] Failed to bind to port {LISTEN_PORT}: {e}. The port may be closed, in use, or blocked by a firewall."
-                    );
+                    eprintln!("[DEBUG] Failed to bind to port {LISTEN_PORT}: {e}. The port may be closed, in use, or blocked by a firewall.");
                     return;
                 }
             };
@@ -94,7 +130,7 @@ async fn main() {
                     let mut buf = vec![0; 4096];
                     if let Ok(n) = stream.read(&mut buf).await {
                         let slice = &buf[..n];
-                        let txt = String::from_utf8_lossy(slice);
+                        let txt   = String::from_utf8_lossy(slice);
 
                         if txt.starts_with("/balance/") {
                             // ----- saldo -----
@@ -103,36 +139,24 @@ async fn main() {
                             let mut bal: i128 = 0;
                             for b in chain.iter() {
                                 for t in &b.transactions {
-                                    if t.to == addr {
-                                        bal += t.amount as i128
-                                    }
-                                    if t.from == addr {
-                                        bal -= t.amount as i128
-                                    }
+                                    if t.to == addr { bal += t.amount as i128 }
+                                    if t.from == addr { bal -= t.amount as i128 }
                                 }
                             }
                             let _ = stream.write_all(bal.to_string().as_bytes()).await;
                         } else if txt.trim() == "/peers" {
                             // ----- zwróć listę peerów -----
                             let p = peers.lock().await;
-                            let _ = stream
-                                .write_all(serde_json::to_string(&*p).unwrap().as_bytes())
-                                .await;
+                            let _ = stream.write_all(serde_json::to_string(&*p).unwrap().as_bytes()).await;
                         } else if txt.trim() == "/chain" {
                             let chain = blockchain.lock().await;
-                            let _ = stream
-                                .write_all(serde_json::to_string(&*chain).unwrap().as_bytes())
-                                .await;
+                            let _ = stream.write_all(serde_json::to_string(&*chain).unwrap().as_bytes()).await;
                         } else if let Ok(tx) = serde_json::from_slice::<Transaction>(slice) {
                             // ----- transakcja -----
                             let chain = blockchain.lock().await;
                             if is_tx_valid(&tx, &chain) {
                                 println!("✓ TX do mempoolu");
-                                if let Ok(mut f) = OpenOptions::new()
-                                    .create(true)
-                                    .append(true)
-                                    .open("mempool.json")
-                                {
+                                if let Ok(mut f) = OpenOptions::new().create(true).append(true).open("mempool.json") {
                                     let _ = writeln!(f, "{}", serde_json::to_string(&tx).unwrap());
                                 }
                             } else {
@@ -187,10 +211,7 @@ async fn main() {
                 let mut bal = balances(&chain);
                 let mut chosen = Vec::new();
                 for tx in parsed {
-                    if tx.from.is_empty() {
-                        chosen.push(tx);
-                        continue;
-                    }
+                    if tx.from.is_empty() { chosen.push(tx); continue; }
                     let e = bal.entry(tx.from.clone()).or_insert(0);
                     if *e >= tx.amount as i128 {
                         *e -= tx.amount as i128;
@@ -200,10 +221,7 @@ async fn main() {
                         println!("✗ TX {} pominięty – saldo {}", tx.signature, e);
                     }
                 }
-                if chosen.is_empty() {
-                    println!("Brak TX");
-                    continue;
-                }
+                if chosen.is_empty() { println!("Brak TX"); continue; }
                 let _ = std::fs::remove_file("mempool.json");
 
                 let prev = chain.last().unwrap().hash.clone();
@@ -228,14 +246,12 @@ async fn main() {
                         .to_socket_addrs()
                         .ok()
                         .and_then(|mut i| i.next())
-                        .and_then(|a| {
-                            StdTcpStream::connect_timeout(&a, Duration::from_millis(300)).ok()
-                        })
-                        .map(|_| "online")
-                        .unwrap_or("offline");
+                        .and_then(|a| StdTcpStream::connect_timeout(&a, Duration::from_millis(300)).ok())
+                        .map(|_| "online").unwrap_or("offline");
                     println!("{peer} ({status})");
                 }
             }
+<<<<<<< HEAD
             "clear-chain" => {
                 let _ = std::fs::remove_file("blockchain.json");
                 println!("Chain usunięty");
@@ -252,13 +268,16 @@ async fn main() {
                 }
             }
 
+=======
+            "clear-chain" => { let _ = std::fs::remove_file("blockchain.json"); println!("Chain usunięty"); }
+>>>>>>> parent of 0bc47e9 (upnp update)
             "exit" => break,
             _ => println!("?"),
         }
     }
 }
 /* ---- reszta pliku: is_tx_valid, save_chain, load_chain, load_peers,
-save_peers, broadcast_to_known_nodes, sync_chain – bez zmian ---- */
+        save_peers, broadcast_to_known_nodes, sync_chain – bez zmian ---- */
 
 fn is_tx_valid(tx: &Transaction, chain: &[Block]) -> bool {
     if tx.from.is_empty() && tx.signature == "reward" {
@@ -303,10 +322,7 @@ fn is_tx_valid(tx: &Transaction, chain: &[Block]) -> bool {
     };
 
     let already_in_chain = chain.iter().any(|block| {
-        block
-            .transactions
-            .iter()
-            .any(|btx| btx.signature == tx.signature)
+        block.transactions.iter().any(|btx| btx.signature == tx.signature)
     });
 
     if already_in_chain {
@@ -376,3 +392,4 @@ async fn sync_chain(blockchain: &Arc<Mutex<Vec<Block>>>) {
         }
     }
 }
+
