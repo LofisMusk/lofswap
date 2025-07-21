@@ -94,12 +94,10 @@ fn balances(chain: &[Block]) -> HashMap<String, i128> {
 #[tokio::main]
 async fn main() {
     println!("[DEBUG] Attempting UPnP port mapping...");
-<<<<<<< HEAD
     if let Err(e) = setup_upnp(LISTEN_PORT).await {
         eprintln!("[DEBUG] UPnP port mapping failed. Continuing without it, make sure to manually forward port 6000 in order to connect to the lofswap network");
     };
-=======
->>>>>>> parent of 0bc47e9 (upnp update)
+
     // TODO: make this work
 tokio::spawn(async move {
     match setup_upnp(LISTEN_PORT).await {
@@ -251,7 +249,6 @@ tokio::spawn(async move {
                     println!("{peer} ({status})");
                 }
             }
-<<<<<<< HEAD
             "clear-chain" => {
                 let _ = std::fs::remove_file("blockchain.json");
                 println!("Chain usunięty");
@@ -268,9 +265,6 @@ tokio::spawn(async move {
                 }
             }
 
-=======
-            "clear-chain" => { let _ = std::fs::remove_file("blockchain.json"); println!("Chain usunięty"); }
->>>>>>> parent of 0bc47e9 (upnp update)
             "exit" => break,
             _ => println!("?"),
         }
