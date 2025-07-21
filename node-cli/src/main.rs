@@ -66,7 +66,7 @@ fn balances(chain: &[Block]) -> HashMap<String, i128> {
 async fn main() {
     println!("[DEBUG] Attempting UPnP port mapping...");
     if let Err(e) = setup_upnp(LISTEN_PORT).await {
-        eprintln!("[DEBUG] UPnP port mapping failed. Continuing without it.");
+        eprintln!("[DEBUG] UPnP port mapping failed. Continuing without it, make sure to manually forward port 6000 in order to connect to the lofswap network");
     };
     // TODO: make this work
     let blockchain = Arc::new(Mutex::new(load_chain()));
@@ -166,7 +166,7 @@ async fn main() {
     }
 
     // ─── 3. CLI ────────────────────────────────────────────────
-    println!("Komendy: mine | sync | print-chain | list-peers | clear-chain | exit");
+    println!("Komendy: mine | sync | print-chain | list-peers | clear-chain | print-mempool | exit");
     loop {
         print!("> ");
         let _ = io::stdout().flush();
@@ -240,6 +240,18 @@ async fn main() {
                 let _ = std::fs::remove_file("blockchain.json");
                 println!("Chain usunięty");
             }
+            "print-mempool" => {
+                if let Ok(mempool) = std::fs::read_to_string("mempool.json") {
+                    for line in mempool.lines() {
+                        if let Ok(tx) = serde_json::from_str::<Transaction>(line) {
+                            println!("TX: {} -> {} amount: {}", tx.from, tx.to, tx.amount);
+                        }
+                    }
+                } else {
+                    println!("Mempool jest pusty");
+                }
+            }
+
             "exit" => break,
             _ => println!("?"),
         }
