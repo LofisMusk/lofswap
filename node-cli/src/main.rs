@@ -20,28 +20,71 @@ use tokio::{
     time::sleep,
 };
 //use easy_upnp::{add_ports, delete_ports, UpnpConfig, PortMappingProtocol};
-use ctrlc;
-use igd::{PortMappingProtocol, aio::search_gateway};
+use std::{error::Error, net::SocketAddrV4, sync::Arc};
+use igd::aio::search_gateway;
+use igd::PortMappingProtocol;
 use local_ip_address::local_ip;
-use std::net::SocketAddrV4;
+use easy_upnp::{add_ports, delete_ports, UpnpConfig as EasyUpnpConfig, PortMappingProtocol as EasyProto};
+use ctrlc;
 
-pub async fn setup_upnp(port: u16) -> Result<(), Box<dyn std::error::Error>> {
-    let gateway = search_gateway(Default::default()).await?;
-    let local_ip = local_ip_address::local_ip()?; // ← musisz mieć `local_ip_address` crate
+pub async fn setup_upnp(port: u16) -> Result<(), Box<dyn Error>> {
+    // ───── Spróbuj IGD (nowszy protokół UPnP) ─────
+    if let Ok(gateway) = search_gateway(Default::default()).await {
+        if let Ok(local_ip) = local_ip() {
+            if let std::net::IpAddr::V4(ipv4) = local_ip {
+                let socket = SocketAddrV4::new(ipv4, port);
 
-    let ip = match local_ip {
-        std::net::IpAddr::V4(ipv4) => ipv4,
-        _ => return Err("Only IPv4 supported".into()),
-    };
+                if gateway.add_port(PortMappingProtocol::TCP, port, socket, 3600, "lofswap node").await.is_ok() {
+                    println!("✓ Port {} przekierowany na {} (IGD)", port, socket);
+                    return Ok(());
+                } else {
+                    eprintln!("⚠️ IGD: Nie udało się dodać portu");
+                }
+            }
+        } else {
+            eprintln!("⚠️ IGD: Nie udało się wykryć lokalnego IP");
+        }
+    } else {
+        eprintln!("⚠️ IGD: Nie znaleziono bramy");
+    }
 
-    let socket = SocketAddrV4::new(ip, port);
+    // ───── Fallback: Easy UPnP (kompatybilne ze starszymi routerami) ─────
+    let cfg = Arc::new(EasyUpnpConfig {
+        address: None,
+        port,
+        protocol: EasyProto::TCP,
+        duration: 3600,
+        comment: "lofswap node".to_string(),
+    });
 
-    gateway
-        .add_port(PortMappingProtocol::TCP, port, socket, 3600, "lofswap node")
-        .await?;
+    // Ustawienie cleanupu
+    {
+        let cfg_for_cleanup = cfg.clone();
+        ctrlc::set_handler(move || {
+            for result in delete_ports(std::iter::once((*cfg_for_cleanup).clone())) {
+                match result {
+                    Ok(_) => println!("🔌 Easy UPnP: port {} usunięty", port),
+                    Err(e) => eprintln!("⚠️ Easy UPnP: błąd usuwania portu: {}", e),
+                }
+            }
+            std::process::exit(0);
+        }).expect("Nie udało się ustawić handlera SIGINT");
+    }
 
-    println!("✓ Port {} przekierowany na {}", port, socket);
-    Ok(())
+    for result in add_ports(std::iter::once((*cfg).clone())) {
+        match result {
+            Ok(()) => {
+                println!("✓ Port {} przekierowany (Easy UPnP fallback)", port);
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("⚠️ Easy UPnP: błąd dodawania portu: {}", e);
+                return Err(Box::new(e));
+            }
+        }
+    }
+
+    Err("Nie udało się przekierować portu przez żadną metodę".into())
 }
 
 // ───── ustawienia ─────────────────────────────────────────────
