@@ -10,7 +10,6 @@ use std::{
     net::{IpAddr, TcpStream as StdTcpStream, ToSocketAddrs},
     path::Path,
     result,
-    sync::Arc,
     time::Duration,
 };
 use tokio::{
@@ -19,15 +18,65 @@ use tokio::{
     sync::Mutex,
     time::sleep,
 };
-//use easy_upnp::{add_ports, delete_ports, UpnpConfig, PortMappingProtocol};
-use ctrlc;
-use igd::{PortMappingProtocol, aio::search_gateway};
+use std::{error::Error, net::SocketAddrV4, sync::Arc};
+use igd::aio::search_gateway;
+use igd::PortMappingProtocol;
 use local_ip_address::local_ip;
-use std::net::SocketAddrV4;
 
-pub async fn setup_upnp(port: u16) -> Result<(), Box<dyn std::error::Error>> {
+use easy_upnp::{add_ports, delete_ports, UpnpConfig as EasyConfig};
+
+pub async fn setup_upnp(port: u16) -> Result<(), Box<dyn Error>> {
+    // 1. Spróbuj przekierować port przez `igd`
+    match try_igd_upnp(port).await {
+        Ok(_) => return Ok(()),
+        Err(e) => eprintln!("[DEBUG] IGD UPnP failed: {} – fallback to easy_upnp", e),
+    }
+
+    // 2. Spróbuj fallback do easy_upnp
+    let cfg = Arc::new(EasyConfig {
+        address: None,
+        port,
+        protocol: easy_upnp::PortMappingProtocol::TCP,
+        duration: 3600,
+        comment: "lofswap node".to_string(),
+    });
+
+    // Cleanup przy SIGINT
+    {
+        let cfg_for_cleanup = cfg.clone();
+        ctrlc::set_handler(move || {
+            let cleanup_cfg = easy_upnp::UpnpConfig {
+                address: cfg_for_cleanup.address.clone(),
+                port: cfg_for_cleanup.port,
+                protocol: cfg_for_cleanup.protocol,
+                duration: cfg_for_cleanup.duration,
+                comment: cfg_for_cleanup.comment.clone(),
+            };
+            for result in delete_ports(std::iter::once(cleanup_cfg)) {
+                match result {
+                    Ok(_) => println!("🔌 Easy UPnP: port {} usunięty", port),
+                    Err(e) => eprintln!("⚠️ Easy UPnP: błąd usuwania portu: {}", e),
+                }
+            }
+            std::process::exit(0);
+        }).expect("Nie udało się ustawić handlera SIGINT");
+    }
+
+    for result in add_ports(std::iter::once(EasyConfig { address: cfg.address.clone(), port: cfg.port, protocol: cfg.protocol, duration: cfg.duration, comment: cfg.comment.clone() })) {
+        match result {
+            Ok(_) => {
+                println!("🔌 Easy UPnP: port {} przekierowany", port);
+                return Ok(());
+            }
+            Err(e) => eprintln!("⚠️ Easy UPnP: błąd przekierowania portu: {}", e),
+        }
+    }
+    Err("Nie udało się przekierować portu przez żaden mechanizm".into())
+}
+
+async fn try_igd_upnp(port: u16) -> Result<(), Box<dyn Error>> {
     let gateway = search_gateway(Default::default()).await?;
-    let local_ip = local_ip_address::local_ip()?; // ← musisz mieć `local_ip_address` crate
+    let local_ip = local_ip()?; // z crate `local_ip_address`
 
     let ip = match local_ip {
         std::net::IpAddr::V4(ipv4) => ipv4,
@@ -35,15 +84,13 @@ pub async fn setup_upnp(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let socket = SocketAddrV4::new(ip, port);
-
     gateway
         .add_port(PortMappingProtocol::TCP, port, socket, 3600, "lofswap node")
         .await?;
 
-    println!("✓ Port {} przekierowany na {}", port, socket);
+    println!("✓ Port {} przekierowany na {} (IGD)", port, socket);
     Ok(())
 }
-
 // ───── ustawienia ─────────────────────────────────────────────
 const LISTEN_PORT: u16 = 6000;
 const BOOTSTRAP_NODES: &[&str] = &["mekambe.ddns.net:6000", "mekambe.ddns.net:6001"];
