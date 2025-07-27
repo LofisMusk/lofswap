@@ -93,7 +93,7 @@ async fn try_igd_upnp(port: u16) -> Result<(), Box<dyn Error>> {
 }
 // ───── ustawienia ─────────────────────────────────────────────
 const LISTEN_PORT: u16 = 6000;
-const BOOTSTRAP_NODES: &[&str] = &["mekambe.ddns.net:6000", "mekambe.ddns.net:6001"];
+const BOOTSTRAP_NODES: &[&str] = &["lofis.ddns.net:6000", "lofis.ddns.net:6001"];
 // ──────────────────────────────────────────────────────────────
 
 fn balances(chain: &[Block]) -> HashMap<String, i128> {
@@ -223,12 +223,14 @@ async fn main() {
             "mine" => {
                 let mut chain = blockchain.lock().await;
 
-                // wczytaj mempool
+                // Wczytaj i przefiltruj mempool (tylko poprawne TX)
                 let parsed: Vec<Transaction> = std::fs::read_to_string("mempool.json")
-                    .unwrap_or_default()
-                    .lines()
-                    .filter_map(|l| serde_json::from_str(l).ok())
-                    .collect();
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|l| serde_json::from_str(l).ok())
+                .filter(|tx| is_tx_valid(tx, &chain))
+                .collect();
+
 
                 // selekcja
                 let mut bal = balances(&chain);
