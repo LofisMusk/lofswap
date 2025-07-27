@@ -7,9 +7,9 @@ use std::{
     collections::HashMap,
     fs::OpenOptions,
     io::{self, Write},
-    net::{IpAddr, TcpStream as StdTcpStream, ToSocketAddrs},
+    net::{TcpStream as StdTcpStream, ToSocketAddrs},
     path::Path,
-    result,
+    sync::Arc,
     time::Duration,
 };
 use tokio::{
@@ -18,183 +18,112 @@ use tokio::{
     sync::Mutex,
     time::sleep,
 };
-use std::{error::Error, net::SocketAddrV4, sync::Arc};
+use rand::seq::{IndexedRandom, SliceRandom};
 use igd::aio::search_gateway;
 use igd::PortMappingProtocol;
 use local_ip_address::local_ip;
-
 use easy_upnp::{add_ports, delete_ports, UpnpConfig as EasyConfig};
 
-pub async fn setup_upnp(port: u16) -> Result<(), Box<dyn Error>> {
-    // 1. Spróbuj przekierować port przez `igd`
-    match try_igd_upnp(port).await {
-        Ok(_) => return Ok(()),
-        Err(e) => eprintln!("[DEBUG] IGD UPnP failed: {} – fallback to easy_upnp", e),
-    }
-
-    // 2. Spróbuj fallback do easy_upnp
-    let cfg = Arc::new(EasyConfig {
-        address: None,
-        port,
-        protocol: easy_upnp::PortMappingProtocol::TCP,
-        duration: 3600,
-        comment: "lofswap node".to_string(),
-    });
-
-    // Cleanup przy SIGINT
-    {
-        let cfg_for_cleanup = cfg.clone();
-        ctrlc::set_handler(move || {
-            let cleanup_cfg = easy_upnp::UpnpConfig {
-                address: cfg_for_cleanup.address.clone(),
-                port: cfg_for_cleanup.port,
-                protocol: cfg_for_cleanup.protocol,
-                duration: cfg_for_cleanup.duration,
-                comment: cfg_for_cleanup.comment.clone(),
-            };
-            for result in delete_ports(std::iter::once(cleanup_cfg)) {
-                match result {
-                    Ok(_) => println!("🔌 Easy UPnP: port {} usunięty", port),
-                    Err(e) => eprintln!("⚠️ Easy UPnP: błąd usuwania portu: {}", e),
-                }
-            }
-            std::process::exit(0);
-        }).expect("Nie udało się ustawić handlera SIGINT");
-    }
-
-    for result in add_ports(std::iter::once(EasyConfig { address: cfg.address.clone(), port: cfg.port, protocol: cfg.protocol, duration: cfg.duration, comment: cfg.comment.clone() })) {
-        match result {
-            Ok(_) => {
-                println!("🔌 Easy UPnP: port {} przekierowany", port);
-                return Ok(());
-            }
-            Err(e) => eprintln!("⚠️ Easy UPnP: błąd przekierowania portu: {}", e),
-        }
-    }
-    Err("Nie udało się przekierować portu przez żaden mechanizm".into())
-}
-
-async fn try_igd_upnp(port: u16) -> Result<(), Box<dyn Error>> {
-    let gateway = search_gateway(Default::default()).await?;
-    let local_ip = local_ip()?; // z crate `local_ip_address`
-
-    let ip = match local_ip {
-        std::net::IpAddr::V4(ipv4) => ipv4,
-        _ => return Err("Only IPv4 supported".into()),
-    };
-
-    let socket = SocketAddrV4::new(ip, port);
-    gateway
-        .add_port(PortMappingProtocol::TCP, port, socket, 3600, "lofswap node")
-        .await?;
-
-    println!("✓ Port {} przekierowany na {} (IGD)", port, socket);
-    Ok(())
-}
-// ───── ustawienia ─────────────────────────────────────────────
 const LISTEN_PORT: u16 = 6000;
 const BOOTSTRAP_NODES: &[&str] = &["lofis.ddns.net:6000", "lofis.ddns.net:6001"];
-// ──────────────────────────────────────────────────────────────
-
-fn balances(chain: &[Block]) -> HashMap<String, i128> {
-    let mut map = HashMap::new();
-    for block in chain {
-        for tx in &block.transactions {
-            if !tx.from.is_empty() {
-                *map.entry(tx.from.clone()).or_insert(0) -= tx.amount as i128;
-            }
-            *map.entry(tx.to.clone()).or_insert(0) += tx.amount as i128;
-        }
-    }
-    map
-}
 
 #[tokio::main]
 async fn main() {
     println!("[DEBUG] Attempting UPnP port mapping...");
-    if let Err(e) = setup_upnp(LISTEN_PORT).await {
-        eprintln!("[DEBUG] UPnP port mapping failed. Continuing without it, make sure to manually forward port 6000 in order to connect to the lofswap network");
+    if let Err(_) = setup_upnp(LISTEN_PORT).await {
+        eprintln!("[DEBUG] UPnP port mapping failed. Continuing without it.");
     };
-    // TODO: make this work
+
     let blockchain = Arc::new(Mutex::new(load_chain()));
     let peers = Arc::new(Mutex::new(load_peers()));
 
-    // ─── 1. Serwer TCP (nasłuch na LISTEN_PORT) ───────────────
+    // TCP server
     {
         let blockchain = blockchain.clone();
         let peers = peers.clone();
         tokio::spawn(async move {
             let addr = format!("0.0.0.0:{LISTEN_PORT}");
-            let listener = match TcpListener::bind(addr).await {
-                Ok(l) => l,
-                Err(e) => {
-                    eprintln!(
-                        "[DEBUG] Failed to bind to port {LISTEN_PORT}: {e}. The port may be closed, in use, or blocked by a firewall."
-                    );
-                    return;
-                }
-            };
+            let listener = TcpListener::bind(addr).await.unwrap();
             println!("Node nasłuchuje na porcie {LISTEN_PORT}");
 
             loop {
-                if let Ok((mut stream, _)) = listener.accept().await {
-                    let mut buf = vec![0; 4096];
-                    if let Ok(n) = stream.read(&mut buf).await {
-                        let slice = &buf[..n];
-                        let txt = String::from_utf8_lossy(slice);
+                if let Ok((mut stream, addr)) = listener.accept().await {
+                    // zapisz IP jako peer
+                    let peer_addr = format!("{}:{}", addr.ip(), addr.port());
+                    let mut p = peers.lock().await;
+                    if !p.contains(&peer_addr) {
+                        println!("Dodano nowego peera: {}", peer_addr);
+                        p.push(peer_addr.clone());
+                        save_peers(&p);
+                    }
+                    drop(p);
 
-                        if txt.starts_with("/balance/") {
-                            // ----- saldo -----
-                            let addr = txt.trim().replace("/balance/", "");
-                            let chain = blockchain.lock().await;
-                            let mut bal: i128 = 0;
-                            for b in chain.iter() {
-                                for t in &b.transactions {
-                                    if t.to == addr {
-                                        bal += t.amount as i128
-                                    }
-                                    if t.from == addr {
-                                        bal -= t.amount as i128
+                    let blockchain = blockchain.clone();
+                    let peers = peers.clone();
+
+                    tokio::spawn(async move {
+                        let mut buf = vec![0; 4096];
+                        if let Ok(n) = stream.read(&mut buf).await {
+                            let slice = &buf[..n];
+                            let txt = String::from_utf8_lossy(slice);
+
+                            if txt.starts_with("/balance/") {
+                                let addr = txt.trim().replace("/balance/", "");
+                                let chain = blockchain.lock().await;
+                                let mut bal: i128 = 0;
+                                for b in chain.iter() {
+                                    for t in &b.transactions {
+                                        if t.to == addr {
+                                            bal += t.amount as i128
+                                        }
+                                        if t.from == addr {
+                                            bal -= t.amount as i128
+                                        }
                                     }
                                 }
-                            }
-                            let _ = stream.write_all(bal.to_string().as_bytes()).await;
-                        } else if txt.trim() == "/peers" {
-                            // ----- zwróć listę peerów -----
-                            let p = peers.lock().await;
-                            let _ = stream
-                                .write_all(serde_json::to_string(&*p).unwrap().as_bytes())
-                                .await;
-                        } else if txt.trim() == "/chain" {
-                            let chain = blockchain.lock().await;
-                            let _ = stream
-                                .write_all(serde_json::to_string(&*chain).unwrap().as_bytes())
-                                .await;
-                        } else if let Ok(tx) = serde_json::from_slice::<Transaction>(slice) {
-                            // ----- transakcja -----
-                            let chain = blockchain.lock().await;
-                            if is_tx_valid(&tx, &chain) {
-                                println!("✓ TX do mempoolu");
-                                if let Ok(mut f) = OpenOptions::new()
-                                    .create(true)
-                                    .append(true)
-                                    .open("mempool.json")
-                                {
-                                    let _ = writeln!(f, "{}", serde_json::to_string(&tx).unwrap());
+                                let _ = stream.write_all(bal.to_string().as_bytes()).await;
+                            } else if txt.trim() == "/peers" {
+                                let p = peers.lock().await;
+                                let _ = stream
+                                    .write_all(serde_json::to_string(&*p).unwrap().as_bytes())
+                                    .await;
+                            } else if txt.trim() == "/chain" {
+                                let chain = blockchain.lock().await;
+                                let _ = stream
+                                    .write_all(serde_json::to_string(&*chain).unwrap().as_bytes())
+                                    .await;
+                            } else if txt.trim() == "/chain-hash" {
+                                let chain = blockchain.lock().await;
+                                let json = serde_json::to_string(&*chain).unwrap();
+                                let hash = Sha256::digest(json.as_bytes());
+                                let _ = stream.write_all(hex::encode(hash).as_bytes()).await;
+                            } else if let Ok(tx) = serde_json::from_slice::<Transaction>(slice) {
+                                let chain = blockchain.lock().await;
+                                if is_tx_valid(&tx, &chain) {
+                                    println!("✓ TX do mempoolu");
+                                    if let Ok(mut f) = OpenOptions::new()
+                                        .create(true)
+                                        .append(true)
+                                        .open("mempool.json")
+                                    {
+                                        let _ = writeln!(f, "{}", serde_json::to_string(&tx).unwrap());
+                                    }
+                                } else {
+                                    println!("✗ TX odrzucony (podpis / saldo)");
                                 }
-                            } else {
-                                println!("✗ TX odrzucony (podpis / saldo)");
                             }
                         }
-                    }
+                    });
                 }
             }
         });
     }
 
-    // ─── 2. Peer-discovery z BOOTSTRAP_NODES ──────────────────
+    // peer discovery z bootstrap
     for &boot in BOOTSTRAP_NODES {
         if let Ok(mut s) = TcpStream::connect(boot).await {
+            let local = format!("{}:{}", local_ip().unwrap(), LISTEN_PORT);
+            let _ = s.write_all(format!("/iam/{}\n", local).as_bytes()).await;
             let _ = s.write_all(b"/peers").await;
             let mut buf = vec![0; 4096];
             if let Ok(n) = s.read(&mut buf).await {
@@ -212,7 +141,7 @@ async fn main() {
         }
     }
 
-    // ─── 3. CLI ────────────────────────────────────────────────
+    // CLI
     println!("Komendy: mine | sync | print-chain | list-peers | clear-chain | print-mempool | exit");
     loop {
         print!("> ");
@@ -222,17 +151,13 @@ async fn main() {
         match line.trim() {
             "mine" => {
                 let mut chain = blockchain.lock().await;
-
-                // Wczytaj i przefiltruj mempool (tylko poprawne TX)
                 let parsed: Vec<Transaction> = std::fs::read_to_string("mempool.json")
-                .unwrap_or_default()
-                .lines()
-                .filter_map(|l| serde_json::from_str(l).ok())
-                .filter(|tx| is_tx_valid(tx, &chain))
-                .collect();
+                    .unwrap_or_default()
+                    .lines()
+                    .filter_map(|l| serde_json::from_str(l).ok())
+                    .filter(|tx| is_tx_valid(tx, &chain))
+                    .collect();
 
-
-                // selekcja
                 let mut bal = balances(&chain);
                 let mut chosen = Vec::new();
                 for tx in parsed {
@@ -245,16 +170,15 @@ async fn main() {
                         *e -= tx.amount as i128;
                         *bal.entry(tx.to.clone()).or_insert(0) += tx.amount as i128;
                         chosen.push(tx);
-                    } else {
-                        println!("✗ TX {} pominięty – saldo {}", tx.signature, e);
                     }
                 }
+
                 if chosen.is_empty() {
                     println!("Brak TX");
                     continue;
                 }
-                let _ = std::fs::remove_file("mempool.json");
 
+                let _ = std::fs::remove_file("mempool.json");
                 let prev = chain.last().unwrap().hash.clone();
                 let block = Block::new(chain.len() as u64, chosen, prev);
                 println!("Nowy blok: {}", block.hash);
@@ -263,7 +187,7 @@ async fn main() {
                 broadcast_to_known_nodes(&block).await;
                 sleep(Duration::from_secs(1)).await;
             }
-            "sync" => sync_chain(&blockchain).await,
+            "sync" => sync_chain(&blockchain, &peers).await,
             "print-chain" => {
                 let c = blockchain.lock().await;
                 for b in c.iter() {
@@ -300,14 +224,24 @@ async fn main() {
                     println!("Mempool jest pusty");
                 }
             }
-
             "exit" => break,
             _ => println!("?"),
         }
     }
 }
-/* ---- reszta pliku: is_tx_valid, save_chain, load_chain, load_peers,
-save_peers, broadcast_to_known_nodes, sync_chain – bez zmian ---- */
+
+fn balances(chain: &[Block]) -> HashMap<String, i128> {
+    let mut map = HashMap::new();
+    for block in chain {
+        for tx in &block.transactions {
+            if !tx.from.is_empty() {
+                *map.entry(tx.from.clone()).or_insert(0) -= tx.amount as i128;
+            }
+            *map.entry(tx.to.clone()).or_insert(0) += tx.amount as i128;
+        }
+    }
+    map
+}
 
 fn is_tx_valid(tx: &Transaction, chain: &[Block]) -> bool {
     if tx.from.is_empty() && tx.signature == "reward" {
@@ -336,26 +270,22 @@ fn is_tx_valid(tx: &Transaction, chain: &[Block]) -> bool {
 
     let msg_data = format!("{}{}{}", tx.from, tx.to, tx.amount);
     let hash = Sha256::digest(msg_data.as_bytes());
-    let msg = match Message::from_slice(&hash) {
-        Ok(m) => m,
-        Err(_) => return false,
+    let msg = match Message::from_slice(&hash).ok() {
+        Some(m) => m,
+        None => return false,
     };
 
-    let sig_bytes = match hex::decode(&tx.signature) {
-        Ok(b) => b,
-        Err(_) => return false,
+    let sig_bytes = match hex::decode(&tx.signature).ok() {
+        Some(bytes) => bytes,
+        None => return false,
     };
-
-    let signature = match Signature::from_compact(&sig_bytes) {
-        Ok(s) => s,
-        Err(_) => return false,
+    let signature = match Signature::from_compact(&sig_bytes).ok() {
+        Some(sig) => sig,
+        None => return false,
     };
 
     let already_in_chain = chain.iter().any(|block| {
-        block
-            .transactions
-            .iter()
-            .any(|btx| btx.signature == tx.signature)
+        block.transactions.iter().any(|btx| btx.signature == tx.signature)
     });
 
     if already_in_chain {
@@ -382,7 +312,7 @@ fn load_chain() -> Vec<Block> {
 fn load_peers() -> Vec<String> {
     if Path::new("peers.json").exists() {
         let json = std::fs::read_to_string("peers.json").unwrap();
-        serde_json::from_str(&json).unwrap_or_else(|_| vec![])
+        serde_json::from_str(&json).unwrap_or_default()
     } else {
         vec![]
     }
@@ -405,23 +335,119 @@ async fn broadcast_to_known_nodes(block: &Block) {
     }
 }
 
-async fn sync_chain(blockchain: &Arc<Mutex<Vec<Block>>>) {
-    if let Ok(list) = std::fs::read_to_string("peers.json") {
-        for line in list.lines() {
-            if let Ok(mut stream) = TcpStream::connect(line).await {
-                let _ = stream.write_all(b"/chain").await;
-                let mut buffer = vec![0; 8192];
-                if let Ok(n) = stream.read(&mut buffer).await {
-                    if let Ok(peer_chain) = serde_json::from_slice::<Vec<Block>>(&buffer[..n]) {
-                        let mut local_chain = blockchain.lock().await;
-                        if peer_chain.len() >= local_chain.len() || local_chain.is_empty() {
-                            *local_chain = peer_chain;
-                            save_chain(&local_chain);
-                            println!("✓ Chain synchronized and saved from node {}", line);
-                        }
+async fn sync_chain(blockchain: &Arc<Mutex<Vec<Block>>>, peers: &Arc<Mutex<Vec<String>>>) {
+    use rand::seq::SliceRandom;
+
+    let peer_list = peers.lock().await.clone();
+    let mut rng = rand::thread_rng();
+    let sample: Vec<_> = peer_list.choose_multiple(&mut rng, 3).cloned().collect();
+
+    let mut hash_map = HashMap::new();
+    for peer in &sample {
+        if let Ok(mut stream) = TcpStream::connect(peer).await {
+            let _ = stream.write_all(b"/chain-hash").await;
+            let mut buf = vec![0; 512];
+            if let Ok(n) = stream.read(&mut buf).await {
+                let hash = String::from_utf8_lossy(&buf[..n]).to_string();
+                hash_map.entry(hash).or_insert_with(Vec::new).push(peer.clone());
+            }
+        }
+    }
+
+    if let Some((hash, nodes)) = hash_map.into_iter().find(|(_, v)| v.len() >= 2) {
+        let chosen_peer = &nodes[0];
+        if let Ok(mut stream) = TcpStream::connect(chosen_peer).await {
+            let _ = stream.write_all(b"/chain").await;
+            let mut buffer = vec![0; 8192];
+            if let Ok(n) = stream.read(&mut buffer).await {
+                if let Ok(peer_chain) = serde_json::from_slice::<Vec<Block>>(&buffer[..n]) {
+                    let local_hash = {
+                        let local = blockchain.lock().await;
+                        let json = serde_json::to_string(&*local).unwrap();
+                        hex::encode(Sha256::digest(json.as_bytes()))
+                    };
+                    if peer_chain.len() > blockchain.lock().await.len() && local_hash != hash {
+                        let mut local = blockchain.lock().await;
+                        *local = peer_chain;
+                        save_chain(&local);
+                        println!("✓ Synchronizacja zakończona z {}", chosen_peer);
+                    } else {
+                        println!("Chain z {} nie był dłuższy lub hash się nie zgadzał", chosen_peer);
                     }
                 }
             }
         }
+    } else {
+        println!("✗ Nie udało się uzgodnić hashów łańcucha (mniej niż 2 zgodne)");
     }
+}
+
+async fn setup_upnp(port: u16) -> Result<(), Box<dyn std::error::Error>> {
+    match try_igd_upnp(port).await {
+        Ok(_) => return Ok(()),
+        Err(e) => eprintln!("[DEBUG] IGD UPnP failed: {e} – fallback to easy_upnp"),
+    }
+
+    let cfg = Arc::new(EasyConfig {
+        address: None,
+        port,
+        protocol: easy_upnp::PortMappingProtocol::TCP,
+        duration: 3600,
+        comment: "lofswap node".to_string(),
+    });
+
+    {
+        let cfg_for_cleanup = cfg.clone();
+        ctrlc::set_handler(move || {
+            let cleanup_cfg = easy_upnp::UpnpConfig {
+                address: cfg_for_cleanup.address.clone(),
+                port: cfg_for_cleanup.port,
+                protocol: cfg_for_cleanup.protocol,
+                duration: cfg_for_cleanup.duration,
+                comment: cfg_for_cleanup.comment.clone(),
+            };
+            for result in delete_ports(std::iter::once(cleanup_cfg)) {
+                match result {
+                    Ok(_) => println!("🔌 Easy UPnP: port {} usunięty", port),
+                    Err(e) => eprintln!("⚠️ Easy UPnP: błąd usuwania portu: {}", e),
+                }
+            }
+            std::process::exit(0);
+        }).expect("Nie udało się ustawić handlera SIGINT");
+    }
+
+    for result in add_ports(std::iter::once(EasyConfig {
+        address: cfg.address.clone(),
+        port: cfg.port,
+        protocol: cfg.protocol,
+        duration: cfg.duration,
+        comment: cfg.comment.clone(),
+    })) {
+        match result {
+            Ok(_) => {
+                println!("✓ Port {} przekierowany (Easy UPnP fallback)", port);
+                return Ok(());
+            }
+            Err(e) => eprintln!("⚠️ Easy UPnP: błąd przekierowania portu: {}", e),
+        }
+    }
+
+    Err("Nie udało się przekierować portu przez żaden mechanizm".into())
+}
+
+async fn try_igd_upnp(port: u16) -> Result<(), Box<dyn std::error::Error>> {
+    let gateway = search_gateway(Default::default()).await?;
+    let local_ip = local_ip()?; 
+    let ip = match local_ip {
+        std::net::IpAddr::V4(ipv4) => ipv4,
+        _ => return Err("Only IPv4 supported".into()),
+    };
+
+    let socket = std::net::SocketAddrV4::new(ip, port);
+    gateway
+        .add_port(PortMappingProtocol::TCP, port, socket, 3600, "lofswap node")
+        .await?;
+
+    println!("✓ Port {} przekierowany na {} (IGD)", port, socket);
+    Ok(())
 }
