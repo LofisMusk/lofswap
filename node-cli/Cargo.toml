@@ -13,7 +13,7 @@ sha2 = "0.10.9"
 secp256k1 = "0.31.1"
 hex = "0.4.3"
 rand = "0.9.1"
-igd = "0.12.1"
+igd = { version = "0.12.1", features = ["aio"]}
 local-ip-address = "0.6.5"
 easy-upnp = "0.2.1"
 ctrlc = "3.4.7"
