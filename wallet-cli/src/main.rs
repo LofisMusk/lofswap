@@ -6,7 +6,7 @@ use blockchain_core::Transaction;
 use rand::seq::IndexedRandom;
 use secp256k1::{Secp256k1, SecretKey, PublicKey, Message};
 use sha2::{Digest, Sha256};
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::net::{TcpStream, SocketAddr};
 use std::path::Path;
@@ -17,6 +17,8 @@ static BOOTSTRAP_NODES: &[&str] = &[
     "31.135.167.5:6000",
     "31.135.167.5:6001",
 ];
+
+const MEMPOOL_FILE: &str = "wallet_mempool.json";
 
 // ---------- domyślny portfel ----------
 const DEFAULT_WALLET: &str = ".default_wallet";
@@ -67,7 +69,10 @@ fn broadcast(json:&[u8],min_peers:usize){
             Err(_) => println!("✗ Nie udało się połączyć z {}",p),
         }
     }
-    if ok<min_peers { println!("⚠️ Wysłano tylko do {ok}/{min_peers} nodów"); }
+    if ok<min_peers {
+        println!("⚠️ Wysłano tylko do {ok}/{min_peers} nodów – transakcja zostanie zapisana do lokalnego mempoola");
+        let _ = OpenOptions::new().append(true).create(true).open(MEMPOOL_FILE).and_then(|mut f| f.write_all(json));
+    }
 }
 
 // ---------- Transakcje ----------
@@ -116,7 +121,7 @@ fn import_dat(path:&str){ let mut buf=[0u8;32]; if File::open(path).and_then(|mu
 fn export_dat(path:&str){ if let Some(sk)=load_default_wallet(){ if fs::write(path,sk.secret_bytes()).is_ok(){ println!("✓ Zapisano do {}",path);} else { println!("✗ Błąd zapisu"); } } else { println!("✗ Brak domyślnego portfela"); } }
 
 // ---------- CLI ----------
-fn help(){ println!("Komendy:\n  help\n  create-wallet\n  import-priv <hex>\n  import-dat <plik>\n  export-dat <plik>\n  default-wallet\n  send <to> <amount> [n=2]\n  send-priv <priv> <to> <amount> [n=2]\n  balance [address]\n  faucet <address>\n  exit"); }
+fn help(){ println!("Komendy:\n  help\n  create-wallet\n  import-priv <hex>\n  import-dat <plik>\n  export-dat <plik>\n  default-wallet\n  send <to> <amount> [n=2]\n  send-priv <priv> <to> <amount> [n=2]\n  balance [address]\n  faucet <address>\n  list-peers\n  mempool\n  exit"); }
 
 // Dodano funkcję create_wallet
 fn create_wallet() {
@@ -127,6 +132,7 @@ fn create_wallet() {
     println!("✓ Utworzono nowy portfel.");
     println!("Private: {}", hex::encode(sk.secret_bytes()));
     println!("Public : {}", pk);
+    println!("Address: LFS{}", bs58::encode(&Sha256::digest(&pk.serialize())[..20]).into_string());
 }
 
 // Dodano funkcję import_priv
@@ -137,10 +143,29 @@ fn import_priv(priv_hex: &str) {
                 let pk = PublicKey::from_secret_key(&Secp256k1::new(), &sk);
                 save_default_wallet(&sk);
                 println!("✓ Zaimportowano klucz prywatny. Public Key: {}", pk);
+                println!("Address: LFS{}", bs58::encode(&Sha256::digest(&pk.serialize())[..20]).into_string());
             }
             Err(_) => println!("✗ Niepoprawny klucz prywatny"),
         },
         Err(_) => println!("✗ Niepoprawny format hex"),
+    }
+}
+
+fn list_peers() {
+    let peers = load_peers();
+    println!("Dostępne peery ({}):", peers.len());
+    for p in peers { println!("- {}", p); }
+}
+
+fn show_mempool() {
+    if let Ok(txt) = fs::read_to_string(MEMPOOL_FILE) {
+        for line in txt.lines() {
+            if let Ok(tx) = serde_json::from_str::<Transaction>(line) {
+                println!("TX: {} -> {} amount: {}", tx.from, tx.to, tx.amount);
+            }
+        }
+    } else {
+        println!("✗ Mempool jest pusty");
     }
 }
 
@@ -160,6 +185,7 @@ fn main(){ println!("Wallet CLI (peers.json + bootstrap)");
                     let pk = PublicKey::from_secret_key(&Secp256k1::new(), &sk);
                     println!("Private: {}", hex::encode(sk.secret_bytes()));
                     println!("Public : {}", pk);
+                    println!("Address: LFS{}", bs58::encode(&Sha256::digest(&pk.serialize())[..20]).into_string());
                 } else { println!("Brak domyślnego portfela"); }
             }
             "send" if a.len() >= 3 => {
@@ -182,9 +208,10 @@ fn main(){ println!("Wallet CLI (peers.json + bootstrap)");
                 } else { println!("Brak domyślnego portfela"); }
             }
             "faucet" if a.len() == 2 => faucet(a[1]),
+            "list-peers" => list_peers(),
+            "mempool" => show_mempool(),
             "exit" => break,
             _ => println!("Nieznana komenda – wpisz 'help'"),
         }
     }
 }
-
