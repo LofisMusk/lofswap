@@ -4,7 +4,13 @@ use secp256k1::{ecdsa::Signature, Message, PublicKey, Secp256k1};
 use serde_json;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap, fs::OpenOptions, io::{self, Write}, net::{IpAddr, TcpStream as StdTcpStream, ToSocketAddrs}, path::Path, result, sync::Arc, time::Duration
+    collections::HashMap,
+    fs::OpenOptions,
+    io::{self, Write},
+    net::{IpAddr, TcpStream as StdTcpStream, ToSocketAddrs},
+    path::Path,
+    result,
+    time::Duration,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -12,21 +18,34 @@ use tokio::{
     sync::Mutex,
     time::sleep,
 };
-use easy_upnp::{add_ports, delete_ports, UpnpConfig, PortMappingProtocol};
+use std::{error::Error, net::SocketAddrV4, sync::Arc};
+use igd::aio::search_gateway;
+use igd::PortMappingProtocol;
+use local_ip_address::local_ip;
 
-pub async fn setup_upnp(port: u16) -> Result<(), ()> {
-    let cfg = Arc::new(UpnpConfig {
+use easy_upnp::{add_ports, delete_ports, UpnpConfig as EasyConfig};
+
+pub async fn setup_upnp(port: u16) -> Result<(), Box<dyn Error>> {
+    // 1. Spróbuj przekierować port przez `igd`
+    match try_igd_upnp(port).await {
+        Ok(_) => return Ok(()),
+        Err(e) => eprintln!("[DEBUG] IGD UPnP failed: {} – fallback to easy_upnp", e),
+    }
+
+    // 2. Spróbuj fallback do easy_upnp
+    let cfg = Arc::new(EasyConfig {
         address: None,
         port,
-        protocol: PortMappingProtocol::TCP,
-        duration: 3600, // 1 godzina
+        protocol: easy_upnp::PortMappingProtocol::TCP,
+        duration: 3600,
         comment: "lofswap node".to_string(),
     });
- // TODO: remove this and move logging into the main method
+
+    // Cleanup przy SIGINT
     {
         let cfg_for_cleanup = cfg.clone();
         ctrlc::set_handler(move || {
-            let cleanup_cfg = UpnpConfig {
+            let cleanup_cfg = easy_upnp::UpnpConfig {
                 address: cfg_for_cleanup.address.clone(),
                 port: cfg_for_cleanup.port,
                 protocol: cfg_for_cleanup.protocol,
@@ -35,13 +54,29 @@ pub async fn setup_upnp(port: u16) -> Result<(), ()> {
             };
             for result in delete_ports(std::iter::once(cleanup_cfg)) {
                 match result {
-                    Ok(_) => println!("🔌 UPnP: port {} usunięty", port),
-                    Err(e) => eprintln!("⚠️ Błąd usuwania UPnP: {}", e),
+                    Ok(_) => println!("🔌 Easy UPnP: port {} usunięty", port),
+                    Err(e) => eprintln!("⚠️ Easy UPnP: błąd usuwania portu: {}", e),
                 }
             }
             std::process::exit(0);
         }).expect("Nie udało się ustawić handlera SIGINT");
     }
+
+    for result in add_ports(std::iter::once(EasyConfig { address: cfg.address.clone(), port: cfg.port, protocol: cfg.protocol, duration: cfg.duration, comment: cfg.comment.clone() })) {
+        match result {
+            Ok(_) => {
+                println!("🔌 Easy UPnP: port {} przekierowany", port);
+                return Ok(());
+            }
+            Err(e) => eprintln!("⚠️ Easy UPnP: błąd przekierowania portu: {}", e),
+        }
+    }
+    Err("Nie udało się przekierować portu przez żaden mechanizm".into())
+}
+
+async fn try_igd_upnp(port: u16) -> Result<(), Box<dyn Error>> {
+    let gateway = search_gateway(Default::default()).await?;
+    let local_ip = local_ip()?; // z crate `local_ip_address`
 
     // Główna pętla odświeżania przekierowania portu
     loop {
@@ -53,21 +88,14 @@ pub async fn setup_upnp(port: u16) -> Result<(), ()> {
             comment: cfg.comment.clone(),
         };
 
-        for result in add_ports(std::iter::once(current_cfg)) {
-            match result {
-                Ok(()) => println!("✓ UPnP: port {} przekierowany", port),
-                Err(e) => eprintln!("⚠️ UPnP błąd: {}", e),
-            }
-        }
+    let socket = SocketAddrV4::new(ip, port);
+    gateway
+        .add_port(PortMappingProtocol::TCP, port, socket, 3600, "lofswap node")
+        .await?;
 
-        sleep(Duration::from_secs(55 * 60)).await;
-    }
-
-    // Nigdy tu nie trafimy, ale kompilator wymaga zwrotu
-    #[allow(unreachable_code)]
+    println!("✓ Port {} przekierowany na {} (IGD)", port, socket);
     Ok(())
 }
-
 // ───── ustawienia ─────────────────────────────────────────────
 const LISTEN_PORT: u16 = 6000;
 const BOOTSTRAP_NODES: &[&str] = &[
@@ -386,4 +414,4 @@ async fn sync_chain(blockchain: &Arc<Mutex<Vec<Block>>>) {
         }
     }
 }
-
+}
