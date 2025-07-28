@@ -340,7 +340,7 @@ async fn sync_chain(blockchain: &Arc<Mutex<Vec<Block>>>, peers: &Arc<Mutex<Vec<S
 
     let peer_list = peers.lock().await.clone();
     let mut rng = rand::thread_rng();
-    let sample: Vec<_> = peer_list.choose_multiple(&mut rng, 3).cloned().collect();
+    let sample: Vec<_> = peer_list.choose_multiple(&mut rng, 1).cloned().collect();
 
     let mut hash_map = HashMap::new();
     for peer in &sample {
