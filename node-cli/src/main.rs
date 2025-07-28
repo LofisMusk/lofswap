@@ -1,5 +1,10 @@
 // === node-cli/src/main.rs ===
 use blockchain_core::{Block, Transaction};
+use easy_upnp::{UpnpConfig as EasyConfig, add_ports, delete_ports};
+use igd::PortMappingProtocol;
+use igd::aio::search_gateway;
+use local_ip_address::local_ip;
+use rand::seq::{IndexedRandom, SliceRandom};
 use secp256k1::{Message, PublicKey, Secp256k1, ecdsa::Signature};
 use serde_json;
 use sha2::{Digest, Sha256};
@@ -18,11 +23,6 @@ use tokio::{
     sync::Mutex,
     time::sleep,
 };
-use rand::seq::{IndexedRandom, SliceRandom};
-use igd::aio::search_gateway;
-use igd::PortMappingProtocol;
-use local_ip_address::local_ip;
-use easy_upnp::{add_ports, delete_ports, UpnpConfig as EasyConfig};
 
 const LISTEN_PORT: u16 = 6000;
 const BOOTSTRAP_NODES: &[&str] = &["lofis.ddns.net:6000", "lofis.ddns.net:6001"];
@@ -106,7 +106,8 @@ async fn main() {
                                         .append(true)
                                         .open("mempool.json")
                                     {
-                                        let _ = writeln!(f, "{}", serde_json::to_string(&tx).unwrap());
+                                        let _ =
+                                            writeln!(f, "{}", serde_json::to_string(&tx).unwrap());
                                     }
                                 } else {
                                     println!("✗ TX odrzucony (podpis / saldo)");
@@ -142,7 +143,9 @@ async fn main() {
     }
 
     // CLI
-    println!("Komendy: mine | sync | print-chain | list-peers | clear-chain | print-mempool | exit");
+    println!(
+        "Komendy: mine | sync | print-chain | list-peers | add-peer | remove-peer | clear-chain | print-mempool | exit"
+    );
     loop {
         print!("> ");
         let _ = io::stdout().flush();
@@ -186,6 +189,39 @@ async fn main() {
                 save_chain(&chain);
                 broadcast_to_known_nodes(&block).await;
                 sleep(Duration::from_secs(1)).await;
+            }
+            line if line.starts_with("add-peer ") => {
+                let parts: Vec<&str> = line.trim().split_whitespace().collect();
+                if parts.len() == 2 {
+                    let new_peer = parts[1].to_string();
+                    let mut p = peers.lock().await;
+                    if !p.contains(&new_peer) {
+                        p.push(new_peer.clone());
+                        save_peers(&p);
+                        println!("✓ Peer dodany: {}", new_peer);
+                    } else {
+                        println!("Peer już istnieje.");
+                    }
+                } else {
+                    println!("Użycie: add-peer <adres:port>");
+                }
+            }
+            line if line.starts_with("remove-peer ") => {
+                let parts: Vec<&str> = line.trim().split_whitespace().collect();
+                if parts.len() == 2 {
+                    let target_peer = parts[1];
+                    let mut p = peers.lock().await;
+                    let before = p.len();
+                    p.retain(|peer| peer != target_peer);
+                    if p.len() < before {
+                        save_peers(&p);
+                        println!("✓ Peer usunięty: {}", target_peer);
+                    } else {
+                        println!("Nie znaleziono takiego peera.");
+                    }
+                } else {
+                    println!("Użycie: remove-peer <adres:port>");
+                }
             }
             "sync" => sync_chain(&blockchain, &peers).await,
             "print-chain" => {
@@ -285,7 +321,10 @@ fn is_tx_valid(tx: &Transaction, chain: &[Block]) -> bool {
     };
 
     let already_in_chain = chain.iter().any(|block| {
-        block.transactions.iter().any(|btx| btx.signature == tx.signature)
+        block
+            .transactions
+            .iter()
+            .any(|btx| btx.signature == tx.signature)
     });
 
     if already_in_chain {
@@ -349,7 +388,10 @@ async fn sync_chain(blockchain: &Arc<Mutex<Vec<Block>>>, peers: &Arc<Mutex<Vec<S
             let mut buf = vec![0; 512];
             if let Ok(n) = stream.read(&mut buf).await {
                 let hash = String::from_utf8_lossy(&buf[..n]).to_string();
-                hash_map.entry(hash).or_insert_with(Vec::new).push(peer.clone());
+                hash_map
+                    .entry(hash)
+                    .or_insert_with(Vec::new)
+                    .push(peer.clone());
             }
         }
     }
@@ -372,7 +414,10 @@ async fn sync_chain(blockchain: &Arc<Mutex<Vec<Block>>>, peers: &Arc<Mutex<Vec<S
                         save_chain(&local);
                         println!("✓ Synchronizacja zakończona z {}", chosen_peer);
                     } else {
-                        println!("Chain z {} nie był dłuższy lub hash się nie zgadzał", chosen_peer);
+                        println!(
+                            "Chain z {} nie był dłuższy lub hash się nie zgadzał",
+                            chosen_peer
+                        );
                     }
                 }
             }
@@ -413,7 +458,8 @@ async fn setup_upnp(port: u16) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             std::process::exit(0);
-        }).expect("Nie udało się ustawić handlera SIGINT");
+        })
+        .expect("Nie udało się ustawić handlera SIGINT");
     }
 
     for result in add_ports(std::iter::once(EasyConfig {
@@ -437,7 +483,7 @@ async fn setup_upnp(port: u16) -> Result<(), Box<dyn std::error::Error>> {
 
 async fn try_igd_upnp(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     let gateway = search_gateway(Default::default()).await?;
-    let local_ip = local_ip()?; 
+    let local_ip = local_ip()?;
     let ip = match local_ip {
         std::net::IpAddr::V4(ipv4) => ipv4,
         _ => return Err("Only IPv4 supported".into()),
