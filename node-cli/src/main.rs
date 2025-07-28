@@ -146,7 +146,7 @@ async fn main() {
 
     // CLI
     println!(
-        "Komendy: mine | sync | print-chain | list-peers | add-peer | remove-peer | clear-chain | print-mempool | exit"
+        "Komendy: mine | sync | print-chain | list-peers | add-peer | remove-peer | remove-offline-peers | clear-chain | print-mempool | exit"
     );
     loop {
         print!("> ");
@@ -191,6 +191,7 @@ async fn main() {
                 save_chain(&chain);
                 broadcast_to_known_nodes(&block).await;
                 sleep(Duration::from_secs(1)).await;
+                verify_and_broadcast_chain(&blockchain, &peers).await;
             }
             line if line.starts_with("add-peer ") => {
                 let parts: Vec<&str> = line.trim().split_whitespace().collect();
@@ -225,7 +226,23 @@ async fn main() {
                     println!("Użycie: remove-peer <adres:port>");
                 }
             }
-            "sync" => sync_chain(&blockchain, &peers).await,
+            "remove-offline-peers" => {
+                let mut p = peers.lock().await;
+                let before = p.len();
+                p.retain(|peer| {
+                    peer.to_socket_addrs()
+                        .ok()
+                        .and_then(|mut i| i.next())
+                        .and_then(|a| {
+                            StdTcpStream::connect_timeout(&a, Duration::from_millis(300)).ok()
+                        })
+                        .is_some()
+                });
+                let removed = before - p.len();
+                save_peers(&p);
+                println!("✓ Usunięto {} offline peerów", removed);
+            }
+            "sync" => sync_chain(&blockchain, &peers, false).await,
             "print-chain" => {
                 let c = blockchain.lock().await;
                 for b in c.iter() {
@@ -376,7 +393,7 @@ async fn broadcast_to_known_nodes(block: &Block) {
     }
 }
 
-async fn sync_chain(blockchain: &Arc<Mutex<Vec<Block>>>, peers: &Arc<Mutex<Vec<String>>>) {
+async fn sync_chain(blockchain: &Arc<Mutex<Vec<Block>>>, peers: &Arc<Mutex<Vec<String>>>, force: bool) {
     use rand::seq::SliceRandom;
 
     let peer_list = peers.lock().await.clone();
@@ -398,9 +415,16 @@ async fn sync_chain(blockchain: &Arc<Mutex<Vec<Block>>>, peers: &Arc<Mutex<Vec<S
         }
     }
 
-    if let Some((hash, nodes)) = hash_map.into_iter().find(|(_, v)| v.len() >= 1) {
-        let chosen_peer = &nodes[0];
-        if let Ok(mut stream) = TcpStream::connect(chosen_peer).await {
+    let sync_target = if force {
+        // Take the first peer, regardless of hash agreement
+        sample.get(0).cloned()
+    } else {
+        // Only sync if at least one matching hash
+        hash_map.into_iter().find(|(_, v)| v.len() >= 1).map(|(_, nodes)| nodes[0].clone())
+    };
+
+    if let Some(chosen_peer) = sync_target {
+        if let Ok(mut stream) = TcpStream::connect(&chosen_peer).await {
             let _ = stream.write_all(b"/chain").await;
             let mut buffer = vec![0; 8192];
             if let Ok(n) = stream.read(&mut buffer).await {
@@ -410,11 +434,11 @@ async fn sync_chain(blockchain: &Arc<Mutex<Vec<Block>>>, peers: &Arc<Mutex<Vec<S
                         let json = serde_json::to_string(&*local).unwrap();
                         hex::encode(Sha256::digest(json.as_bytes()))
                     };
-                    if peer_chain.len() > blockchain.lock().await.len() && local_hash != hash {
+                    if peer_chain.len() > blockchain.lock().await.len() || force {
                         let mut local = blockchain.lock().await;
                         *local = peer_chain;
                         save_chain(&local);
-                        println!("✓ Synchronizacja zakończona z {}", chosen_peer);
+                        println!("✓ Synchronizacja zakończona z {} (force={})", chosen_peer, force);
                     } else {
                         println!(
                             "Chain z {} nie był dłuższy lub hash się nie zgadzał",
@@ -425,7 +449,46 @@ async fn sync_chain(blockchain: &Arc<Mutex<Vec<Block>>>, peers: &Arc<Mutex<Vec<S
             }
         }
     } else {
-        println!("✗ Nie udało się uzgodnić hashów łańcucha (mniej niż 2 zgodne)");
+        println!("✗ Nie udało się uzgodnić hashów łańcucha (brak zgodnych peerów)");
+    }
+}
+
+async fn verify_and_broadcast_chain(blockchain: &Arc<Mutex<Vec<Block>>>, peers: &Arc<Mutex<Vec<String>>>) {
+    use rand::seq::SliceRandom;
+    use std::net::{TcpStream as StdTcpStream, ToSocketAddrs};
+
+    let peer_list = peers.lock().await.clone();
+    let online_peers: Vec<_> = peer_list
+        .iter()
+        .filter(|peer| {
+            peer.to_socket_addrs()
+                .ok()
+                .and_then(|mut i| i.next())
+                .and_then(|a| StdTcpStream::connect_timeout(&a, Duration::from_millis(300)).ok())
+                .is_some()
+        })
+        .cloned()
+        .collect();
+
+    if let Some(random_peer) = online_peers.choose(&mut rand::thread_rng()) {
+        if let Ok(mut stream) = TcpStream::connect(random_peer).await {
+            let _ = stream.write_all(b"/chain-hash").await;
+            let mut buf = vec![0; 512];
+            if let Ok(n) = stream.read(&mut buf).await {
+                let peer_hash = String::from_utf8_lossy(&buf[..n]).to_string();
+                let local = blockchain.lock().await;
+                let json = serde_json::to_string(&*local).unwrap();
+                let local_hash = hex::encode(Sha256::digest(json.as_bytes()));
+                if peer_hash == local_hash {
+                    println!("✓ Hash zgodny z {} – rozsyłam chain", random_peer);
+                    broadcast_to_known_nodes(&local.last().unwrap()).await;
+                } else {
+                    println!("✗ Hash niezgodny z {} – chain nie został rozesłany", random_peer);
+                }
+            }
+        }
+    } else {
+        println!("✗ Brak online peerów do weryfikacji");
     }
 }
 
