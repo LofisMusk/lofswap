@@ -50,13 +50,15 @@ async fn main() {
                 if let Ok((mut stream, addr)) = listener.accept().await {
                     // zapisz IP jako peer
                     let peer_addr = format!("{}:{}", addr.ip(), addr.port());
-                    let mut p = peers.lock().await;
-                    if !p.contains(&peer_addr) {
-                        println!("Dodano nowego peera: {}", peer_addr);
-                        p.push(peer_addr.clone());
-                        save_peers(&p);
+                    if addr.port() == LISTEN_PORT {
+                        let mut p = peers.lock().await;
+                        if !p.contains(&peer_addr) {
+                            println!("Dodano nowego peera: {}", peer_addr);
+                            p.push(peer_addr.clone());
+                            save_peers(&p);
+                        }
+                        drop(p);
                     }
-                    drop(p);
 
                     let blockchain = blockchain.clone();
                     let peers = peers.clone();
