@@ -396,7 +396,7 @@ async fn sync_chain(blockchain: &Arc<Mutex<Vec<Block>>>, peers: &Arc<Mutex<Vec<S
         }
     }
 
-    if let Some((hash, nodes)) = hash_map.into_iter().find(|(_, v)| v.len() >= 2) {
+    if let Some((hash, nodes)) = hash_map.into_iter().find(|(_, v)| v.len() >= 1) {
         let chosen_peer = &nodes[0];
         if let Ok(mut stream) = TcpStream::connect(chosen_peer).await {
             let _ = stream.write_all(b"/chain").await;
