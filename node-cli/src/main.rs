@@ -122,7 +122,9 @@ async fn main() {
 
     // peer discovery z bootstrap
     for &boot in BOOTSTRAP_NODES {
-        if let Ok(mut s) = TcpStream::connect(boot).await {
+        if let Ok(Ok(mut s)) =
+            tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(boot)).await
+        {
             let local = format!("{}:{}", local_ip().unwrap(), LISTEN_PORT);
             let _ = s.write_all(format!("/iam/{}\n", local).as_bytes()).await;
             let _ = s.write_all(b"/peers").await;
