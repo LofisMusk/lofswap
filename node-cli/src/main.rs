@@ -25,7 +25,7 @@ use tokio::{
 };
 
 const LISTEN_PORT: u16 = 6000;
-const BOOTSTRAP_NODES: &[&str] = &["lofis.ddns.net:6000", "lofis.ddns.net:6001"];
+const BOOTSTRAP_NODES: &[&str] = &["31.135.167.5:6000", "31.135.167.5:6001"];
 
 #[tokio::main]
 async fn main() {
