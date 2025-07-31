@@ -33,10 +33,18 @@ const BOOTSTRAP_NODES: &[&str] = &["31.135.167.5:6000", "31.135.167.5:6001"];
 
 #[tokio::main]
 async fn main() {
-    println!("[DEBUG] Attempting UPnP port mapping...");
-    if let Err(_) = setup_upnp(LISTEN_PORT).await {
-        eprintln!("[DEBUG] UPnP port mapping failed. Continuing without it.");
-    };
+    let args: Vec<String> = std::env::args().collect();
+    let no_upnp = args.iter().any(|a| a == "--no-upnp");
+    let no_peer_exchange = args.iter().any(|a| a == "--no-peer-exchange");
+
+    if !no_upnp {
+        println!("[DEBUG] Attempting UPnP port mapping...");
+        if let Err(_) = setup_upnp(LISTEN_PORT).await {
+            eprintln!("[DEBUG] UPnP port mapping failed. Continuing without it.");
+        };
+    } else {
+        println!("[DEBUG] Skipping UPnP setup (--no-upnp flag set)");
+    }
 
 
     let blockchain = Arc::new(Mutex::new(load_chain()));
@@ -105,10 +113,9 @@ async fn main() {
                                 let _ = stream.write_all(bal.to_string().as_bytes()).await;
                                 let _ = stream.shutdown().await;
                             } else if txt.trim() == "/peers" {
-                                let p = peers.lock().await;
-                                let _ = stream
-                                    .write_all(serde_json::to_string(&*p).unwrap().as_bytes())
-                                    .await;
+                                // Always send the current peers.json file, not just in-memory list
+                                let peers_json = std::fs::read_to_string("peers.json").unwrap_or_else(|_| "[]".to_string());
+                                let _ = stream.write_all(peers_json.as_bytes()).await;
                                 let _ = stream.shutdown().await;
                             } else if txt.trim() == "/chain" {
                                 let chain = blockchain.lock().await;
@@ -164,6 +171,29 @@ async fn main() {
                                     }
                                 }
                                 let _ = stream.shutdown().await;
+                            } else if let Ok(block) = serde_json::from_slice::<Block>(slice) {
+                                let mut chain = blockchain.lock().await;
+                                // Check if block is already present
+                                if chain.iter().any(|b| b.hash == block.hash) {
+                                    // Already have this block
+                                    let _ = stream.shutdown().await;
+                                    return;
+                                }
+                                // Check if block is valid and extends the chain
+                                let zero = String::from("0");
+                                let prev_hash = chain.last().map(|b| &b.hash).unwrap_or(&zero);
+                                if &block.previous_hash == prev_hash && block.index == chain.len() as u64 {
+                                    // Optionally: verify all transactions in the block here
+                                    chain.push(block.clone());
+                                    save_chain(&chain);
+                                    println!("✓ Dodano nowy blok z sieci: {}", block.hash);
+                                    // Propagate to other peers
+                                    broadcast_to_known_nodes(&block).await;
+                                } else {
+                                    println!("✗ Odrzucono blok: nie pasuje do łańcucha");
+                                }
+                                let _ = stream.shutdown().await;
+                                return;
                             }
                         }
                     });
@@ -172,28 +202,32 @@ async fn main() {
         });
     }
 
-    // peer discovery z bootstrap
-    for &boot in BOOTSTRAP_NODES {
-        if let Ok(Ok(mut s)) =
-            tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(boot)).await
-        {
-            let local = format!("{}:{}", local_ip().unwrap(), LISTEN_PORT);
-            let _ = s.write_all(format!("/iam/{}\n", local).as_bytes()).await;
-            let _ = s.write_all(b"/peers").await;
-            let mut buf = vec![0; 4096];
-            if let Ok(n) = s.read(&mut buf).await {
-                if let Ok(list) = serde_json::from_slice::<Vec<String>>(&buf[..n]) {
-                    let mut p = peers.lock().await;
-                    for peer in list {
-                        if !p.contains(&peer) {
-                            println!("Dodano peer z bootstrapu: {peer}");
-                            p.push(peer);
+    if !no_peer_exchange {
+        // peer discovery z bootstrap
+        for &boot in BOOTSTRAP_NODES {
+            if let Ok(Ok(mut s)) =
+                tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(boot)).await
+            {
+                let local = format!("{}:{}", local_ip().unwrap(), LISTEN_PORT);
+                let _ = s.write_all(format!("/iam/{}\n", local).as_bytes()).await;
+                let _ = s.write_all(b"/peers").await;
+                let mut buf = vec![0; 4096];
+                if let Ok(n) = s.read(&mut buf).await {
+                    if let Ok(list) = serde_json::from_slice::<Vec<String>>(&buf[..n]) {
+                        let mut p = peers.lock().await;
+                        for peer in list {
+                            if !p.contains(&peer) {
+                                println!("Dodano peer z bootstrapu: {peer}");
+                                p.push(peer);
+                            }
                         }
+                        save_peers(&p);
                     }
-                    save_peers(&p);
                 }
             }
         }
+    } else {
+        println!("[DEBUG] Skipping peer exchange (--no-peer-exchange flag set)");
     }
 
     // CLI
