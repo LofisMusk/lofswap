@@ -172,10 +172,11 @@ async fn main() {
                                 }
                                 let _ = stream.shutdown().await;
                             } else if let Ok(block) = serde_json::from_slice::<Block>(slice) {
+                                println!("[DEBUG] Otrzymano blok z sieci: {}. Rozpoczynam weryfikację...", block.hash);
                                 let mut chain = blockchain.lock().await;
                                 // Check if block is already present
                                 if chain.iter().any(|b| b.hash == block.hash) {
-                                    // Already have this block
+                                    println!("[DEBUG] Blok {} już istnieje w łańcuchu. Pomijam.", block.hash);
                                     let _ = stream.shutdown().await;
                                     return;
                                 }
@@ -184,12 +185,14 @@ async fn main() {
                                 let prev_hash = chain.last().map(|b| &b.hash).unwrap_or(&zero);
                                 if &block.previous_hash == prev_hash && block.index == chain.len() as u64 {
                                     // Optionally: verify all transactions in the block here
+                                    println!("[DEBUG] Blok {} jest poprawny. Dodaję do łańcucha.", block.hash);
                                     chain.push(block.clone());
                                     save_chain(&chain);
                                     println!("✓ Dodano nowy blok z sieci: {}", block.hash);
                                     // Propagate to other peers
                                     broadcast_to_known_nodes(&block).await;
                                 } else {
+                                    println!("[DEBUG] Blok {} odrzucony: nie pasuje do łańcucha.", block.hash);
                                     println!("✗ Odrzucono blok: nie pasuje do łańcucha");
                                 }
                                 let _ = stream.shutdown().await;
