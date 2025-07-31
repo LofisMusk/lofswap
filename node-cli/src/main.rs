@@ -473,10 +473,14 @@ fn save_peers(peers: &Vec<String>) {
 async fn broadcast_to_known_nodes(block: &Block) {
     if let Ok(list) = std::fs::read_to_string("peers.json") {
         for line in list.lines() {
+            println!("[DEBUG] Próba wysłania bloku do peera: {}", line);
             if let Ok(mut stream) = TcpStream::connect(line).await {
                 let json = serde_json::to_string(block).unwrap();
                 let _ = stream.write_all(json.as_bytes()).await;
                 let _ = stream.shutdown().await;
+                println!("[DEBUG] Wysłano blok do peera: {}", line);
+            } else {
+                println!("[DEBUG] Nie udało się połączyć z peerem: {}", line);
             }
         }
     }
