@@ -91,7 +91,7 @@ async fn main() {
                     let my_addr = my_addr.clone();
 
                     tokio::spawn(async move {
-                        let mut buf = vec![0; 4096];
+                        let mut buf = vec![0; 65536];
                         if let Ok(n) = stream.read(&mut buf).await {
                             let slice = &buf[..n];
                             let txt = String::from_utf8_lossy(slice);
