@@ -38,12 +38,16 @@ async fn main() {
         eprintln!("[DEBUG] UPnP port mapping failed. Continuing without it.");
     };
 
+
     let blockchain = Arc::new(Mutex::new(load_chain()));
     let peers = Arc::new(Mutex::new(load_peers()));
 
     // Determine our own address for peer filtering
     let my_ip = OBSERVED_IP.read().unwrap().clone().unwrap_or_else(|| local_ip().unwrap().to_string());
     let my_addr = format!("{}:{}", my_ip, LISTEN_PORT);
+
+    println!("[DEBUG] My address: {}", my_addr);
+    println!("[DEBUG] My IP: {}", my_ip);
 
     // TCP server
     {
@@ -58,8 +62,8 @@ async fn main() {
             loop {
                 if let Ok((mut stream, addr)) = listener.accept().await {
                     // zapisz IP jako peer
-                    let ip = addr.ip().to_string();
                     if addr.port() == LISTEN_PORT {
+                        let ip = addr.ip().to_string();
                         {
                             let mut observed = OBSERVED_IP.write().unwrap();
                             *observed = Some(ip.clone());
@@ -135,14 +139,12 @@ async fn main() {
                                 }
                             } else if txt.starts_with("/iam/") {
                                 let new_peer = txt.trim().replace("/iam/", "");
-                                if let Some(port) = new_peer.split(':').nth(1) {
-                                    if port == "6000" {
-                                        let mut p = peers.lock().await;
-                                        if !p.contains(&new_peer) && new_peer != my_addr {
-                                            println!("Dodano peera przez /iam/: {}", new_peer);
-                                            p.push(new_peer.clone());
-                                            save_peers(&p);
-                                        }
+                                if new_peer.ends_with(":6000") && new_peer != my_addr {
+                                    let mut p = peers.lock().await;
+                                    if !p.contains(&new_peer) {
+                                        println!("Dodano peera przez /iam/: {}", new_peer);
+                                        p.push(new_peer.clone());
+                                        save_peers(&p);
                                     }
                                 }
                                 let _ = stream.shutdown().await;
@@ -153,7 +155,7 @@ async fn main() {
                                     if let Ok(list) = serde_json::from_str::<Vec<String>>(rest) {
                                         let mut p = peers.lock().await;
                                         for peer in list {
-                                            if !p.contains(&peer) && peer != my_addr {
+                                            if peer.ends_with(":6000") && !p.contains(&peer) && peer != my_addr {
                                                 println!("Dodano peera z /peers: {}", peer);
                                                 p.push(peer);
                                             }
