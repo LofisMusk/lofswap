@@ -90,6 +90,9 @@ fn broadcast(json: &[u8], min_peers: usize) {
             .create(true)
             .open(MEMPOOL_FILE)
             .and_then(|mut f| f.write_all(json));
+    } else {
+        // If sent successfully, try to broadcast any pending transactions
+        try_broadcast_pending(min_peers);
     }
 }
 
@@ -195,7 +198,7 @@ fn export_dat(path: &str) {
 // ---------- CLI ----------
 fn help() {
     println!(
-        "Komendy:\n  help\n  create-wallet\n  import-priv <hex>\n  import-dat <plik>\n  export-dat <plik>\n  default-wallet\n  send <to> <amount> [n=2]\n  send-priv <priv> <to> <amount> [n=2]\n  balance [address]\n  faucet <address>\n  list-peers\n  mempool\n  exit"
+        "Komendy:\n  help\n  create-wallet\n  import-priv <hex>\n  import-dat <plik>\n  export-dat <plik>\n  default-wallet\n  send <to> <amount> [n=2]\n  send-priv <priv> <to> <amount> [n=2]\n  balance [address]\n  faucet <address>\n  list-peers\n  print-mempool\n  exit"
     );
 }
 
@@ -250,6 +253,45 @@ fn show_mempool() {
         }
     } else {
         println!("✗ Mempool jest pusty");
+    }
+}
+
+fn try_broadcast_pending(min_peers: usize) {
+    if let Ok(txt) = fs::read_to_string(MEMPOOL_FILE) {
+        let lines: Vec<_> = txt.lines().collect();
+        if lines.is_empty() {
+            return;
+        }
+        let peers = load_peers();
+        if peers.is_empty() {
+            return;
+        }
+        let mut sent = 0;
+        let mut failed = Vec::new();
+        for line in lines {
+            if let Ok(tx) = serde_json::from_str::<serde_json::Value>(line) {
+                let payload = serde_json::to_vec(&tx).unwrap();
+                let mut ok = 0;
+                for p in &peers {
+                    if connect_and_send(p, &payload).is_ok() {
+                        ok += 1;
+                        if ok >= min_peers {
+                            break;
+                        }
+                    }
+                }
+                if ok >= min_peers {
+                    sent += 1;
+                } else {
+                    failed.push(line.to_string());
+                }
+            }
+        }
+        if sent > 0 {
+            println!("✓ Wysłano {} zaległych transakcji z mempoola", sent);
+        }
+        // Rewrite mempool with failed txs
+        let _ = fs::write(MEMPOOL_FILE, failed.join("\n"));
     }
 }
 
@@ -313,7 +355,7 @@ fn main() {
             }
             "faucet" if a.len() == 2 => faucet(a[1]),
             "list-peers" => list_peers(),
-            "mempool" => show_mempool(),
+            "print-mempool" => show_mempool(),
             "exit" => break,
             _ => println!("Nieznana komenda – wpisz 'help'"),
         }

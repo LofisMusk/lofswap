@@ -4,7 +4,7 @@ use easy_upnp::{UpnpConfig as EasyConfig, add_ports, delete_ports};
 use igd::PortMappingProtocol;
 use igd::aio::search_gateway;
 use local_ip_address::local_ip;
-use rand::seq::{IndexedRandom, SliceRandom};
+use rand::seq::{IndexedRandom};
 use secp256k1::{Message, PublicKey, Secp256k1, ecdsa::Signature};
 use serde_json;
 use sha2::{Digest, Sha256};
@@ -23,6 +23,10 @@ use tokio::{
     sync::Mutex,
     time::sleep,
 };
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::RwLock;
+
+static OBSERVED_IP: once_cell::sync::Lazy<RwLock<Option<String>>> = once_cell::sync::Lazy::new(|| RwLock::new(None));
 
 const LISTEN_PORT: u16 = 6000;
 const BOOTSTRAP_NODES: &[&str] = &["31.135.167.5:6000", "31.135.167.5:6001"];
@@ -37,10 +41,15 @@ async fn main() {
     let blockchain = Arc::new(Mutex::new(load_chain()));
     let peers = Arc::new(Mutex::new(load_peers()));
 
+    // Determine our own address for peer filtering
+    let my_ip = OBSERVED_IP.read().unwrap().clone().unwrap_or_else(|| local_ip().unwrap().to_string());
+    let my_addr = format!("{}:{}", my_ip, LISTEN_PORT);
+
     // TCP server
     {
         let blockchain = blockchain.clone();
         let peers = peers.clone();
+        let my_addr = my_addr.clone();
         tokio::spawn(async move {
             let addr = format!("0.0.0.0:{LISTEN_PORT}");
             let listener = TcpListener::bind(addr).await.unwrap();
@@ -49,8 +58,13 @@ async fn main() {
             loop {
                 if let Ok((mut stream, addr)) = listener.accept().await {
                     // zapisz IP jako peer
-                    let peer_addr = format!("{}:{}", addr.ip(), addr.port());
+                    let ip = addr.ip().to_string();
                     if addr.port() == LISTEN_PORT {
+                        {
+                            let mut observed = OBSERVED_IP.write().unwrap();
+                            *observed = Some(ip.clone());
+                        }
+                        let peer_addr = format!("{}:{}", ip, addr.port());
                         let mut p = peers.lock().await;
                         if !p.contains(&peer_addr) {
                             println!("Dodano nowego peera: {}", peer_addr);
@@ -62,6 +76,7 @@ async fn main() {
 
                     let blockchain = blockchain.clone();
                     let peers = peers.clone();
+                    let my_addr = my_addr.clone();
 
                     tokio::spawn(async move {
                         let mut buf = vec![0; 4096];
@@ -84,21 +99,25 @@ async fn main() {
                                     }
                                 }
                                 let _ = stream.write_all(bal.to_string().as_bytes()).await;
+                                let _ = stream.shutdown().await;
                             } else if txt.trim() == "/peers" {
                                 let p = peers.lock().await;
                                 let _ = stream
                                     .write_all(serde_json::to_string(&*p).unwrap().as_bytes())
                                     .await;
+                                let _ = stream.shutdown().await;
                             } else if txt.trim() == "/chain" {
                                 let chain = blockchain.lock().await;
                                 let _ = stream
                                     .write_all(serde_json::to_string(&*chain).unwrap().as_bytes())
                                     .await;
+                                let _ = stream.shutdown().await;
                             } else if txt.trim() == "/chain-hash" {
                                 let chain = blockchain.lock().await;
                                 let json = serde_json::to_string(&*chain).unwrap();
                                 let hash = Sha256::digest(json.as_bytes());
                                 let _ = stream.write_all(hex::encode(hash).as_bytes()).await;
+                                let _ = stream.shutdown().await;
                             } else if let Ok(tx) = serde_json::from_slice::<Transaction>(slice) {
                                 let chain = blockchain.lock().await;
                                 if is_tx_valid(&tx, &chain) {
@@ -114,6 +133,35 @@ async fn main() {
                                 } else {
                                     println!("✗ TX odrzucony (podpis / saldo)");
                                 }
+                            } else if txt.starts_with("/iam/") {
+                                let new_peer = txt.trim().replace("/iam/", "");
+                                if let Some(port) = new_peer.split(':').nth(1) {
+                                    if port == "6000" {
+                                        let mut p = peers.lock().await;
+                                        if !p.contains(&new_peer) && new_peer != my_addr {
+                                            println!("Dodano peera przez /iam/: {}", new_peer);
+                                            p.push(new_peer.clone());
+                                            save_peers(&p);
+                                        }
+                                    }
+                                }
+                                let _ = stream.shutdown().await;
+                                return;
+                            } else if txt.trim().starts_with("/peers") {
+                                let rest = txt.trim().strip_prefix("/peers").unwrap_or("");
+                                if !rest.is_empty() {
+                                    if let Ok(list) = serde_json::from_str::<Vec<String>>(rest) {
+                                        let mut p = peers.lock().await;
+                                        for peer in list {
+                                            if !p.contains(&peer) && peer != my_addr {
+                                                println!("Dodano peera z /peers: {}", peer);
+                                                p.push(peer);
+                                            }
+                                        }
+                                        save_peers(&p);
+                                    }
+                                }
+                                let _ = stream.shutdown().await;
                             }
                         }
                     });
@@ -396,7 +444,6 @@ async fn broadcast_to_known_nodes(block: &Block) {
 }
 
 async fn sync_chain(blockchain: &Arc<Mutex<Vec<Block>>>, peers: &Arc<Mutex<Vec<String>>>, force: bool) {
-    use rand::seq::SliceRandom;
 
     let peer_list = peers.lock().await.clone();
     let mut rng = rand::thread_rng();
@@ -456,7 +503,6 @@ async fn sync_chain(blockchain: &Arc<Mutex<Vec<Block>>>, peers: &Arc<Mutex<Vec<S
 }
 
 async fn verify_and_broadcast_chain(blockchain: &Arc<Mutex<Vec<Block>>>, peers: &Arc<Mutex<Vec<String>>>) {
-    use rand::seq::SliceRandom;
     use std::net::{TcpStream as StdTcpStream, ToSocketAddrs};
 
     let peer_list = peers.lock().await.clone();
@@ -472,7 +518,13 @@ async fn verify_and_broadcast_chain(blockchain: &Arc<Mutex<Vec<Block>>>, peers: 
         .cloned()
         .collect();
 
+    if online_peers.is_empty() {
+        println!("✗ Brak online peerów do weryfikacji");
+        return;
+    }
+
     if let Some(random_peer) = online_peers.choose(&mut rand::thread_rng()) {
+        println!("Wybrano peera do weryfikacji: {}", random_peer);
         if let Ok(mut stream) = TcpStream::connect(random_peer).await {
             let _ = stream.write_all(b"/chain-hash").await;
             let mut buf = vec![0; 512];
@@ -483,14 +535,23 @@ async fn verify_and_broadcast_chain(blockchain: &Arc<Mutex<Vec<Block>>>, peers: 
                 let local_hash = hex::encode(Sha256::digest(json.as_bytes()));
                 if peer_hash == local_hash {
                     println!("✓ Hash zgodny z {} – rozsyłam chain", random_peer);
-                    broadcast_to_known_nodes(&local.last().unwrap()).await;
+                    // Rozsyłaj cały chain, nie tylko ostatni blok
+                    for peer in online_peers {
+                        if let Ok(mut s) = TcpStream::connect(&peer).await {
+                            let _ = s.write_all(b"/chain").await;
+                            let _ = s.write_all(json.as_bytes()).await;
+                            let _ = s.shutdown().await;
+                        }
+                    }
                 } else {
                     println!("✗ Hash niezgodny z {} – chain nie został rozesłany", random_peer);
                 }
+            } else {
+                println!("✗ Peer nie odpowiedział na zapytanie o hash");
             }
+        } else {
+            println!("✗ Nie udało się połączyć z peerem do weryfikacji");
         }
-    } else {
-        println!("✗ Brak online peerów do weryfikacji");
     }
 }
 

@@ -956,6 +956,7 @@ dependencies = [
  "hex",
  "igd",
  "local-ip-address",
+ "once_cell",
  "rand 0.9.1",
  "secp256k1",
  "serde",
