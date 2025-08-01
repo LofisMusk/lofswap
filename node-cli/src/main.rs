@@ -473,9 +473,13 @@ fn save_peers(peers: &Vec<String>) {
 }
 
 async fn broadcast_to_known_nodes(block: &Block) {
+    let my_addr = OBSERVED_IP.read().unwrap().clone().unwrap_or_else(|| local_ip().unwrap().to_string()) + &format!(":{}", LISTEN_PORT);
     if let Ok(list) = std::fs::read_to_string("peers.json") {
         if let Ok(peers) = serde_json::from_str::<Vec<String>>(&list) {
             for peer in peers {
+                if peer == my_addr {
+                    continue; // Don't send block to self
+                }
                 println!("[DEBUG] Próba wysłania bloku do peera: {}", peer);
                 if let Ok(mut stream) = TcpStream::connect(&peer).await {
                     let json = serde_json::to_string(block).unwrap();
