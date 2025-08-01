@@ -18,6 +18,7 @@ pub struct Block {
     pub previous_hash: String,
     pub nonce: u64,
     pub hash: String,
+    pub miner: String, 
 }
 
 impl Block {
@@ -30,6 +31,7 @@ impl Block {
             previous_hash,
             nonce: 0,
             hash: String::new(),
+            miner: String::new(),
         };
         block.mine(4); // np. trudność 4 zera
         block
