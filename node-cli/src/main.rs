@@ -177,6 +177,7 @@ async fn main() {
                                 // Check if block is already present
                                 if chain.iter().any(|b| b.hash == block.hash) {
                                     println!("[DEBUG] Blok {} już istnieje w łańcuchu. Pomijam.", block.hash);
+                                    let _ = stream.write_all(b"BLOCK_EXISTS").await;
                                     let _ = stream.shutdown().await;
                                     return;
                                 }
@@ -184,16 +185,17 @@ async fn main() {
                                 let zero = String::from("0");
                                 let prev_hash = chain.last().map(|b| &b.hash).unwrap_or(&zero);
                                 if &block.previous_hash == prev_hash && block.index == chain.len() as u64 {
-                                    // Optionally: verify all transactions in the block here
                                     println!("[DEBUG] Blok {} jest poprawny. Dodaję do łańcucha.", block.hash);
                                     chain.push(block.clone());
                                     save_chain(&chain);
                                     println!("✓ Dodano nowy blok z sieci: {}", block.hash);
                                     // Propagate to other peers
                                     broadcast_to_known_nodes(&block).await;
+                                    let _ = stream.write_all(b"BLOCK_ACCEPTED").await;
                                 } else {
                                     println!("[DEBUG] Blok {} odrzucony: nie pasuje do łańcucha.", block.hash);
                                     println!("✗ Odrzucono blok: nie pasuje do łańcucha");
+                                    let _ = stream.write_all(b"BLOCK_REJECTED").await;
                                 }
                                 let _ = stream.shutdown().await;
                                 return;
@@ -478,6 +480,11 @@ async fn broadcast_to_known_nodes(block: &Block) {
                 if let Ok(mut stream) = TcpStream::connect(&peer).await {
                     let json = serde_json::to_string(block).unwrap();
                     let _ = stream.write_all(json.as_bytes()).await;
+                    let mut resp_buf = vec![0; 64];
+                    if let Ok(n) = stream.read(&mut resp_buf).await {
+                        let resp = String::from_utf8_lossy(&resp_buf[..n]);
+                        println!("[DEBUG] Odpowiedź od peera {}: {}", peer, resp.trim());
+                    }
                     let _ = stream.shutdown().await;
                     println!("[DEBUG] Wysłano blok do peera: {}", peer);
                 } else {
