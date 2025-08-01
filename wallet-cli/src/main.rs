@@ -348,7 +348,11 @@ fn main() {
                     balance(a[1]);
                 } else if let Some(sk) = load_default_wallet() {
                     let pk = PublicKey::from_secret_key(&Secp256k1::new(), &sk);
-                    balance(&pk.to_string());
+                    let lfs_addr = format!(
+                        "LFS{}",
+                        bs58::encode(&Sha256::digest(&pk.serialize())[..20]).into_string()
+                    );
+                    balance(&lfs_addr);
                 } else {
                     println!("Brak domyślnego portfela");
                 }
