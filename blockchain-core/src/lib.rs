@@ -22,7 +22,7 @@ pub struct Block {
 }
 
 impl Block {
-    pub fn new(index: u64, transactions: Vec<Transaction>, previous_hash: String) -> Self {
+    pub fn new(index: u64, transactions: Vec<Transaction>, previous_hash: String, miner: String) -> Self {
         let timestamp = Utc::now().timestamp();
         let mut block = Block {
             index,

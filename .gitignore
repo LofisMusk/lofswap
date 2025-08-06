@@ -6,3 +6,5 @@ mempool.json
 blockchain.json
 peers.json
 /.vscode
+linux-build
+.idea/
