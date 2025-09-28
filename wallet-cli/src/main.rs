@@ -1,190 +1,308 @@
-// === /wallet-cli/src/main.rs ===
-//! Wallet CLI – oparty wyłącznie o mechanizm `peers.json` + `BOOTSTRAP_NODES`.
-//! Usunięto wszystkie ścieżki korzystające z `nodes.txt`.
-
-use blockchain_core::Transaction;
-use rand::seq::IndexedRandom;
-use secp256k1::{Secp256k1, SecretKey, PublicKey, Message};
+use anyhow::{anyhow, Result};
+use clap::{Parser, Subcommand};
+use dirs::home_dir;
+use k256::{
+    ecdsa::{signature::{DigestSigner, Signer}, Signature, SigningKey}, 
+    elliptic_curve::{rand_core::OsRng, sec1::ToEncodedPoint}, 
+    PublicKey
+};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::fs::{self, File};
-use std::io::{self, Read, Write};
-use std::net::{TcpStream, SocketAddr};
-use std::path::Path;
-use std::time::Duration;
-use serde_json;
+use std::{collections::HashMap, fs, io::{self, Read}, path::{Path, PathBuf}, time::{Duration, Instant}};
+use reqwest::Client;
+use bs58;
 
-static BOOTSTRAP_NODES: &[&str] = &[
-    "31.135.167.5:6000",
-    "31.135.167.5:6001",
-];
-
-// ---------- domyślny portfel ----------
-const DEFAULT_WALLET: &str = ".default_wallet";
-fn save_default_wallet(sk:&SecretKey){ let _ = fs::write(DEFAULT_WALLET, hex::encode(sk.secret_bytes())); }
-fn load_default_wallet() -> Option<SecretKey> {
-    fs::read_to_string(DEFAULT_WALLET)
-        .ok()
-        .and_then(|h| hex::decode(h.trim()).ok())
-        .and_then(|b| {
-            if b.len() == 32 {
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(&b);
-                SecretKey::from_byte_array(arr).ok()
-            } else {
-                None
-            }
-        })
+/// Adres = "LFS" + Base58(pubkey_uncompressed[1..]) – 64 bajty (X||Y)
+fn pubkey_to_address(pk: &PublicKey) -> String {
+    let uncompressed = pk.to_encoded_point(false);
+    let without_prefix = &uncompressed.as_bytes()[1..]; // usuń 0x04
+    format!("LFS{}", bs58::encode(without_prefix).into_string())
 }
 
-// ---------- Peers ----------
-fn load_peers() -> Vec<String> {
-    if Path::new("peers.json").exists() {
-        if let Ok(txt) = fs::read_to_string("peers.json") {
-            if let Ok(v) = serde_json::from_str::<Vec<String>>(&txt) {
-                if !v.is_empty() { return v; }
-            }
-        }
+/// Zamień LFS-base58 → czysty pubkey bytes
+fn address_to_pubkey_bytes(addr: &str) -> Result<Vec<u8>> {
+    let base58_part = addr.strip_prefix("LFS").unwrap_or(addr);
+    let bytes = bs58::decode(base58_part).into_vec()?;
+    if bytes.len() != 64 {
+        return Err(anyhow!("decoded pubkey length != 64B"));
     }
-    BOOTSTRAP_NODES.iter().map(|s| s.to_string()).collect()
+    // dodaj prefix uncompressed 0x04
+    let mut full = vec![0x04];
+    full.extend_from_slice(&bytes);
+    Ok(full)
 }
 
-fn connect_and_send(addr:&str,data:&[u8])->io::Result<()> {
-    let sock:SocketAddr = addr.parse().map_err(|_| io::Error::new(io::ErrorKind::Other,"bad addr"))?;
-    let mut s = TcpStream::connect_timeout(&sock,Duration::from_millis(800))?;
-    s.write_all(data)?;
+fn canonical_tx_bytes(from: &str, to: &str, amount: u64) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "from": from,
+        "to": to,
+        "amount": amount
+    })).expect("json")
+}
+
+fn sign_offline(sk_hex: &str, from_addr: &str, to_addr: &str, amount: u64) -> Result<String> {
+    let sk_bytes = hex::decode(sk_hex)?;
+    let sk = SigningKey::from_slice(&sk_bytes)?;
+    let msg = canonical_tx_bytes(from_addr, to_addr, amount);
+    let digest = Sha256::new().chain_update(&msg).finalize();
+    let sig: Signature = sk.sign_digest(Sha256::new().chain_update(&digest));
+    Ok(hex::encode(sig.to_der().as_bytes()))
+}
+
+// ========= Dysk: katalog i pliki =========
+#[derive(Clone)]
+struct Store {
+    dir: PathBuf,
+    book_path: PathBuf,
+    pending_path: PathBuf,
+    keys_path: PathBuf,
+}
+
+impl Store {
+    fn open() -> Result<Self> {
+        let base = home_dir().ok_or_else(|| anyhow!("no home dir"))?.join(".lofswap");
+        if !base.exists() { fs::create_dir_all(&base)?; }
+        Ok(Self {
+            dir: base.clone(),
+            book_path: base.join("address_book.json"),
+            pending_path: base.join("pending.json"),
+            keys_path: base.join("keys.json"),
+        })
+    }
+}
+
+// ========= Typy danych =========
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct AddressBook {
+    entries: HashMap<String, String>, // name -> address
+}
+impl Default for AddressBook {
+    fn default() -> Self { Self { entries: HashMap::new() } }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct PendingTx {
+    from: String,
+    to: String,
+    amount: u64,
+    signature: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+struct PendingQueue {
+    txs: Vec<PendingTx>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+struct KeyStore {
+    keys: HashMap<String, (String, String)>, // label -> (sk_hex, address)
+}
+
+// ========= IO helpers =========
+fn read_json_or_default<T: for<'de> Deserialize<'de> + Default>(p: &Path) -> Result<T> {
+    if !p.exists() { return Ok(T::default()); }
+    let s = fs::read_to_string(p)?;
+    Ok(serde_json::from_str(&s)?)
+}
+
+fn write_json<T: Serialize>(p: &Path, v: &T) -> Result<()> {
+    fs::write(p, serde_json::to_string_pretty(v)?)?;
     Ok(())
 }
 
-fn broadcast(json:&[u8],min_peers:usize){
-    let peers=load_peers();
-    if peers.is_empty(){ println!("✗ Brak znanych nodów"); return; }
-    let mut rng=rand::rng();
-    let selected:Vec<String>=peers.choose_multiple(&mut rng,min_peers.max(1)).cloned().collect();
-    let mut ok=0;
-    for p in &selected {
-        match connect_and_send(p,json){
-            Ok(_) => { println!("✓ Wysłano do {}",p); ok+=1; },
-            Err(_) => println!("✗ Nie udało się połączyć z {}",p),
-        }
-    }
-    if ok<min_peers { println!("⚠️ Wysłano tylko do {ok}/{min_peers} nodów"); }
+// ========= CLI =========
+#[derive(Parser)]
+#[command(name = "wallet-cli")]
+struct Cli {
+    #[arg(long, default_value = "http://127.0.0.1:6060")]
+    rpc: String,
+    #[command(subcommand)]
+    cmd: Commands,
 }
 
-// ---------- Transakcje ----------
-fn build_tx(sk:&SecretKey,to:&str,amount:u64)->Transaction{
-    let secp=Secp256k1::new();
-    let pk=PublicKey::from_secret_key(&secp,sk);
-    let preimage=format!("{}{}{}",pk,to,amount);
-    let hash=Sha256::digest(preimage.as_bytes());
-    let sig=secp.sign_ecdsa(Message::from_slice(&hash).unwrap(),sk);
-    Transaction{ from:pk.to_string(), to:to.into(), amount, signature:hex::encode(sig.serialize_compact()) }
+#[derive(Subcommand)]
+enum Commands {
+    Vanity {
+        #[arg(long)] startswith: Option<String>,
+        #[arg(long)] endswith: Option<String>,
+        #[arg(long, default_value_t = 1)] count: u32,
+        #[arg(long, default_value_t = 0)] timeout: u64,
+        #[arg(long)] label: Option<String>,
+    },
+    Generate { #[arg(long)] label: String },
+    Keys,
+    AddrAdd { name: String, address: String },
+    AddrRm { name: String },
+    AddrList,
+    SignRaw {
+        #[arg(long)] sk_hex: Option<String>,
+        #[arg(long)] label: Option<String>,
+        #[arg(long)] from: Option<String>,
+        #[arg(long)] to: String,
+        #[arg(long)] amount: u64,
+        #[arg(long, default_value_t = false)] save: bool,
+    },
+    Pending,
+    PendingClear,
+    BroadcastPending,
+    Broadcast { #[arg(long)] file: Option<String> },
 }
 
-fn send_default(to:&str,amount:u64,min_peers:usize){
-    if let Some(sk)=load_default_wallet(){ let tx=build_tx(&sk,to,amount); let payload=serde_json::to_vec(&tx).unwrap(); broadcast(&payload,min_peers); }
-    else { println!("✗ Brak domyślnego portfela"); }
-}
-fn send_priv(priv_hex:&str,to:&str,amount:u64,min_peers:usize){
-    if let Ok(sk)=SecretKey::from_slice(&hex::decode(priv_hex).unwrap_or_default()){ let tx=build_tx(&sk,to,amount); let payload=serde_json::to_vec(&tx).unwrap(); broadcast(&payload,min_peers); }
-    else { println!("✗ Niepoprawny klucz prywatny"); }
-}
+// ========= MAIN =========
+#[tokio::main]
+async fn main() -> Result<()> {
+    let cli = Cli::parse();
+    let store = Store::open()?;
 
-// ---------- Saldo ----------
-fn balance(addr:&str){
-    let query=format!("/balance/{}",addr);
-    for p in load_peers(){
-        if let Ok(mut s)=TcpStream::connect_timeout(&p.parse().unwrap(),Duration::from_millis(800)){
-            if s.write_all(query.as_bytes()).is_ok(){
-                let mut buf=String::new();
-                if s.read_to_string(&mut buf).is_ok(){ println!("Saldo {}: {}",addr,buf.trim()); return; }
+    match cli.cmd {
+        Commands::Vanity { startswith, endswith, count, timeout, label } => {
+            let (sk_hex, address) = vanity_find(startswith.as_deref(), endswith.as_deref(), count, timeout)?;
+            println!("FOUND: {}\nsk: {}", address, sk_hex);
+            if let Some(label) = label {
+                let mut ks: KeyStore = read_json_or_default(&store.keys_path)?;
+                ks.keys.insert(label.clone(), (sk_hex.clone(), address.clone()));
+                write_json(&store.keys_path, &ks)?;
+                println!("Saved under label: {}", label);
             }
         }
-    }
-    println!("✗ Brak odpowiedzi z nodów");
-}
-
-// ---------- Faucet ----------
-fn faucet(addr:&str){
-    let tx=Transaction{ from:String::new(), to:addr.into(), amount:1000, signature:"reward".into() };
-    let data=serde_json::to_vec(&tx).unwrap();
-    for p in load_peers(){ if connect_and_send(&p,&data).is_ok(){ println!("✓ Faucet do {} via {}",addr,p); return; } }
-    println!("✗ Faucet nie powiódł się – brak działających nodów");
-}
-
-// ---------- Import / eksport ----------
-fn import_dat(path:&str){ let mut buf=[0u8;32]; if File::open(path).and_then(|mut f|f.read_exact(&mut buf)).is_ok(){ if let Ok(sk)=SecretKey::from_slice(&buf){ let pk=PublicKey::from_secret_key(&Secp256k1::new(),&sk); save_default_wallet(&sk); println!("✓ Zaimportowano plik. Public Key: {}",pk); return; } } println!("✗ Nie udało się zaimportować"); }
-fn export_dat(path:&str){ if let Some(sk)=load_default_wallet(){ if fs::write(path,sk.secret_bytes()).is_ok(){ println!("✓ Zapisano do {}",path);} else { println!("✗ Błąd zapisu"); } } else { println!("✗ Brak domyślnego portfela"); } }
-
-// ---------- CLI ----------
-fn help(){ println!("Komendy:\n  help\n  create-wallet\n  import-priv <hex>\n  import-dat <plik>\n  export-dat <plik>\n  default-wallet\n  send <to> <amount> [n=2]\n  send-priv <priv> <to> <amount> [n=2]\n  balance [address]\n  faucet <address>\n  exit"); }
-
-// Dodano funkcję create_wallet
-fn create_wallet() {
-    let secp = Secp256k1::new();
-    let mut rng = rand::thread_rng();
-    let (sk, pk) = secp.generate_keypair(&mut rng);
-    save_default_wallet(&sk);
-    println!("✓ Utworzono nowy portfel.");
-    println!("Private: {}", hex::encode(sk.secret_bytes()));
-    println!("Public : {}", pk);
-}
-
-// Dodano funkcję import_priv
-fn import_priv(priv_hex: &str) {
-    match hex::decode(priv_hex) {
-        Ok(bytes) => match SecretKey::from_slice(&bytes) {
-            Ok(sk) => {
-                let pk = PublicKey::from_secret_key(&Secp256k1::new(), &sk);
-                save_default_wallet(&sk);
-                println!("✓ Zaimportowano klucz prywatny. Public Key: {}", pk);
+        Commands::Generate { label } => {
+            let (sk_hex, address) = generate_keypair()?;
+            let mut ks: KeyStore = read_json_or_default(&store.keys_path)?;
+            ks.keys.insert(label.clone(), (sk_hex.clone(), address.clone()));
+            write_json(&store.keys_path, &ks)?;
+            println!("label: {}\naddress: {}\nsk: {}", label, address, sk_hex);
+        }
+        Commands::Keys => {
+            let ks: KeyStore = read_json_or_default(&store.keys_path)?;
+            for (label, (sk, addr)) in ks.keys {
+                println!("{:<16} addr={} sk={}", label, addr, sk);
             }
-            Err(_) => println!("✗ Niepoprawny klucz prywatny"),
-        },
-        Err(_) => println!("✗ Niepoprawny format hex"),
-    }
-}
-
-fn main(){ println!("Wallet CLI (peers.json + bootstrap)");
-    loop {
-        print!("> "); let _=io::stdout().flush();
-        let mut line=String::new(); if io::stdin().read_line(&mut line).is_err(){continue;}
-        let a:Vec<&str>=line.trim().split_whitespace().collect(); if a.is_empty(){continue;}
-        match a[0] {
-            "help" => help(),
-            "create-wallet" => create_wallet(),
-            "import-priv" if a.len() == 2 => import_priv(a[1]),
-            "import-dat" if a.len() == 2 => import_dat(a[1]),
-            "export-dat" if a.len() == 2 => export_dat(a[1]),
-            "default-wallet" => {
-                if let Some(sk) = load_default_wallet() {
-                    let pk = PublicKey::from_secret_key(&Secp256k1::new(), &sk);
-                    println!("Private: {}", hex::encode(sk.secret_bytes()));
-                    println!("Public : {}", pk);
-                } else { println!("Brak domyślnego portfela"); }
+        }
+        Commands::AddrAdd { name, address } => {
+            let mut book: AddressBook = read_json_or_default(&store.book_path)?;
+            book.entries.insert(name.clone(), address.clone());
+            write_json(&store.book_path, &book)?;
+            println!("added: {} -> {}", name, address);
+        }
+        Commands::AddrRm { name } => {
+            let mut book: AddressBook = read_json_or_default(&store.book_path)?;
+            book.entries.remove(&name);
+            write_json(&store.book_path, &book)?;
+            println!("removed: {}", name);
+        }
+        Commands::AddrList => {
+            let book: AddressBook = read_json_or_default(&store.book_path)?;
+            for (n, a) in book.entries {
+                println!("{:<16} {}", n, a);
             }
-            "send" if a.len() >= 3 => {
-                if let Ok(amount) = a[2].parse() {
-                    let n = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(2);
-                    send_default(a[1], amount, n);
-                } else { println!("Nieprawidłowa kwota"); }
+        }
+        Commands::SignRaw { sk_hex, label, from, to, amount, save } => {
+            let (sk_hex, from_addr) = resolve_key_source(&store, sk_hex, label, from)?;
+            let sig = sign_offline(&sk_hex, &from_addr, &to, amount)?;
+            let tx = PendingTx { from: from_addr, to, amount, signature: sig };
+            if save {
+                let mut q: PendingQueue = read_json_or_default(&store.pending_path)?;
+                q.txs.push(tx.clone());
+                write_json(&store.pending_path, &q)?;
+                println!("saved to pending ({} tx total)", q.txs.len());
+            } else {
+                println!("{}", serde_json::to_string_pretty(&tx)?);
             }
-            "send-priv" if a.len() >= 4 => {
-                if let Ok(amount) = a[3].parse() {
-                    let n = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(2);
-                    send_priv(a[1], a[2], amount, n);
-                } else { println!("Nieprawidłowa kwota"); }
+        }
+        Commands::Pending => {
+            let q: PendingQueue = read_json_or_default(&store.pending_path)?;
+            println!("pending: {}", q.txs.len());
+            for (i, t) in q.txs.iter().enumerate() {
+                println!("#{} from={} to={} amount={}", i, t.from, t.to, t.amount);
             }
-            "balance" => {
-                if a.len() == 2 { balance(a[1]); }
-                else if let Some(sk) = load_default_wallet() {
-                    let pk = PublicKey::from_secret_key(&Secp256k1::new(), &sk);
-                    balance(&pk.to_string());
-                } else { println!("Brak domyślnego portfela"); }
-            }
-            "faucet" if a.len() == 2 => faucet(a[1]),
-            "exit" => break,
-            _ => println!("Nieznana komenda – wpisz 'help'"),
+        }
+        Commands::PendingClear => {
+            write_json(&store.pending_path, &PendingQueue::default())?;
+            println!("pending cleared");
+        }
+        Commands::BroadcastPending => {
+            let mut q: PendingQueue = read_json_or_default(&store.pending_path)?;
+            let before = q.txs.len();
+            q.txs = broadcast_many(&cli.rpc, q.txs).await?;
+            let after = q.txs.len();
+            write_json(&store.pending_path, &q)?;
+            println!("broadcast done: {} sent, {} left", before - after, after);
+        }
+        Commands::Broadcast { file } => {
+            let json = if let Some(path) = file {
+                fs::read_to_string(path)?
+            } else {
+                let mut buf = String::new();
+                io::stdin().read_to_string(&mut buf)?;
+                buf
+            };
+            let tx: PendingTx = serde_json::from_str(&json)?;
+            let ok = broadcast_one(&cli.rpc, &tx).await;
+            println!("{}", if ok { "OK" } else { "FAIL" });
         }
     }
+    Ok(())
 }
 
+// ========= Helpers =========
+fn generate_keypair() -> Result<(String, String)> {
+    let sk = SigningKey::random(&mut OsRng);
+    let pk: PublicKey = sk.verifying_key().into();
+    let sk_hex = hex::encode(sk.to_bytes());
+    let address = pubkey_to_address(&pk);
+    Ok((sk_hex, address))
+}
+
+fn vanity_find(starts: Option<&str>, ends: Option<&str>, count: u32, timeout: u64) -> Result<(String, String)> {
+    if starts.is_none() && ends.is_none() {
+        return generate_keypair();
+    }
+    let starts_lc = starts.map(|s| s.to_ascii_lowercase());
+    let ends_lc   = ends.map(|s| s.to_ascii_lowercase());
+    let t0 = Instant::now();
+    let limit = if timeout == 0 { Duration::MAX } else { Duration::from_secs(timeout) };
+    let mut found = Vec::new();
+    while found.len() < count as usize && t0.elapsed() < limit {
+        let (sk_hex, addr) = generate_keypair()?;
+        let addr_lc = addr.to_ascii_lowercase();
+        let ok1 = starts_lc.as_ref().map_or(true, |p| addr_lc.starts_with(p));
+        let ok2 = ends_lc.as_ref().map_or(true, |p| addr_lc.ends_with(p));
+        if ok1 && ok2 {
+            found.push((sk_hex.clone(), addr.clone()));
+            println!("match #{}: {}", found.len(), addr);
+        }
+    }
+    found.last().cloned().ok_or_else(|| anyhow!("nie znaleziono w czasie limitu"))
+}
+
+fn resolve_key_source(store: &Store, sk_hex: Option<String>, label: Option<String>, from: Option<String>) -> Result<(String, String)> {
+    if let Some(sk_hex) = sk_hex {
+        let from = from.ok_or_else(|| anyhow!("podaj --from"))?;
+        return Ok((sk_hex, from));
+    }
+    if let Some(label) = label {
+        let ks: KeyStore = read_json_or_default(&store.keys_path)?;
+        let (sk, addr) = ks.keys.get(&label).ok_or_else(|| anyhow!("brak label w keystore"))?.clone();
+        return Ok((sk, addr));
+    }
+    Err(anyhow!("użyj --sk-hex + --from LUB --label"))
+}
+
+async fn broadcast_one(rpc: &str, tx: &PendingTx) -> bool {
+    #[derive(Serialize)]
+    struct SendTxReq<'a> { from: &'a str, to: &'a str, amount: u64, signature: &'a str }
+    let url = format!("{}/rpc/send_tx", rpc);
+    let from_pk_hex = hex::encode(address_to_pubkey_bytes(&tx.from).unwrap());
+    let to_pk_hex   = hex::encode(address_to_pubkey_bytes(&tx.to).unwrap());
+    let body = SendTxReq { from: &from_pk_hex, to: &to_pk_hex, amount: tx.amount, signature: &tx.signature };
+    let resp = Client::new().post(url).json(&body).send().await;
+    matches!(resp, Ok(r) if r.status().is_success())
+}
+
+async fn broadcast_many(rpc: &str, txs: Vec<PendingTx>) -> Result<Vec<PendingTx>> {
+    let mut left = Vec::new();
+    for tx in txs {
+        if !broadcast_one(rpc, &tx).await { left.push(tx); }
+    }
+    Ok(left)
+}
