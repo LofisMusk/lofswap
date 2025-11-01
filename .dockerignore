@@ -1,0 +1,16 @@
+# Ignore build artifacts and VCS metadata
+target
+.git
+.gitignore
+.vscode
+**/*.log
+
+# OS cruft
+.DS_Store
+
+# Local data files that shouldn’t be baked into images
+blockchain.json
+peers.json
+mempool.json
+wallet_mempool.json
+

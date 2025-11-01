@@ -8,3 +8,4 @@ peers.json
 /.vscode
 linux-build
 .idea/
+.default_wallet

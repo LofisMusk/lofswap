@@ -3,7 +3,7 @@ use easy_upnp::{UpnpConfig as EasyConfig, add_ports, delete_ports};
 use igd::PortMappingProtocol;
 use igd::aio::search_gateway;
 use local_ip_address::local_ip;
-use rand::seq::{IndexedRandom, SliceRandom};
+// rand helpers
 use secp256k1::{Message, PublicKey, Secp256k1, ecdsa::Signature};
 use serde_json;
 use sha2::{Digest, Sha256};
@@ -32,7 +32,8 @@ static OBSERVED_IP: once_cell::sync::Lazy<RwLock<Option<String>>> =
 static ACTIVE_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
 
 const LISTEN_PORT: u16 = 6000;
-const BOOTSTRAP_NODES: &[&str] = &["31.135.167.5:6000", "92.5.104.200:6000"];
+const EXPLORER_PORT: u16 = 7000; // simple HTTP JSON explorer
+const BOOTSTRAP_NODES: &[&str] = &["31.135.167.5:6000", "92.5.16.170:6000"];
 const MAX_CONNECTIONS: usize = 50;
 const BUFFER_SIZE: usize = 8192;
 
@@ -84,6 +85,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("[STARTUP] Starting TCP server on port {}...", LISTEN_PORT);
     start_tcp_server(blockchain.clone(), peers.clone()).await?;
 
+    // Start simple HTTP explorer server
+    tokio::spawn(start_http_explorer(blockchain.clone(), peers.clone()));
+
+    // Start periodic maintenance (peer finding + light sync)
+    tokio::spawn(maintenance_loop(blockchain.clone(), peers.clone()));
+
     // Give the server a moment to start
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -107,7 +114,8 @@ async fn start_tcp_server(
     blockchain: Arc<Mutex<Vec<Block>>>,
     peers: Arc<Mutex<Vec<String>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let addr = format!("0.0.0.0:{}", LISTEN_PORT);
+    let bind_ip = std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0".to_string());
+    let addr = format!("{}:{}", bind_ip, LISTEN_PORT);
     let listener = TcpListener::bind(&addr).await?;
     println!("Node listening on port {}", LISTEN_PORT);
 
@@ -190,6 +198,16 @@ async fn handle_request(
     blockchain: Arc<Mutex<Vec<Block>>>,
     peers: Arc<Mutex<Vec<String>>>,
 ) -> Result<(), NodeError> {
+    // Basic HTTP compatibility: if request starts with GET, trim to path only
+    let request = if request.starts_with("GET ") {
+        request
+            .split_whitespace()
+            .nth(1)
+            .unwrap_or("")
+            .to_string()
+    } else {
+        request.to_string()
+    };
     if let Some(addr) = request.strip_prefix("/balance/") {
         let addr = addr.trim();
         let chain = blockchain.lock().await;
@@ -247,6 +265,149 @@ async fn handle_request(
     stream.shutdown().await
         .map_err(|e| NodeError::NetworkError(e.to_string()))?;
     Ok(())
+}
+
+// --- Simple HTTP Explorer ---
+async fn start_http_explorer(
+    blockchain: Arc<Mutex<Vec<Block>>>,
+    peers: Arc<Mutex<Vec<String>>>,
+) {
+    let bind_ip = std::env::var("EXPLORER_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0".to_string());
+    let addr = format!("{}:{}", bind_ip, EXPLORER_PORT);
+    let listener = match TcpListener::bind(&addr).await {
+        Ok(l) => {
+            println!("Explorer listening on http://{}", addr);
+            l
+        }
+        Err(e) => {
+            eprintln!("[EXPLORER] Failed to bind {}: {}", addr, e);
+            return;
+        }
+    };
+
+    loop {
+        match listener.accept().await {
+            Ok((mut stream, _)) => {
+                let bc = blockchain.clone();
+                let pr = peers.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    match stream.read(&mut buf).await {
+                        Ok(n) if n > 0 => {
+                            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                            let path = req.split_whitespace().nth(1).unwrap_or("/");
+                            let (status, body) = handle_http_route(path, &bc, &pr).await;
+                            let resp = format!(
+                                "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                status,
+                                body.len(),
+                                body
+                            );
+                            let _ = stream.write_all(resp.as_bytes()).await;
+                            let _ = stream.shutdown().await;
+                        }
+                        _ => {
+                            let _ = stream.shutdown().await;
+                        }
+                    }
+                });
+            }
+            Err(e) => eprintln!("[EXPLORER] accept error: {}", e),
+        }
+    }
+}
+
+async fn handle_http_route(
+    path: &str,
+    blockchain: &Arc<Mutex<Vec<Block>>>,
+    peers: &Arc<Mutex<Vec<String>>>,
+) -> (String, String) {
+    if path == "/health" {
+        return ("200 OK".into(), "{\"status\":\"ok\"}".into());
+    }
+    if path == "/height" {
+        let chain = blockchain.lock().await;
+        if let Some(tip) = chain.last() {
+            let body = serde_json::json!({
+                "height": chain.len(),
+                "tip_hash": tip.hash,
+                "tip_time": tip.timestamp,
+            })
+            .to_string();
+            return ("200 OK".into(), body);
+        } else {
+            return ("200 OK".into(), "{\"height\":0,\"tip_hash\":\"\",\"tip_time\":0}".into());
+        }
+    }
+    if let Some(hash) = path.strip_prefix("/block/") {
+        let chain = blockchain.lock().await;
+        let blk = chain.iter().find(|b| b.hash == hash);
+        let body = serde_json::to_string(&blk).unwrap_or("null".into());
+        return ("200 OK".into(), body);
+    }
+    if let Some(addr) = path.strip_prefix("/address/") {
+        if let Some(rest) = addr.strip_suffix("/balance") {
+            let chain = blockchain.lock().await;
+            let bal = calculate_balance(rest, &chain);
+            let body = serde_json::json!({ "address": rest, "balance": bal }).to_string();
+            return ("200 OK".into(), body);
+        }
+        if let Some(rest) = addr.strip_suffix("/txs") {
+            let chain = blockchain.lock().await;
+            let mut txs = Vec::new();
+            for b in chain.iter() {
+                for tx in &b.transactions {
+                    if tx.to == rest || tx.from == rest { txs.push(tx.clone()); }
+                }
+            }
+            let body = serde_json::to_string(&txs).unwrap_or("[]".into());
+            return ("200 OK".into(), body);
+        }
+    }
+    if path == "/peers" {
+        let p = peers.lock().await;
+        let body = serde_json::to_string(&*p).unwrap_or("[]".into());
+        return ("200 OK".into(), body);
+    }
+    ("404 Not Found".into(), "{\"error\":\"not found\"}".into())
+}
+
+// --- Periodic maintenance loop ---
+async fn maintenance_loop(
+    blockchain: Arc<Mutex<Vec<Block>>>,
+    peers: Arc<Mutex<Vec<String>>>,
+) {
+    loop {
+        sleep(Duration::from_secs(60)).await;
+        // Try to sync with peers (non-force)
+        sync_chain(&blockchain, &peers, false).await;
+
+        // Try basic peer refresh: ask a couple of peers for their peer lists
+        let peer_list = peers.lock().await.clone();
+        let mut added = 0usize;
+        for peer in peer_list.iter().take(5) {
+            if let Ok(mut stream) = TcpStream::connect(peer).await {
+                let _ = stream.write_all(b"/peers").await;
+                let mut buf = vec![0u8; 8192];
+                if let Ok(n) = stream.read(&mut buf).await {
+                    if let Ok(list) = serde_json::from_slice::<Vec<String>>(&buf[..n]) {
+                        let mut p = peers.lock().await;
+                        for entry in list {
+                            if !p.contains(&entry) && entry.ends_with(":6000") {
+                                p.push(entry);
+                                added += 1;
+                            }
+                        }
+                        let _ = save_peers(&p);
+                    }
+                }
+                let _ = stream.shutdown().await;
+            }
+        }
+        if added > 0 {
+            println!("[MAINT] Added {} peers from refresh", added);
+        }
+    }
 }
 
 async fn handle_iam_request(
@@ -450,10 +611,7 @@ async fn bootstrap_and_discover_ip(peers: &Arc<Mutex<Vec<String>>>) {
 
     // Step 3: Pick a random peer from peers.json to determine public IP
     println!("[STARTUP] Step 3: Selecting random peer to determine public IP...");
-    let selected_peer = {
-        let mut rng = rand::thread_rng();
-        bootstrap_peers.choose(&mut rng).cloned()
-    };
+    let selected_peer = bootstrap_peers.get(0).cloned();
 
     let my_public_ip = if let Some(peer) = selected_peer {
         // Step 4: Determine public IP from selected peer
@@ -874,10 +1032,7 @@ async fn determine_public_ip_from_peers() -> Option<String> {
         println!("[DEBUG] Available peer: {}", peer);
     }
 
-    let mut rng = rand::thread_rng();
-    let mut shuffled = peers.clone();
-    shuffled.shuffle(&mut rng);
-
+    let shuffled = peers.clone();
     for peer in shuffled.into_iter().take(3) { // Try up to 3 peers
         println!("[DEBUG] Trying to get IP from peer: {}", peer);
         match tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(&peer)).await {
@@ -935,8 +1090,7 @@ async fn sync_chain(blockchain: &Arc<Mutex<Vec<Block>>>, peers: &Arc<Mutex<Vec<S
         return;
     }
 
-    let mut rng = rand::thread_rng();
-    let sample: Vec<_> = peer_list.choose_multiple(&mut rng, 3).cloned().collect();
+    let sample: Vec<_> = peer_list.into_iter().take(3).collect();
 
     for peer in sample {
         if let Ok(mut stream) = TcpStream::connect(&peer).await {
