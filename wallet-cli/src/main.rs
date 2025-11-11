@@ -103,12 +103,21 @@ fn build_tx(sk: &SecretKey, to: &str, amount: u64) -> Transaction {
     let preimage = format!("{}{}{}", pk, to, amount);
     let hash = Sha256::digest(preimage.as_bytes());
     let sig = secp.sign_ecdsa(Message::from_slice(&hash).unwrap(), sk);
-    Transaction {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let mut tx = Transaction {
+        version: 1,
+        timestamp: ts,
         from: pk.to_string(),
         to: to.into(),
         amount,
         signature: hex::encode(sig.serialize_compact()),
-    }
+        txid: String::new(),
+    };
+    tx.txid = tx.compute_txid();
+    tx
 }
 
 fn send_default(to: &str, amount: u64, min_peers: usize) {
@@ -151,12 +160,20 @@ fn balance(addr: &str) {
 
 // ---------- Faucet ----------
 fn faucet(addr: &str) {
-    let tx = Transaction {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let mut tx = Transaction {
+        version: 1,
+        timestamp: ts,
         from: String::new(),
         to: addr.into(),
         amount: 1000,
         signature: "reward".into(),
+        txid: String::new(),
     };
+    tx.txid = tx.compute_txid();
     let data = serde_json::to_vec(&tx).unwrap();
     for p in load_peers() {
         if connect_and_send(&p, &data).is_ok() {
@@ -205,8 +222,12 @@ fn help() {
 // Dodano funkcję create_wallet
 fn create_wallet() {
     let secp = Secp256k1::new();
-    let mut rng = rand::thread_rng();
-    let (sk, pk) = secp.generate_keypair(&mut rng);
+    let mut rng = rand::rng();
+    let mut bytes = [0u8; 32];
+    use rand::RngCore;
+    rng.fill_bytes(&mut bytes);
+    let sk = SecretKey::from_byte_array(bytes).expect("rng produced invalid bytes");
+    let pk = PublicKey::from_secret_key(&secp, &sk);
     save_default_wallet(&sk);
     println!("✓ Utworzono nowy portfel.");
     println!("Private: {}", hex::encode(sk.secret_bytes()));

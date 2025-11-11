@@ -9,3 +9,4 @@ peers.json
 linux-build
 .idea/
 .default_wallet
+.DS_Store

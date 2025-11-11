@@ -2,53 +2,120 @@ use sha2::{Digest, Sha256};
 use serde::{Serialize, Deserialize};
 use chrono::Utc;
 
+// spec_v0.9 constants
+pub const SPEC_VERSION: &str = "0.9";
+pub const DEFAULT_DIFFICULTY_ZEROS: u32 = 4;
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Transaction {
+    // spec fields (frozen v0.9)
+    pub version: u8,
+    pub timestamp: i64,
     pub from: String,
     pub to: String,
     pub amount: u64,
     pub signature: String,
+    // Computed identifier. Optional when deserializing from older nodes.
+    #[serde(default)]
+    pub txid: String,
+}
+
+impl Transaction {
+    pub fn compute_txid(&self) -> String {
+        // txid is sha256 of canonical preimage; keep signature scheme compatibility
+        // Note: Signing preimage stays (from||to||amount). txid adds timestamp to reduce collisions.
+        let preimage = format!(
+            "{}|{}|{}|{}|{}",
+            self.version, self.from, self.to, self.amount, self.timestamp
+        );
+        let mut hasher = Sha256::new();
+        hasher.update(preimage.as_bytes());
+        format!("{:x}", hasher.finalize())
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Block {
+    pub version: u8,
     pub index: u64,
     pub timestamp: i64,
     pub transactions: Vec<Transaction>,
     pub previous_hash: String,
     pub nonce: u64,
     pub hash: String,
-    pub miner: String, 
+    pub miner: String,
+    pub difficulty: u32,
 }
 
 impl Block {
-    pub fn new(index: u64, transactions: Vec<Transaction>, previous_hash: String, miner: String) -> Self {
+    pub fn new(index: u64, mut transactions: Vec<Transaction>, previous_hash: String, miner: String) -> Self {
         let timestamp = Utc::now().timestamp();
+        // Ensure txids are populated for v0.9
+        for tx in transactions.iter_mut() {
+            if tx.txid.is_empty() {
+                tx.txid = tx.compute_txid();
+            }
+        }
         let mut block = Block {
+            version: 1,
             index,
             timestamp,
             transactions,
             previous_hash,
             nonce: 0,
             hash: String::new(),
-            miner: String::new(),
+            miner,
+            difficulty: DEFAULT_DIFFICULTY_ZEROS,
         };
-        block.mine(4); // np. trudność 4 zera
+        block.mine(DEFAULT_DIFFICULTY_ZEROS as usize);
         block
     }
 
     pub fn calculate_hash(&self) -> String {
-        let input = format!("{}{}{:?}{}{}", self.index, self.timestamp, self.transactions, self.previous_hash, self.nonce);
+        // Canonical preimage for spec_v0.9: version|index|timestamp|prev|miner|difficulty|nonce|txs_json
+        let txs_json = serde_json::to_string(&self.transactions).unwrap_or_default();
+        let input = format!(
+            "{}|{}|{}|{}|{}|{}|{}|{}",
+            self.version,
+            self.index,
+            self.timestamp,
+            self.previous_hash,
+            self.miner,
+            self.difficulty,
+            self.nonce,
+            txs_json
+        );
         let mut hasher = Sha256::new();
-        hasher.update(input);
+        hasher.update(input.as_bytes());
         format!("{:x}", hasher.finalize())
     }
 
     pub fn mine(&mut self, difficulty: usize) {
         let target = "0".repeat(difficulty);
-        while !self.hash.starts_with(&target) {
-            self.nonce += 1;
+        // Ensure we start from a clean known state
+        self.hash.clear();
+        self.nonce = 0;
+        let start = std::time::Instant::now();
+        let mut iters: u64 = 0;
+        let mut last_report = start;
+        loop {
             self.hash = self.calculate_hash();
+            iters += 1;
+            if self.hash.starts_with(&target) {
+                break;
+            }
+            self.nonce = self.nonce.wrapping_add(1);
+            // Telemetry: print hashrate once per second
+            let now = std::time::Instant::now();
+            if now.duration_since(last_report).as_secs_f64() >= 1.0 {
+                let elapsed = now.duration_since(start).as_secs_f64();
+                let hps = (iters as f64) / elapsed;
+                println!(
+                    "[mining] height={} target_zeros={} hashrate={:.2} H/s nonce={}",
+                    self.index, difficulty, hps, self.nonce
+                );
+                last_report = now;
+            }
         }
     }
 }
