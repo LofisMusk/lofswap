@@ -1,0 +1,35 @@
+version: "3.8"
+
+services:
+  lofs-node:
+    image: lofis123/lofswap:latest   # <--- TU WSTAW SWÓJ OBRAZ
+    container_name: lofswap
+    restart: unless-stopped
+
+    # jeśli node nasłuchuje na 6000, mapuj port:
+    ports:
+      - "6000:6000"
+
+    # jeśli masz jakiś katalog na dane (blockchain, config):
+    volumes:
+      - ./data:/app/data
+
+    # opcjonalnie: etykieta, żeby watchtower wiedział, że ma to aktualizować
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  watchtower:
+    image: containrrr/watchtower
+    container_name: watchtower
+    restart: unless-stopped
+
+    # dostęp do Docker socka, żeby mógł robić pull/restart
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+    # tryb: aktualizuj tylko kontenery z etykietą + sprawdzaj co 300s (5 min)
+    command: >
+      --label-enable
+      --interval 60
+      --cleanup
+      --include-restarting
