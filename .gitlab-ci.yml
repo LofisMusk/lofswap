@@ -2,16 +2,45 @@ stages:
   - build
   - push
 
+variables:
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: ""
+  IMAGE: "$DOCKERHUB_USER/lofswap"
+  TAG_COMMIT: "$CI_COMMIT_SHORT_SHA"
+  TAG_LATEST: "latest"
+
+default:
+  image: docker:20.10.16
+  services:
+    - docker:20.10.16-dind
+  before_script:
+    # login before each job (uses CI variables DOCKERHUB_USER & DOCKERHUB_PASSWORD)
+    - echo "$DOCKERHUB_PASSWORD" | docker login -u "$DOCKERHUB_USER" --password-stdin
+
 docker-build:
-  image: ubuntu:latest
   stage: build
   script:
-    - apt-get update && apt-get install -y docker.io 
-    - docker build -t lofis123/lofswap:latest .
+    # build and tag with commit SHA and latest; use cache-from to speed up builds when available
+    - docker build --pull --cache-from "$IMAGE:$TAG_LATEST" -t "$IMAGE:$TAG_COMMIT" -t "$IMAGE:$TAG_LATEST" .
+    # save image so push job can run on a different runner without rebuilding
+    - docker save "$IMAGE:$TAG_COMMIT" -o image.tar
+  artifacts:
+    paths:
+      - image.tar
+    expire_in: 1h
+  only:
+    - branches
+    - tags
 
 docker-push:
-  image: docker:latest
   stage: push
+  dependencies:
+    - docker-build
   script:
-    - docker login -u "$DOCKERHUB_USER" -p "$DOCKERHUB_PASSWORD"
-    - docker push lofis123/lofswap:latest
+    # load saved image and push both tags
+    - docker load -i image.tar
+    - docker push "$IMAGE:$TAG_COMMIT"
+    - docker push "$IMAGE:$TAG_LATEST"
+  only:
+    - branches
+    - tags
