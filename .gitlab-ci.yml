@@ -3,14 +3,16 @@ stages:
   - push
 
 docker-build:
+  image: docker:latest
   stage: build
   dependencies:
     - docker
-    
+
   script:
     - docker build -t lofis123/lofswap:latest .
 
 docker-push:
+  image: docker:latest
   stage: push
   script:
     - docker login -u "$DOCKERHUB_USER" -p "$DOCKERHUB_PASSWORD"
