@@ -6,13 +6,9 @@ docker-build:
   stage: build
   script:
     - docker build -t lofis123/lofswap:latest .
-  tags:
-    - docker
 
 docker-push:
   stage: push
   script:
     - docker login -u "$DOCKERHUB_USER" -p "$DOCKERHUB_PASSWORD"
     - docker push lofis123/lofswap:latest
-  tags:
-    - docker 
