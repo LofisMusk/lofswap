@@ -4,6 +4,9 @@ stages:
 
 docker-build:
   stage: build
+  dependencies:
+    - docker
+    
   script:
     - docker build -t lofis123/lofswap:latest .
 
