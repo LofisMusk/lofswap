@@ -3,10 +3,11 @@ stages:
   - push
 
 docker-build:
-  image: docker:latest
+  image: ubuntu:latest
   stage: build
   script:
-    - docker build -t lofis123/lofswap:latest .
+    -sudo apt-get update && sudo apt-get install -y docker.io 
+    -docker build -t lofis123/lofswap:latest .
 
 docker-push:
   image: docker:latest
