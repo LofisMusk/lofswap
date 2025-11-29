@@ -1,6 +1,9 @@
 use std::{fs::OpenOptions, io::Write, sync::Arc, time::Duration};
 
 use blockchain_core::{Block, Transaction};
+use local_ip_address::local_ip;
+use public_ip;
+use rand::RngCore;
 use serde_json;
 use sha2::{Digest, Sha256};
 use tokio::{
@@ -147,6 +150,9 @@ async fn handle_request(
         stream.write_all(hex::encode(hash).as_bytes()).await
             .map_err(|e| NodeError::NetworkError(e.to_string()))?;
     }
+    else if let Some(id) = request.strip_prefix("/resolve-ip/") {
+        handle_resolve_ip_request(id.trim(), stream).await?;
+    }
     else if request.trim() == "/whoami" {
         if let Some(ip) = OBSERVED_IP.read().await.as_ref() {
             let response = format!("{}:{}", ip, LISTEN_PORT);
@@ -175,6 +181,37 @@ async fn handle_request(
 
     stream.shutdown().await
         .map_err(|e| NodeError::NetworkError(e.to_string()))?;
+    Ok(())
+}
+
+async fn handle_resolve_ip_request(
+    id: &str,
+    stream: &mut TcpStream,
+) -> Result<(), NodeError> {
+    // Use the remote socket address as the caller's observed public IP.
+    match stream.peer_addr() {
+        Ok(addr) => {
+            let ip = addr.ip().to_string();
+            println!(
+                "[DEBUG] /resolve-ip for id '{}' resolved caller IP as {}",
+                id, ip
+            );
+            stream
+                .write_all(ip.as_bytes())
+                .await
+                .map_err(|e| NodeError::NetworkError(e.to_string()))?;
+        }
+        Err(e) => {
+            println!(
+                "[DEBUG] Failed to get peer addr for /resolve-ip (id='{}'): {}",
+                id, e
+            );
+            stream
+                .write_all(b"unknown")
+                .await
+                .map_err(|e| NodeError::NetworkError(e.to_string()))?;
+        }
+    }
     Ok(())
 }
 
@@ -289,8 +326,12 @@ pub async fn maintenance_loop(
         sync_chain(&blockchain, &peers, false).await;
 
         let peer_list = peers.lock().await.clone();
+        let my_addr = get_my_address().await;
         let mut added = 0usize;
         for peer in peer_list.iter().take(5) {
+            if Some(peer.as_str()) == my_addr.as_deref() {
+                continue;
+            }
             if let Ok(mut stream) = TcpStream::connect(peer).await {
                 let _ = stream.write_all(b"/peers").await;
                 let mut buf = vec![0u8; 8192];
@@ -298,7 +339,10 @@ pub async fn maintenance_loop(
                     if let Ok(list) = serde_json::from_slice::<Vec<String>>(&buf[..n]) {
                         let mut p = peers.lock().await;
                         for entry in list {
-                            if !p.contains(&entry) && entry.ends_with(":6000") {
+                            if !p.contains(&entry)
+                                && entry.ends_with(":6000")
+                                && Some(entry.as_str()) != my_addr.as_deref()
+                            {
                                 p.push(entry);
                                 added += 1;
                             }
@@ -482,59 +526,130 @@ pub async fn bootstrap_and_discover_ip(peers: &Arc<Mutex<Vec<String>>>) {
 async fn determine_ip_from_specific_peer(peer: &str) -> Option<String> {
     println!("[STARTUP] Contacting peer {} for IP discovery...", peer);
 
-    match timeout(Duration::from_secs(3), TcpStream::connect(peer)).await {
-        Ok(Ok(mut stream)) => {
-            println!("[STARTUP] ✓ Connected to peer {}", peer);
+    // Step 1: generate a temporary unique ID for this resolution attempt.
+    let mut rng = rand::rng();
+    let mut id_bytes = [0u8; 16];
+    rng.fill_bytes(&mut id_bytes);
+    let temp_id = hex::encode(id_bytes);
+    println!(
+        "[STARTUP] Using temporary ID {} for public IP resolution",
+        temp_id
+    );
 
-            if let Err(e) = stream.write_all(b"/whoami").await {
-                println!("[STARTUP] ✗ Failed to send /whoami to {}: {}", peer, e);
+    // Step 2: ask the chosen peer what IP it sees for this ID.
+    let observed_ip_from_peer = match timeout(Duration::from_secs(3), TcpStream::connect(peer)).await {
+        Ok(Ok(mut stream)) => {
+            println!("[STARTUP] ✓ Connected to peer {} for /resolve-ip", peer);
+
+            let msg = format!("/resolve-ip/{}", temp_id);
+            if let Err(e) = stream.write_all(msg.as_bytes()).await {
+                println!(
+                    "[STARTUP] ✗ Failed to send /resolve-ip to {}: {}",
+                    peer, e
+                );
+                let _ = stream.shutdown().await;
                 return None;
             }
 
             let mut buf = vec![0; 64];
-            match stream.read(&mut buf).await {
+            let result = match stream.read(&mut buf).await {
                 Ok(n) => {
                     let response = String::from_utf8_lossy(&buf[..n]).trim().to_string();
                     println!(
-                        "[STARTUP] Raw /whoami response from {}: '{}'",
+                        "[STARTUP] Raw /resolve-ip response from {}: '{}'",
                         peer, response
                     );
-
-                    if !response.is_empty() && response != "unknown" {
-                        let ip_part = response.split(':').next().unwrap_or("").to_string();
-                        if !ip_part.is_empty() && is_public_ip(&ip_part) {
-                            println!("[STARTUP] ✓ Got valid public IP: {}", ip_part);
-                            return Some(ip_part);
-                        } else {
-                            println!(
-                                "[STARTUP] ✗ IP '{}' is not valid or not public",
-                                ip_part
-                            );
-                        }
+                    if response.is_empty() || response == "unknown" {
+                        None
                     } else {
-                        println!(
-                            "[STARTUP] ✗ Peer {} returned empty or unknown response",
-                            peer
-                        );
+                        Some(response)
                     }
                 }
                 Err(e) => {
                     println!(
-                        "[STARTUP] ✗ Failed to read /whoami response from {}: {}",
+                        "[STARTUP] ✗ Failed to read /resolve-ip response from {}: {}",
                         peer, e
                     );
+                    None
                 }
-            }
+            };
             let _ = stream.shutdown().await;
+            result
         }
         Ok(Err(e)) => {
-            println!("[STARTUP] ✗ Failed to connect to peer {}: {}", peer, e);
+            println!(
+                "[STARTUP] ✗ Failed to connect to peer {} for /resolve-ip: {}",
+                peer, e
+            );
+            None
         }
         Err(_) => {
-            println!("[STARTUP] ✗ Timeout connecting to peer: {}", peer);
+            println!(
+                "[STARTUP] ✗ Timeout connecting to peer {} for /resolve-ip",
+                peer
+            );
+            None
         }
+    };
+
+    let observed_ip_from_peer = match observed_ip_from_peer {
+        Some(ip) => ip,
+        None => {
+            println!(
+                "[STARTUP] ✗ Peer {} could not provide a usable IP for id {}",
+                peer, temp_id
+            );
+            return None;
+        }
+    };
+
+    // Step 3: ask the public-ip library for our public IP.
+    let lib_ip_opt = public_ip::addr().await;
+    let lib_ip = match lib_ip_opt {
+        Some(ip) => ip.to_string(),
+        None => {
+            println!(
+                "[STARTUP] ✗ public-ip library could not determine an IP for id {}",
+                temp_id
+            );
+            return None;
+        }
+    };
+
+    println!(
+        "[STARTUP] IP from peer {}: {} ; IP from public-ip: {}",
+        peer, observed_ip_from_peer, lib_ip
+    );
+
+    // Step 4: compare results.
+    // Primary case: both sources agree exactly.
+    if observed_ip_from_peer == lib_ip {
+        println!(
+            "[STARTUP] ✓ IP resolution successful for id {}: {}",
+            temp_id, lib_ip
+        );
+        return Some(lib_ip);
     }
 
+    // NAT / local-network case:
+    // - Peer might see our *private* or router IP (e.g. 192.168.x.x),
+    // - public-ip library sees our true public/WAN IP.
+    // In that case we still trust the library result, since the peer
+    // cannot know our internal address beyond what the router exposes.
+    if !is_public_ip(&observed_ip_from_peer) && is_public_ip(&lib_ip) {
+        println!(
+            "[STARTUP] ⚠️ Peer {} reported non-public IP '{}' while public-ip reported '{}'. \
+             Treating public-ip result as canonical for id {}.",
+            peer, observed_ip_from_peer, lib_ip, temp_id
+        );
+        return Some(lib_ip);
+    }
+
+    // Anything else is treated as a mismatch.
+    println!(
+        "[STARTUP] ✗ IP resolution mismatch for id {} (peer: {}, public-ip: {})",
+        temp_id, observed_ip_from_peer, lib_ip
+    );
     None
 }
 
@@ -723,8 +838,12 @@ pub async fn sync_chain(
         return;
     }
 
+    let my_addr = get_my_address().await;
     println!("[SYNC] Attempting to sync with {} peers...", peer_list.len());
     for peer in peer_list {
+        if Some(peer.as_str()) == my_addr.as_deref() {
+            continue;
+        }
         println!("[SYNC] Connecting to {}", peer);
         if let Ok(mut stream) = TcpStream::connect(&peer).await {
             println!("[SYNC] Requesting chain");
@@ -752,6 +871,23 @@ pub async fn sync_chain(
 }
 
 pub async fn ping_peer(peer: &str) -> bool {
+    // Avoid pinging ourselves by comparing the target
+    // peer's IP with the public IP from the library.
+    if let Some(ip) = public_ip::addr().await {
+        let my_ip = ip.to_string();
+        if let Some(target_ip) = peer.split(':').next() {
+            if target_ip == my_ip {
+                println!("[DEBUG] Skipping ping to self ({} == {})", peer, my_ip);
+                return false;
+            }
+        }
+    } else if let Some(my_addr) = get_my_address().await {
+        // Fallback: compare full address if we have one.
+        if peer == my_addr {
+            println!("[DEBUG] Skipping ping to self by address match: {}", peer);
+            return false;
+        }
+    }
     match timeout(Duration::from_millis(500), TcpStream::connect(peer)).await {
         Ok(Ok(mut stream)) => {
             if stream.write_all(b"/ping").await.is_ok() {
@@ -767,11 +903,22 @@ pub async fn ping_peer(peer: &str) -> bool {
 }
 
 pub async fn get_my_address() -> Option<String> {
-    OBSERVED_IP
-        .read()
-        .await
-        .as_ref()
-        .map(|ip| format!("{}:{}", ip, LISTEN_PORT))
+    // 1) Prefer any IP we already observed from the network.
+    if let Some(ip) = OBSERVED_IP.read().await.as_ref() {
+        return Some(format!("{}:{}", ip, LISTEN_PORT));
+    }
+
+    // 2) Try to get our public IP from the external library.
+    if let Some(ip) = public_ip::addr().await {
+        return Some(format!("{}:{}", ip, LISTEN_PORT));
+    }
+
+    // 3) Fallback to local/private IP if nothing else is known.
+    if let Ok(ip) = local_ip() {
+        return Some(format!("{}:{}", ip, LISTEN_PORT));
+    }
+
+    None
 }
 
 pub fn is_public_ip(ip: &str) -> bool {

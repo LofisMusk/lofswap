@@ -2,7 +2,7 @@ version: "3.8"
 
 services:
   lofs-node:
-    image: lofis123/lofswap:latest   # <--- TU WSTAW SWÓJ OBRAZ
+    image: lofis123/lofswap:latest 
     container_name: lofswap
     restart: unless-stopped
     ports:

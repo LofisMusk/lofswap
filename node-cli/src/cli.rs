@@ -67,6 +67,12 @@ async fn add_peer_command(line: &str, peers: &Arc<Mutex<Vec<String>>>) {
     let parts: Vec<&str> = line.trim().split_whitespace().collect();
     if parts.len() == 2 {
         let new_peer = parts[1].to_string();
+        if let Some(my_addr) = get_my_address().await {
+            if new_peer == my_addr {
+                println!("Refusing to add self as peer: {}", new_peer);
+                return;
+            }
+        }
         let mut p = peers.lock().await;
         if !p.contains(&new_peer) {
             p.push(new_peer.clone());
