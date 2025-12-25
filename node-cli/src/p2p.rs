@@ -14,14 +14,10 @@ use tokio::{
 };
 
 use crate::{
+    ACTIVE_CONNECTIONS, BOOTSTRAP_NODES, BUFFER_SIZE, LISTEN_PORT, MAX_CONNECTIONS, OBSERVED_IP,
     chain::{calculate_balance, is_tx_valid, load_peers, save_chain, save_peers},
     errors::NodeError,
-    ACTIVE_CONNECTIONS,
-    BOOTSTRAP_NODES,
-    BUFFER_SIZE,
-    LISTEN_PORT,
-    MAX_CONNECTIONS,
-    OBSERVED_IP,
+    storage::{data_path, ensure_parent_dir},
 };
 
 pub async fn start_tcp_server(
@@ -37,8 +33,13 @@ pub async fn start_tcp_server(
         loop {
             match listener.accept().await {
                 Ok((stream, addr)) => {
-                    if ACTIVE_CONNECTIONS.load(std::sync::atomic::Ordering::Relaxed) >= MAX_CONNECTIONS {
-                        println!("[DEBUG] Max connections reached, dropping connection from {}", addr);
+                    if ACTIVE_CONNECTIONS.load(std::sync::atomic::Ordering::Relaxed)
+                        >= MAX_CONNECTIONS
+                    {
+                        println!(
+                            "[DEBUG] Max connections reached, dropping connection from {}",
+                            addr
+                        );
                         continue;
                     }
 
@@ -48,7 +49,10 @@ pub async fn start_tcp_server(
                         let ip = addr.ip().to_string();
                         if is_public_ip(&ip) {
                             if OBSERVED_IP.read().await.is_none() {
-                                println!("[DEBUG] Setting public IP from incoming connection: {}", ip);
+                                println!(
+                                    "[DEBUG] Setting public IP from incoming connection: {}",
+                                    ip
+                                );
                                 *OBSERVED_IP.write().await = Some(ip.clone());
                             }
 
@@ -88,7 +92,9 @@ async fn handle_connection(
     peers: Arc<Mutex<Vec<String>>>,
 ) -> Result<(), NodeError> {
     let mut buf = vec![0; BUFFER_SIZE];
-    let n = stream.read(&mut buf).await
+    let n = stream
+        .read(&mut buf)
+        .await
         .map_err(|e| NodeError::NetworkError(e.to_string()))?;
 
     let slice = &buf[..n];
@@ -110,84 +116,84 @@ async fn handle_request(
     peers: Arc<Mutex<Vec<String>>>,
 ) -> Result<(), NodeError> {
     let request = if request.starts_with("GET ") {
-        request
-            .split_whitespace()
-            .nth(1)
-            .unwrap_or("")
-            .to_string()
+        request.split_whitespace().nth(1).unwrap_or("").to_string()
     } else {
         request.to_string()
     };
     if request.trim() == "/ping" {
-        stream.write_all(b"pong").await
+        stream
+            .write_all(b"pong")
+            .await
             .map_err(|e| NodeError::NetworkError(e.to_string()))?;
-    }
-    else if let Some(addr) = request.strip_prefix("/balance/") {
+    } else if let Some(addr) = request.strip_prefix("/balance/") {
         let addr = addr.trim();
         let chain = blockchain.lock().await;
         let balance = calculate_balance(addr, &chain);
-        stream.write_all(balance.to_string().as_bytes()).await
+        stream
+            .write_all(balance.to_string().as_bytes())
+            .await
             .map_err(|e| NodeError::NetworkError(e.to_string()))?;
-    }
-    else if request.trim() == "/peers" {
-        let peers_json = std::fs::read_to_string("peers.json")
-            .unwrap_or_else(|_| "[]".to_string());
-        stream.write_all(peers_json.as_bytes()).await
+    } else if request.trim() == "/peers" {
+        let peers = peers.lock().await;
+        let peers_json = serde_json::to_string(&*peers)
+            .map_err(|e| NodeError::SerializationError(e.to_string()))?;
+        stream
+            .write_all(peers_json.as_bytes())
+            .await
             .map_err(|e| NodeError::NetworkError(e.to_string()))?;
-    }
-    else if request.trim() == "/chain" {
+    } else if request.trim() == "/chain" {
         let chain = blockchain.lock().await;
         let json = serde_json::to_string(&*chain)
             .map_err(|e| NodeError::SerializationError(e.to_string()))?;
-        stream.write_all(json.as_bytes()).await
+        stream
+            .write_all(json.as_bytes())
+            .await
             .map_err(|e| NodeError::NetworkError(e.to_string()))?;
-    }
-    else if request.trim() == "/chain-hash" {
+    } else if request.trim() == "/chain-hash" {
         let chain = blockchain.lock().await;
         let json = serde_json::to_string(&*chain)
             .map_err(|e| NodeError::SerializationError(e.to_string()))?;
         let hash = Sha256::digest(json.as_bytes());
-        stream.write_all(hex::encode(hash).as_bytes()).await
+        stream
+            .write_all(hex::encode(hash).as_bytes())
+            .await
             .map_err(|e| NodeError::NetworkError(e.to_string()))?;
-    }
-    else if let Some(id) = request.strip_prefix("/resolve-ip/") {
+    } else if let Some(id) = request.strip_prefix("/resolve-ip/") {
         handle_resolve_ip_request(id.trim(), stream).await?;
-    }
-    else if request.trim() == "/whoami" {
+    } else if request.trim() == "/whoami" {
         if let Some(ip) = OBSERVED_IP.read().await.as_ref() {
             let response = format!("{}:{}", ip, LISTEN_PORT);
             println!("[DEBUG] Responding to /whoami with: {}", response);
-            stream.write_all(response.as_bytes()).await
+            stream
+                .write_all(response.as_bytes())
+                .await
                 .map_err(|e| NodeError::NetworkError(e.to_string()))?;
         } else {
             println!("[DEBUG] /whoami requested but no IP set yet");
-            stream.write_all(b"unknown").await
+            stream
+                .write_all(b"unknown")
+                .await
                 .map_err(|e| NodeError::NetworkError(e.to_string()))?;
         }
-    }
-    else if let Some(new_peer) = request.strip_prefix("/iam/") {
+    } else if let Some(new_peer) = request.strip_prefix("/iam/") {
         handle_iam_request(new_peer.trim(), peers).await?;
-    }
-    else if let Some(rest) = request.strip_prefix("/peers") {
+    } else if let Some(rest) = request.strip_prefix("/peers") {
         handle_peers_request(rest, peers).await?;
-    }
-    else if let Ok(tx) = serde_json::from_slice::<Transaction>(request.as_bytes()) {
+    } else if let Ok(tx) = serde_json::from_slice::<Transaction>(request.as_bytes()) {
         handle_transaction(tx, blockchain).await?;
-    }
-    else if let Ok(block) = serde_json::from_slice::<Block>(request.as_bytes()) {
+    } else if let Ok(block) = serde_json::from_slice::<Block>(request.as_bytes()) {
         handle_block(block, stream, blockchain).await?;
         return Ok(());
     }
 
-    stream.shutdown().await
+    stream
+        .shutdown()
+        .await
         .map_err(|e| NodeError::NetworkError(e.to_string()))?;
     Ok(())
 }
 
-async fn handle_resolve_ip_request(
-    id: &str,
-    stream: &mut TcpStream,
-) -> Result<(), NodeError> {
+async fn handle_resolve_ip_request(id: &str, stream: &mut TcpStream) -> Result<(), NodeError> {
     // Use the remote socket address as the caller's observed public IP.
     match stream.peer_addr() {
         Ok(addr) => {
@@ -235,10 +241,7 @@ async fn handle_iam_request(
     Ok(())
 }
 
-async fn handle_peers_request(
-    rest: &str,
-    peers: Arc<Mutex<Vec<String>>>,
-) -> Result<(), NodeError> {
+async fn handle_peers_request(rest: &str, peers: Arc<Mutex<Vec<String>>>) -> Result<(), NodeError> {
     if !rest.is_empty() {
         if let Ok(list) = serde_json::from_str::<Vec<String>>(rest) {
             let my_addr = get_my_address().await;
@@ -246,9 +249,7 @@ async fn handle_peers_request(
             let mut added_count = 0;
 
             for peer in list {
-                if peer.ends_with(":6000")
-                    && !p.contains(&peer)
-                    && Some(&peer) != my_addr.as_ref()
+                if peer.ends_with(":6000") && !p.contains(&peer) && Some(&peer) != my_addr.as_ref()
                 {
                     println!("Added peer from /peers: {}", peer);
                     p.push(peer);
@@ -258,7 +259,10 @@ async fn handle_peers_request(
 
             if added_count > 0 {
                 save_peers(&p)?;
-                println!("[DEBUG] Added {} new peers from /peers request", added_count);
+                println!(
+                    "[DEBUG] Added {} new peers from /peers request",
+                    added_count
+                );
             }
         }
     }
@@ -272,11 +276,22 @@ async fn handle_transaction(
     let chain = blockchain.lock().await;
     if is_tx_valid(&tx, &chain).is_ok() {
         println!("✓ TX added to mempool");
-        if let Ok(mut f) = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("mempool.json")
-        {
+        let path = data_path("mempool.json");
+        let file = ensure_parent_dir(&path)
+            .and_then(|_| {
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+            })
+            .or_else(|_| {
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("mempool.json")
+            });
+
+        if let Ok(mut f) = file {
             let tx_json = serde_json::to_string(&tx)
                 .map_err(|e| NodeError::SerializationError(e.to_string()))?;
             let _ = writeln!(f, "{}", tx_json);
@@ -317,13 +332,10 @@ async fn handle_block(
     Ok(())
 }
 
-pub async fn maintenance_loop(
-    blockchain: Arc<Mutex<Vec<Block>>>,
-    peers: Arc<Mutex<Vec<String>>>,
-) {
+pub async fn maintenance_loop(blockchain: Arc<Mutex<Vec<Block>>>, peers: Arc<Mutex<Vec<String>>>) {
     loop {
         sleep(Duration::from_secs(60)).await;
-        sync_chain(&blockchain, &peers, false).await;
+        sync_chain(&blockchain, &peers, false, false).await;
 
         let peer_list = peers.lock().await.clone();
         let my_addr = get_my_address().await;
@@ -386,7 +398,10 @@ pub async fn bootstrap_and_discover_ip(peers: &Arc<Mutex<Vec<String>>>) {
             if !p.contains(&bootstrap_node.to_string()) {
                 p.push(bootstrap_node.to_string());
                 bootstrap_peers.push(bootstrap_node.to_string());
-                println!("[STARTUP] Added bootstrap node to peers: {}", bootstrap_node);
+                println!(
+                    "[STARTUP] Added bootstrap node to peers: {}",
+                    bootstrap_node
+                );
             }
         }
         if let Err(e) = save_peers(&p) {
@@ -398,7 +413,10 @@ pub async fn bootstrap_and_discover_ip(peers: &Arc<Mutex<Vec<String>>>) {
         println!("[STARTUP] Trying bootstrap node: {}", bootstrap_node);
         match timeout(Duration::from_secs(5), TcpStream::connect(bootstrap_node)).await {
             Ok(Ok(mut stream)) => {
-                println!("[STARTUP] ✓ Connected to bootstrap node: {}", bootstrap_node);
+                println!(
+                    "[STARTUP] ✓ Connected to bootstrap node: {}",
+                    bootstrap_node
+                );
 
                 if let Err(e) = stream.write_all(b"/peers").await {
                     println!(
@@ -428,10 +446,7 @@ pub async fn bootstrap_and_discover_ip(peers: &Arc<Mutex<Vec<String>>>) {
                                 for peer in &peer_list {
                                     if !bootstrap_peers.contains(peer) {
                                         bootstrap_peers.push(peer.clone());
-                                        println!(
-                                            "[STARTUP] Added peer from bootstrap: {}",
-                                            peer
-                                        );
+                                        println!("[STARTUP] Added peer from bootstrap: {}", peer);
                                     }
                                 }
                             }
@@ -499,7 +514,9 @@ pub async fn bootstrap_and_discover_ip(peers: &Arc<Mutex<Vec<String>>>) {
         println!("[STARTUP] ✓ Public IP determined: {}", ip);
         *OBSERVED_IP.write().await = Some(ip.clone());
 
-        println!("[STARTUP] Step 5: Adding our address to peers.json and cleaning up duplicates...");
+        println!(
+            "[STARTUP] Step 5: Adding our address to peers.json and cleaning up duplicates..."
+        );
         let my_address = format!("{}:{}", ip, LISTEN_PORT);
         {
             let mut p = peers.lock().await;
@@ -517,7 +534,9 @@ pub async fn bootstrap_and_discover_ip(peers: &Arc<Mutex<Vec<String>>>) {
         println!("[STARTUP] Step 6: Broadcasting updated peers.json to network...");
         broadcast_peers_to_network(peers, &my_address).await;
     } else {
-        println!("[STARTUP] ⚠️ Could not determine public IP. Node will wait for incoming connections.");
+        println!(
+            "[STARTUP] ⚠️ Could not determine public IP. Node will wait for incoming connections."
+        );
     }
 
     println!("[STARTUP] ✓ Bootstrap and IP discovery sequence completed");
@@ -537,60 +556,58 @@ async fn determine_ip_from_specific_peer(peer: &str) -> Option<String> {
     );
 
     // Step 2: ask the chosen peer what IP it sees for this ID.
-    let observed_ip_from_peer = match timeout(Duration::from_secs(3), TcpStream::connect(peer)).await {
-        Ok(Ok(mut stream)) => {
-            println!("[STARTUP] ✓ Connected to peer {} for /resolve-ip", peer);
+    let observed_ip_from_peer =
+        match timeout(Duration::from_secs(3), TcpStream::connect(peer)).await {
+            Ok(Ok(mut stream)) => {
+                println!("[STARTUP] ✓ Connected to peer {} for /resolve-ip", peer);
 
-            let msg = format!("/resolve-ip/{}", temp_id);
-            if let Err(e) = stream.write_all(msg.as_bytes()).await {
+                let msg = format!("/resolve-ip/{}", temp_id);
+                if let Err(e) = stream.write_all(msg.as_bytes()).await {
+                    println!("[STARTUP] ✗ Failed to send /resolve-ip to {}: {}", peer, e);
+                    let _ = stream.shutdown().await;
+                    return None;
+                }
+
+                let mut buf = vec![0; 64];
+                let result = match stream.read(&mut buf).await {
+                    Ok(n) => {
+                        let response = String::from_utf8_lossy(&buf[..n]).trim().to_string();
+                        println!(
+                            "[STARTUP] Raw /resolve-ip response from {}: '{}'",
+                            peer, response
+                        );
+                        if response.is_empty() || response == "unknown" {
+                            None
+                        } else {
+                            Some(response)
+                        }
+                    }
+                    Err(e) => {
+                        println!(
+                            "[STARTUP] ✗ Failed to read /resolve-ip response from {}: {}",
+                            peer, e
+                        );
+                        None
+                    }
+                };
+                let _ = stream.shutdown().await;
+                result
+            }
+            Ok(Err(e)) => {
                 println!(
-                    "[STARTUP] ✗ Failed to send /resolve-ip to {}: {}",
+                    "[STARTUP] ✗ Failed to connect to peer {} for /resolve-ip: {}",
                     peer, e
                 );
-                let _ = stream.shutdown().await;
-                return None;
+                None
             }
-
-            let mut buf = vec![0; 64];
-            let result = match stream.read(&mut buf).await {
-                Ok(n) => {
-                    let response = String::from_utf8_lossy(&buf[..n]).trim().to_string();
-                    println!(
-                        "[STARTUP] Raw /resolve-ip response from {}: '{}'",
-                        peer, response
-                    );
-                    if response.is_empty() || response == "unknown" {
-                        None
-                    } else {
-                        Some(response)
-                    }
-                }
-                Err(e) => {
-                    println!(
-                        "[STARTUP] ✗ Failed to read /resolve-ip response from {}: {}",
-                        peer, e
-                    );
-                    None
-                }
-            };
-            let _ = stream.shutdown().await;
-            result
-        }
-        Ok(Err(e)) => {
-            println!(
-                "[STARTUP] ✗ Failed to connect to peer {} for /resolve-ip: {}",
-                peer, e
-            );
-            None
-        }
-        Err(_) => {
-            println!(
-                "[STARTUP] ✗ Timeout connecting to peer {} for /resolve-ip",
-                peer
-            );
-            None
-        }
-    };
+            Err(_) => {
+                println!(
+                    "[STARTUP] ✗ Timeout connecting to peer {} for /resolve-ip",
+                    peer
+                );
+                None
+            }
+        };
 
     let observed_ip_from_peer = match observed_ip_from_peer {
         Some(ip) => ip,
@@ -653,18 +670,12 @@ async fn determine_ip_from_specific_peer(peer: &str) -> Option<String> {
     None
 }
 
-async fn broadcast_peers_to_network(
-    peers: &Arc<Mutex<Vec<String>>>,
-    my_address: &str,
-) {
+async fn broadcast_peers_to_network(peers: &Arc<Mutex<Vec<String>>>, my_address: &str) {
     let peer_list = peers.lock().await.clone();
     let peers_json = match serde_json::to_string(&peer_list) {
         Ok(json) => json,
         Err(e) => {
-            println!(
-                "[STARTUP] ✗ Failed to serialize peers for broadcast: {}",
-                e
-            );
+            println!("[STARTUP] ✗ Failed to serialize peers for broadcast: {}", e);
             return;
         }
     };
@@ -720,15 +731,7 @@ pub async fn broadcast_to_known_nodes(block: &Block) {
         }
     };
 
-    let peers_content = match std::fs::read_to_string("peers.json") {
-        Ok(content) => content,
-        Err(_) => return,
-    };
-
-    let peers: Vec<String> = match serde_json::from_str(&peers_content) {
-        Ok(peers) => peers,
-        Err(_) => return,
-    };
+    let peers: Vec<String> = load_peers().unwrap_or_default();
 
     for peer in peers {
         if peer == my_addr {
@@ -831,22 +834,32 @@ pub async fn sync_chain(
     blockchain: &Arc<Mutex<Vec<Block>>>,
     peers: &Arc<Mutex<Vec<String>>>,
     force: bool,
+    verbose: bool,
 ) {
+    let log = |msg: &str| {
+        if verbose {
+            println!("{}", msg);
+        }
+    };
+
     let peer_list = peers.lock().await.clone();
     if peer_list.is_empty() {
-        println!("✗ Sync failed - no peers");
+        log("✗ Sync failed - no peers");
         return;
     }
 
     let my_addr = get_my_address().await;
-    println!("[SYNC] Attempting to sync with {} peers...", peer_list.len());
+    log(&format!(
+        "[SYNC] Attempting to sync with {} peers...",
+        peer_list.len()
+    ));
     for peer in peer_list {
         if Some(peer.as_str()) == my_addr.as_deref() {
             continue;
         }
-        println!("[SYNC] Connecting to {}", peer);
+        log(&format!("[SYNC] Connecting to {}", peer));
         if let Ok(mut stream) = TcpStream::connect(&peer).await {
-            println!("[SYNC] Requesting chain");
+            log("[SYNC] Requesting chain");
             if stream.write_all(b"/chain").await.is_err() {
                 continue;
             }
@@ -859,7 +872,11 @@ pub async fn sync_chain(
                         if let Err(e) = save_chain(&local) {
                             eprintln!("Failed to save chain: {}", e);
                         } else {
-                            println!("✓ Sync completed with {} (force={})", peer, force);
+                            if verbose {
+                                println!("✓ Sync completed with {} (force={})", peer, force);
+                            } else {
+                                println!("[SYNC] Background sync updated from {}", peer);
+                            }
                         }
                         return;
                     }
@@ -867,7 +884,7 @@ pub async fn sync_chain(
             }
         }
     }
-    println!("✗ Sync failed - no suitable peers");
+    log("✗ Sync failed - no suitable peers");
 }
 
 pub async fn ping_peer(peer: &str) -> bool {

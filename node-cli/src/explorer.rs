@@ -4,43 +4,33 @@ use blockchain_core::Block;
 use local_ip_address::local_ip;
 use rand::RngCore;
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
+use serde_json;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
     sync::Mutex,
 };
-use serde_json;
 
+use crate::ui::UI_HTML;
 use crate::{
+    OBSERVED_IP,
     chain::{calculate_balance, save_peers},
     miner::mine_block,
     p2p::ping_peer,
     wallet::{
-        build_tx,
-        broadcast_tx_payload,
-        export_wallet_dat_bytes,
-        latest_transaction,
-        read_mempool,
-        secret_key_from_bytes,
-        try_broadcast_pending,
-        wallet_info_json,
-        wallet_keys_json,
-        wallet_load_default,
-        wallet_pending_count,
-        wallet_remove_default,
-        wallet_save_default,
+        broadcast_tx_payload, build_tx, export_wallet_dat_bytes, latest_transaction, read_mempool,
+        secret_key_from_bytes, try_broadcast_pending, wallet_info_json, wallet_keys_json,
+        wallet_load_default, wallet_pending_count, wallet_remove_default, wallet_save_default,
     },
-    EXPLORER_PORT,
-    OBSERVED_IP,
 };
-use crate::ui::UI_HTML;
 
 pub async fn start_http_explorer(
     blockchain: Arc<Mutex<Vec<Block>>>,
     peers: Arc<Mutex<Vec<String>>>,
+    port: u16,
 ) {
     let bind_ip = std::env::var("EXPLORER_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0".to_string());
-    let addr = format!("{}:{}", bind_ip, EXPLORER_PORT);
+    let addr = format!("{}:{}", bind_ip, port);
     let listener = match TcpListener::bind(&addr).await {
         Ok(l) => {
             println!("Explorer listening on http://{}", addr);
@@ -66,7 +56,8 @@ pub async fn start_http_explorer(
                             let method = parts.next().unwrap_or("GET");
                             let path = parts.next().unwrap_or("/");
 
-                            let body = if method == "POST" || method == "PUT" || method == "DELETE" {
+                            let body = if method == "POST" || method == "PUT" || method == "DELETE"
+                            {
                                 if let Some(idx) = req.find("\r\n\r\n") {
                                     req[(idx + 4)..].to_string()
                                 } else {
@@ -76,33 +67,40 @@ pub async fn start_http_explorer(
                                 String::new()
                             };
 
-                            let (status, content_type, bytes) =
-                                if method == "GET" && (path == "/" || path == "/index.html") {
-                                    ("200 OK".to_string(), "text/html".to_string(), UI_HTML.as_bytes().to_vec())
-                                } else if method == "GET" && path == "/wallet/export-dat" {
-                                    let data = export_wallet_dat_bytes();
-                                    match data {
-                                        Some(b) => ("200 OK".into(), "application/octet-stream".into(), b),
-                                        None => (
-                                            "404 Not Found".into(),
-                                            "application/json".into(),
-                                            br#"{"error":"no wallet"}"#.to_vec(),
-                                        ),
+                            let (status, content_type, bytes) = if method == "GET"
+                                && (path == "/" || path == "/index.html")
+                            {
+                                (
+                                    "200 OK".to_string(),
+                                    "text/html".to_string(),
+                                    UI_HTML.as_bytes().to_vec(),
+                                )
+                            } else if method == "GET" && path == "/wallet/export-dat" {
+                                let data = export_wallet_dat_bytes();
+                                match data {
+                                    Some(b) => {
+                                        ("200 OK".into(), "application/octet-stream".into(), b)
                                     }
-                                } else if method == "GET" {
-                                    let (s, body) = handle_http_route(path, &bc, &pr).await;
-                                    (s, "application/json".into(), body.into_bytes())
-                                } else if method == "POST" || method == "PUT" || method == "DELETE" {
-                                    let (s, body) =
-                                        handle_http_mutating_route(method, path, &body, &bc, &pr).await;
-                                    (s, "application/json".into(), body.into_bytes())
-                                } else {
-                                    (
-                                        "405 Method Not Allowed".into(),
-                                        "text/plain".into(),
-                                        b"method not allowed".to_vec(),
-                                    )
-                                };
+                                    None => (
+                                        "404 Not Found".into(),
+                                        "application/json".into(),
+                                        br#"{"error":"no wallet"}"#.to_vec(),
+                                    ),
+                                }
+                            } else if method == "GET" {
+                                let (s, body) = handle_http_route(path, &bc, &pr).await;
+                                (s, "application/json".into(), body.into_bytes())
+                            } else if method == "POST" || method == "PUT" || method == "DELETE" {
+                                let (s, body) =
+                                    handle_http_mutating_route(method, path, &body, &bc, &pr).await;
+                                (s, "application/json".into(), body.into_bytes())
+                            } else {
+                                (
+                                    "405 Method Not Allowed".into(),
+                                    "text/plain".into(),
+                                    b"method not allowed".to_vec(),
+                                )
+                            };
 
                             let resp = format!(
                                 "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -190,7 +188,10 @@ async fn handle_http_route(
             .to_string();
             return ("200 OK".into(), body);
         } else {
-            return ("200 OK".into(), "{\"height\":0,\"tip_hash\":\"\",\"tip_time\":0}".into());
+            return (
+                "200 OK".into(),
+                "{\"height\":0,\"tip_hash\":\"\",\"tip_time\":0}".into(),
+            );
         }
     }
     if let Some(hash) = path.strip_prefix("/block/") {
@@ -252,7 +253,10 @@ async fn handle_http_mutating_route(
                 return ("200 OK".into(), "{\"ok\":true}".into());
             }
         }
-        return ("400 Bad Request".into(), "{\"error\":\"invalid peer\"}".into());
+        return (
+            "400 Bad Request".into(),
+            "{\"error\":\"invalid peer\"}".into(),
+        );
     }
     if method == "POST" && path == "/peers/remove" {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
@@ -263,7 +267,10 @@ async fn handle_http_mutating_route(
                 return ("200 OK".into(), "{\"ok\":true}".into());
             }
         }
-        return ("400 Bad Request".into(), "{\"error\":\"invalid peer\"}".into());
+        return (
+            "400 Bad Request".into(),
+            "{\"error\":\"invalid peer\"}".into(),
+        );
     }
     if method == "POST" && path == "/mine" {
         let bc = blockchain.clone();
@@ -298,7 +305,10 @@ async fn handle_http_mutating_route(
                 }
             }
         }
-        return ("400 Bad Request".into(), "{\"error\":\"invalid hex\"}".into());
+        return (
+            "400 Bad Request".into(),
+            "{\"error\":\"invalid hex\"}".into(),
+        );
     }
     if method == "POST" && path == "/wallet/import-dat" {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
@@ -311,7 +321,10 @@ async fn handle_http_mutating_route(
                 }
             }
         }
-        return ("400 Bad Request".into(), "{\"error\":\"invalid dat\"}".into());
+        return (
+            "400 Bad Request".into(),
+            "{\"error\":\"invalid dat\"}".into(),
+        );
     }
     if method == "POST" && path == "/wallet/send" {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
@@ -329,13 +342,15 @@ async fn handle_http_mutating_route(
                     } else {
                         format!("sent to {}/{}", ok, total)
                     };
-                    let body =
-                        serde_json::json!({ "ok": true, "message": message }).to_string();
+                    let body = serde_json::json!({ "ok": true, "message": message }).to_string();
                     return ("200 OK".into(), body);
                 }
             }
         }
-        return ("400 Bad Request".into(), "{\"error\":\"invalid or no wallet\"}".into());
+        return (
+            "400 Bad Request".into(),
+            "{\"error\":\"invalid or no wallet\"}".into(),
+        );
     }
     if method == "POST" && path == "/wallet/flush" {
         let sent = try_broadcast_pending(2);

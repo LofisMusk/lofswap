@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use easy_upnp::{add_ports, delete_ports, UpnpConfig as EasyConfig};
-use igd::{aio::search_gateway, PortMappingProtocol};
+use easy_upnp::{UpnpConfig as EasyConfig, add_ports, delete_ports};
+use igd::{PortMappingProtocol, aio::search_gateway};
 use local_ip_address::local_ip;
 
 pub async fn setup_upnp(port: u16) -> Result<(), Box<dyn std::error::Error>> {

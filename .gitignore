@@ -2,6 +2,7 @@ target
 node-cli/target
 wallet-cli/target
 blockchain-core/target
+data/
 mempool.json
 blockchain.json
 peers.json
@@ -10,3 +11,5 @@ linux-build
 .idea/
 .default_wallet
 .DS_Store
+__pycache__/
+wallet-cache/

@@ -24,6 +24,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
+ENV DATA_DIR=/app/data
+
 # kopiujemy binarkę
 COPY --from=builder /build/target/release/node-cli ./node-cli
 

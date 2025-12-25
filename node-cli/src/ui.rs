@@ -1,222 +1,215 @@
 pub const UI_HTML: &str = r#"<!doctype html>
-<html lang=\"en\">
+<html lang="en">
 <head>
-  <meta charset=\"utf-8\" />
-  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-  <title>Lofswap Node & Wallet</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Lofswap Explorer</title>
   <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; background: #0b0f17; color: #e8eefb; }
-    header { padding: 16px 20px; background: #0f1522; border-bottom: 1px solid #24304a; }
-    h1 { font-size: 20px; margin: 0; }
-    .wrap { padding: 18px; display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 18px; }
-    section { background: #111827; border: 1px solid #263247; border-radius: 10px; padding: 14px; }
-    h2 { font-size: 16px; margin: 0 0 10px; color: #a0b7ff; }
-    label { display:block; margin: 8px 0 4px; font-size: 13px; color:#9fb0cd }
-    input, button, select, textarea { background:#0b1320; color:#e8eefb; border:1px solid #2a3a58; border-radius:8px; padding:8px 10px; font-size:14px; }
-    button { cursor:pointer; }
-    button.primary { background:#1b2a4a; border-color:#3a5aa0; }
-    table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    th, td { padding: 6px 8px; border-bottom: 1px solid #223150; text-align: left; }
-    code { color:#9fe2b4 }
+    :root {
+      --bg: #05060b;
+      --panel: #0b0f19;
+      --border: #1a2336;
+      --text: #d8e2ff;
+      --muted: #7d8bad;
+      --accent: #6b8bff;
+      --accent2: #24e3b5;
+      --danger: #ff8a8a;
+      --glow: 0 0 30px rgba(107,139,255,0.25);
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: radial-gradient(circle at 20% 20%, rgba(107,139,255,0.12), transparent 28%), radial-gradient(circle at 80% 0%, rgba(36,227,181,0.12), transparent 28%), var(--bg); color: var(--text); font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif; min-height: 100vh; }
+    .topbar { display:flex; justify-content: space-between; align-items:center; padding: 18px 24px; border-bottom:1px solid var(--border); background: linear-gradient(90deg, rgba(9,12,20,0.9), rgba(9,12,20,0.6)); position: sticky; top:0; z-index: 10; }
+    .brand { display:flex; align-items:center; gap:10px; font-weight:700; letter-spacing:0.2px; }
+    .pill { padding:6px 10px; border-radius:999px; border:1px solid var(--border); color: var(--muted); font-size:12px; }
+    .container { max-width: 1220px; margin: 0 auto; padding: 20px; display: grid; gap: 16px; }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+    .card { background: var(--panel); border:1px solid var(--border); border-radius: 12px; padding: 14px; box-shadow: var(--glow); }
+    .stat-label { color: var(--muted); font-size:12px; text-transform: uppercase; letter-spacing:0.5px; }
+    .stat-value { font-size:20px; font-weight:700; margin-top:6px; }
+    .stat-sub { color: var(--muted); font-size:12px; margin-top:4px; }
+    .grid { display:grid; grid-template-columns: 1fr; gap: 16px; }
+    .section { background: var(--panel); border:1px solid var(--border); border-radius:12px; padding:14px 16px; box-shadow: 0 0 18px rgba(0,0,0,0.4); }
+    h2 { margin:0 0 10px; font-size:15px; letter-spacing:0.1px; color: var(--text); }
     .row { display:flex; gap:8px; align-items:center; flex-wrap: wrap; }
-    .muted { color:#8aa0bf; font-size:12px }
-    .kbd { background:#0b1320; border:1px solid #2a3a58; padding: 2px 6px; border-radius:6px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
-    .danger { color:#ff8a8a }
-    .ok { color:#9fe2b4 }
-    .grid2 { display:grid; grid-template-columns: 1fr 1fr; gap:10px }
-    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size:12px }
+    button { background:#0a0f1a; color:var(--text); border:1px solid var(--border); border-radius:10px; padding:8px 10px; font-size:13px; cursor:pointer; transition: all 0.15s ease; }
+    button.primary { background: linear-gradient(120deg, var(--accent), var(--accent2)); border:none; color:#010308; font-weight:700; box-shadow: 0 0 18px rgba(107,139,255,0.35); }
+    button:hover { transform: translateY(-1px); }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { padding: 8px 10px; border-bottom: 1px solid var(--border); text-align: left; }
+    th { color: var(--muted); font-weight:600; font-size:12px; }
+    .muted { color: var(--muted); font-size:12px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size:12px; }
+    .ok { color: var(--accent2); }
+    .danger { color: var(--danger); }
+    .flex-between { display:flex; justify-content: space-between; align-items:center; gap:10px; }
+    .cols-2 { display:grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap:12px; }
+    @media (max-width: 980px){ .grid { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
-  <header><h1>Lofswap: Node + Wallet</h1></header>
-  <div class=\"wrap\">
-    <section>
-      <h2>Node</h2>
-      <div class=\"row\">
-        <button id=\"refreshNode\">Refresh</button>
-        <button id=\"mine\" class=\"primary\">Mine Block</button>
+  <div class="topbar">
+    <div class="brand">
+      <div style="width:12px; height:12px; border-radius:50%; background:linear-gradient(120deg,var(--accent),var(--accent2)); box-shadow:0 0 12px rgba(107,139,255,0.7);"></div>
+      <div>Lofswap Explorer</div>
+    </div>
+    <div class="pill" id="networkTag">Online</div>
+  </div>
+  <div class="container">
+    <div class="stats">
+      <div class="card">
+        <div class="stat-label">Height</div>
+        <div class="stat-value" id="summaryHeight">-</div>
+        <div class="stat-sub" id="latestHash">-</div>
       </div>
-      <div class=\"grid2\" style=\"margin-top:8px\">
-        <div>
-          <div class=\"muted\">Public IP</div>
-          <div id=\"pubip\" class=\"mono\">-</div>
-        </div>
-        <div>
-          <div class=\"muted\">Private IP</div>
-          <div id=\"privip\" class=\"mono\">-</div>
-        </div>
+      <div class="card">
+        <div class="stat-label">Peers Online</div>
+        <div class="stat-value" id="summaryPeers">-</div>
+        <div class="stat-sub" id="peerCount">-</div>
       </div>
-      <h3 style=\"margin:14px 0 6px\">Peers</h3>
-      <div class=\"row\">
-        <input id=\"peerInput\" placeholder=\"ip:port\" />
-        <button id=\"addPeer\">Add</button>
-        <button id=\"removePeer\">Remove</button>
-        <span class=\"muted\" id=\"peerCount\"></span>
+      <div class="card">
+        <div class="stat-label">Mempool</div>
+        <div class="stat-value" id="summaryMempool">-</div>
+        <div class="stat-sub">Pending transactions</div>
       </div>
-      <table style=\"margin-top:8px\"> <thead><tr><th>Peer</th><th>Status</th></tr></thead>
-        <tbody id=\"peers\"></tbody>
-      </table>
-      <h3 style=\"margin:14px 0 6px\">Mempool</h3>
-      <table> <thead><tr><th>From</th><th>To</th><th>Amount</th></tr></thead>
-        <tbody id=\"mempool\"></tbody>
-      </table>
-      <h3 style=\"margin:14px 0 6px\">Latest Transaction</h3>
-      <div id=\"latestTx\" class=\"mono\">-</div>
-      <h3 style=\"margin:14px 0 6px\">Chain</h3>
-      <div id=\"height\" class=\"muted\"></div>
-      <table> <thead><tr><th>#</th><th>Hash</th><th>TXs</th></tr></thead>
-        <tbody id=\"chain\"></tbody>
-      </table>
-    </section>
+      <div class="card">
+        <div class="stat-label">Latest TX</div>
+        <div class="stat-value" id="summaryLatestTx">-</div>
+        <div class="stat-sub" id="summaryLatestDetail"></div>
+      </div>
+    </div>
 
-    <section>
-      <h2>Wallet</h2>
-      <div class=\"row\" style=\"margin-bottom:8px\">
-        <button id=\"createWallet\" class=\"primary\">Create Wallet</button>
-        <button id=\"removeWallet\" class=\"danger\">Remove Wallet</button>
-        <a id=\"exportDat\" href=\"/wallet/export-dat\" download=\"wallet.dat\"><button>Export .dat</button></a>
-      </div>
-      <div class=\"row\">
-        <input id=\"privhex\" placeholder=\"Private key (hex)\" class=\"mono\" />
-        <button id=\"importPriv\">Import Private</button>
-      </div>
-      <div class=\"row\" style=\"margin-top:8px\">
-        <input type=\"file\" id=\"datFile\" />
-        <button id=\"importDat\">Import .dat</button>
-      </div>
-      <div class=\"row\" style=\"margin-top:8px\">
-        <button id=\"revealKeys\">Reveal Keys…</button>
-        <span class=\"muted\">(confirmation required)</span>
-      </div>
-      <div id=\"keys\" class=\"mono\"></div>
-      <div class=\"grid2\" style=\"margin-top:8px\">
-        <div>
-          <div class=\"muted\">Address</div>
-          <div id=\"address\" class=\"mono\">-</div>
+    <div class="grid">
+      <div class="section">
+        <div class="flex-between">
+          <h2>Network</h2>
+          <div class="row">
+            <button id="refreshNode" class="primary">Refresh</button>
+          </div>
         </div>
-        <div>
-          <div class=\"muted\">Balance</div>
-          <div id=\"balance\" class=\"mono\">-</div>
+        <div class="cols-2" style="margin: 8px 0 14px">
+          <div class="card" style="box-shadow:none; border:1px solid var(--border); background:#090c14;">
+            <div class="stat-label">Public IP</div>
+            <div id="pubip" class="mono">-</div>
+          </div>
+          <div class="card" style="box-shadow:none; border:1px solid var(--border); background:#090c14;">
+            <div class="stat-label">Private IP</div>
+            <div id="privip" class="mono">-</div>
+          </div>
+        </div>
+
+        <div class="cols-2">
+          <div class="card" style="background:#0c101b;">
+            <div class="flex-between" style="margin-bottom:8px"><h2 style="margin:0">Peers</h2></div>
+            <table> <thead><tr><th>Peer</th><th>Status</th></tr></thead>
+              <tbody id="peers"></tbody>
+            </table>
+          </div>
+          <div class="card" style="background:#0c101b;">
+            <div class="flex-between" style="margin-bottom:8px"><h2 style="margin:0">Online</h2></div>
+            <table> <thead><tr><th>Peer</th></tr></thead>
+              <tbody id="peersOnline"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:12px; background:#0c101b;">
+          <div class="flex-between" style="margin-bottom:8px"><h2 style="margin:0">Latest Blocks</h2></div>
+          <div id="height" class="muted" style="margin-bottom:6px"></div>
+          <table> <thead><tr><th>#</th><th>Hash</th><th>TXs</th></tr></thead>
+            <tbody id="chain"></tbody>
+          </table>
+        </div>
+
+        <div class="card" style="margin-top:12px; background:#0c101b;">
+          <div class="flex-between" style="margin-bottom:8px"><h2 style="margin:0">Recent Transactions</h2></div>
+          <table> <thead><tr><th>From</th><th>To</th><th>Amount</th><th>Block</th></tr></thead>
+            <tbody id="recentTx"></tbody>
+          </table>
+        </div>
+
+        <div class="card" style="margin-top:12px; background:#0c101b;">
+          <div class="flex-between" style="margin-bottom:8px"><h2 style="margin:0">Mempool</h2></div>
+          <table> <thead><tr><th>From</th><th>To</th><th>Amount</th></tr></thead>
+            <tbody id="mempool"></tbody>
+          </table>
         </div>
       </div>
-      <h3 style=\"margin:14px 0 6px\">Send Transaction</h3>
-      <div class=\"row\">
-        <input id=\"to\" placeholder=\"To (address)\" class=\"mono\" style=\"width: 60%\" />
-        <input id=\"amount\" placeholder=\"Amount\" type=\"number\" />
-        <button id=\"send\" class=\"primary\">Send</button>
-      </div>
-      <div class=\"row\" style=\"margin-top:8px\">
-        <button id=\"flush\">Flush Pending</button>
-        <span class=\"muted\" id=\"pending\"></span>
-      </div>
-      <h3 style=\"margin:14px 0 6px\">History</h3>
-      <table> <thead><tr><th>Dir</th><th>Peer</th><th>Amount</th></tr></thead>
-        <tbody id=\"history\"></tbody>
-      </table>
-    </section>
+    </div>
   </div>
 
   <script>
-    const ALPH = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
-    function base58(buf){
-      let x = [...buf]; let digits = [0];
-      for (let i=0;i<x.length;i++){
-        let carry = x[i];
-        for (let j=0;j<digits.length;j++){
-          const v = digits[j]*256 + carry; digits[j] = v % 58; carry = Math.floor(v/58);
-        }
-        while (carry){ digits.push(carry%58); carry=Math.floor(carry/58); }
-      }
-      return digits.reverse().map(d=>ALPH[d]).join('') || '1';
-    }
-    async function sha256(buf){ const d = await crypto.subtle.digest('SHA-256', buf); return new Uint8Array(d); }
-    async function getWalletInfo(){ const r = await fetch('/wallet/info'); return r.json(); }
-    async function deriveAddress(pubKeyStr){
-      const enc = new TextEncoder(); const bytes = enc.encode(pubKeyStr);
-      const h = await sha256(bytes); const slice = h.slice(0,20);
-      return 'LFS'+base58(slice);
-    }
+    const shorten = (s, n=10) => s ? (s.length>n ? `${s.slice(0,n)}…${s.slice(-4)}` : s) : '-';
+
     async function refreshNode(){
       try{
         const ip = await fetch('/node/ip').then(r=>r.json());
         document.getElementById('pubip').textContent = ip.public || '-';
         document.getElementById('privip').textContent = ip.private || '-';
+
         const peers = await fetch('/peers').then(r=>r.json()).catch(()=>[]);
         const status = await fetch('/peers/status').then(r=>r.json()).catch(()=>({list:[]}));
+        const online = (status.list||[]).filter(p=>p.online);
         document.getElementById('peerCount').textContent = `${peers.length} peers`;
+        document.getElementById('summaryPeers').textContent = `${online.length}/${peers.length||0}`;
+
         const tbody = document.getElementById('peers'); tbody.innerHTML = '';
         (status.list||peers.map(p=>({peer:p, online:false}))).forEach(p=>{
           const tr = document.createElement('tr');
-          tr.innerHTML = `<td class=\"mono\">${p.peer}</td><td>${p.online?'<span class=ok>online</span>':'<span class=danger>offline</span>'}</td>`;
+          tr.innerHTML = `<td class="mono">${p.peer}</td><td>${p.online?'<span class=ok>online</span>':'<span class=danger>offline</span>'}</td>`;
           tbody.appendChild(tr);
         });
+        const onlineBody = document.getElementById('peersOnline'); onlineBody.innerHTML='';
+        online.forEach(p=>{
+          const tr=document.createElement('tr');
+          tr.innerHTML = `<td class="mono">${p.peer}</td>`;
+          onlineBody.appendChild(tr);
+        });
+
         const mem = await fetch('/mempool').then(r=>r.json()).catch(()=>[]);
+        document.getElementById('summaryMempool').textContent = mem.length;
         const mbody = document.getElementById('mempool'); mbody.innerHTML='';
         mem.forEach(tx=>{
           const tr=document.createElement('tr');
-          tr.innerHTML = `<td class=\"mono\">${tx.from||'(reward)'}</td><td class=\"mono\">${tx.to}</td><td>${tx.amount}</td>`;
+          tr.innerHTML = `<td class="mono">${tx.from||'(reward)'}</td><td class="mono">${tx.to}</td><td>${tx.amount}</td>`;
           mbody.appendChild(tr);
         });
+
         const latest = await fetch('/chain/latest-tx').then(r=>r.json()).catch(()=>null);
-        document.getElementById('latestTx').textContent = latest? JSON.stringify(latest): '-';
+        document.getElementById('summaryLatestTx').textContent = latest ? `${latest.amount || ''}` : '-';
+        document.getElementById('summaryLatestDetail').textContent = latest ? `${shorten(latest.from||'(reward)',12)} → ${shorten(latest.to||'',12)}` : '';
+
         const h = await fetch('/height').then(r=>r.json()).catch(()=>({height:0}));
-        document.getElementById('height').textContent = `Height: ${h.height||0}`;
         const chain = await fetch('/chain').then(r=>r.json()).catch(()=>[]);
+        const heightVal = h.height || chain.length || 0;
+        document.getElementById('summaryHeight').textContent = heightVal;
+        const latestBlock = chain[chain.length-1];
+        document.getElementById('latestHash').textContent = latestBlock ? shorten(latestBlock.hash, 22) : '-';
+        document.getElementById('height').textContent = `Height: ${heightVal}`;
+
         const cbody = document.getElementById('chain'); cbody.innerHTML='';
         chain.slice(-10).reverse().forEach(b=>{
           const tr=document.createElement('tr');
-          tr.innerHTML = `<td>${b.index}</td><td class=\"mono\">${b.hash}</td><td>${(b.transactions||[]).length}</td>`;
+          tr.innerHTML = `<td>${b.index}</td><td class="mono">${shorten(b.hash, 28)}</td><td>${(b.transactions||[]).length}</td>`;
           cbody.appendChild(tr);
+        });
+
+        const txBody = document.getElementById('recentTx'); txBody.innerHTML='';
+        const recentTxs = [];
+        chain.slice(-10).forEach(b=>{
+          (b.transactions||[]).forEach(tx=>{
+            recentTxs.push({...tx, block: b.index});
+          });
+        });
+        recentTxs.slice(-15).reverse().forEach(tx=>{
+          const tr=document.createElement('tr');
+          tr.innerHTML = `<td class="mono">${shorten(tx.from||'(reward)',14)}</td><td class="mono">${shorten(tx.to,14)}</td><td>${tx.amount}</td><td>#${tx.block}</td>`;
+          txBody.appendChild(tr);
         });
       }catch(e){ console.error(e); }
     }
-    async function refreshWallet(){
-      const info = await getWalletInfo();
-      const addr = info.public_key ? await deriveAddress(info.public_key) : '-';
-      document.getElementById('address').textContent = addr;
-      if(addr && addr !== '-'){
-        const bal = await fetch(`/address/${addr}/balance`).then(r=>r.json().catch(()=>r.text())).catch(()=>'-');
-        const v = typeof bal === 'object' ? bal.balance : bal;
-        document.getElementById('balance').textContent = v;
-        const txs = await fetch(`/address/${addr}/txs`).then(r=>r.json()).catch(()=>[]);
-        const h = document.getElementById('history'); h.innerHTML='';
-        txs.forEach(tx=>{
-          const dir = (tx.to===addr)?'IN':'OUT';
-          const tr=document.createElement('tr');
-          tr.innerHTML = `<td>${dir}</td><td class=\"mono\">${(dir==='IN'?tx.from:tx.to)||''}</td><td>${tx.amount}</td>`;
-          h.appendChild(tr);
-        })
-      }
-      const pendingTxt = await fetch('/wallet/pending-count').then(r=>r.json()).catch(()=>({count:0}));
-      document.getElementById('pending').textContent = `${pendingTxt.count} pending`;
-    }
+
     document.getElementById('refreshNode').onclick = ()=>{ refreshNode(); };
-    document.getElementById('mine').onclick = async ()=>{ await fetch('/mine', {method:'POST'}); setTimeout(refreshNode, 500); };
-    document.getElementById('addPeer').onclick = async ()=>{
-      const p = document.getElementById('peerInput').value.trim(); if(!p) return;
-      await fetch('/peers/add', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({peer:p})}); refreshNode(); };
-    document.getElementById('removePeer').onclick = async ()=>{
-      const p = document.getElementById('peerInput').value.trim(); if(!p) return;
-      await fetch('/peers/remove', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({peer:p})}); refreshNode(); };
-    document.getElementById('createWallet').onclick = async ()=>{ await fetch('/wallet/create', {method:'POST'}); await refreshWallet(); };
-    document.getElementById('removeWallet').onclick = async ()=>{ if(confirm('Remove default wallet?')){ await fetch('/wallet', {method:'DELETE'}); await refreshWallet(); }};
-    document.getElementById('importPriv').onclick = async ()=>{
-      const v = document.getElementById('privhex').value.trim(); if(!v) return;
-      await fetch('/wallet/import-priv', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({priv_hex:v})}); await refreshWallet(); };
-    document.getElementById('importDat').onclick = async ()=>{
-      const f = document.getElementById('datFile').files[0]; if(!f) return; const ab = await f.arrayBuffer();
-      const hex = [...new Uint8Array(ab)].map(b=>b.toString(16).padStart(2,'0')).join('');
-      await fetch('/wallet/import-dat', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({dat_hex:hex})}); await refreshWallet(); };
-    document.getElementById('revealKeys').onclick = async ()=>{
-      if(!confirm('Show private key?')) return; const k = await fetch('/wallet/keys?confirm=true').then(r=>r.json());
-      document.getElementById('keys').textContent = `Public: ${k.public_key || '-'}\nPrivate: ${k.private_key || '-'}`;
-    };
-    document.getElementById('send').onclick = async ()=>{
-      const to = document.getElementById('to').value.trim(); const amount = parseInt(document.getElementById('amount').value,10)||0;
-      if(!to || amount<=0) return; const res = await fetch('/wallet/send', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({to, amount, min_peers:2})}).then(r=>r.json());
-      alert(res.message||'Sent'); await refreshWallet(); };
-    document.getElementById('flush').onclick = async ()=>{ await fetch('/wallet/flush', {method:'POST'}); await refreshWallet(); };
-    (async function(){ await refreshNode(); await refreshWallet(); })();
+    (async function(){ await refreshNode(); })();
   </script>
 </body>
 </html>"#;

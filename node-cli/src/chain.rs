@@ -1,16 +1,13 @@
-use std::{
-    collections::HashMap,
-    fs,
-    path::Path,
-};
+use std::collections::HashMap;
 
 use blockchain_core::{Block, Transaction};
-use secp256k1::{ecdsa::Signature, Message, PublicKey, Secp256k1};
-use sha2::{Digest, Sha256};
+use secp256k1::{Message, PublicKey, Secp256k1, ecdsa::Signature};
 use serde_json;
+use sha2::{Digest, Sha256};
 
 use crate::{
     errors::NodeError,
+    storage::{read_data_file, write_data_file},
     wallet::read_mempool,
 };
 
@@ -48,7 +45,9 @@ pub fn is_tx_valid(tx: &Transaction, chain: &[Block]) -> Result<(), NodeError> {
     }
 
     let secp = Secp256k1::new();
-    let from_pubkey = tx.from.parse::<PublicKey>()
+    let from_pubkey = tx
+        .from
+        .parse::<PublicKey>()
         .map_err(|_| NodeError::ValidationError("Invalid public key".to_string()))?;
 
     let balance = calculate_balance(&tx.from, chain);
@@ -58,7 +57,9 @@ pub fn is_tx_valid(tx: &Transaction, chain: &[Block]) -> Result<(), NodeError> {
         .map(|m| m.amount as u128)
         .sum();
     if (tx.amount as u128) + pending_out > (balance.max(0) as u128) {
-        return Err(NodeError::ValidationError("Insufficient balance (pending)".to_string()));
+        return Err(NodeError::ValidationError(
+            "Insufficient balance (pending)".to_string(),
+        ));
     }
 
     let msg_data = format!("{}{}{}", tx.from, tx.to, tx.amount);
@@ -74,12 +75,14 @@ pub fn is_tx_valid(tx: &Transaction, chain: &[Block]) -> Result<(), NodeError> {
         block.transactions.iter().any(|btx| {
             btx.signature == tx.signature || (!tx.txid.is_empty() && btx.txid == tx.txid)
         })
-    }) || read_mempool().iter().any(|m| {
-        m.signature == tx.signature || (!tx.txid.is_empty() && m.txid == tx.txid)
-    });
+    }) || read_mempool()
+        .iter()
+        .any(|m| m.signature == tx.signature || (!tx.txid.is_empty() && m.txid == tx.txid));
 
     if already_exists {
-        return Err(NodeError::ValidationError("Transaction already exists".to_string()));
+        return Err(NodeError::ValidationError(
+            "Transaction already exists".to_string(),
+        ));
     }
 
     secp.verify_ecdsa(msg, &signature, &from_pubkey)
@@ -91,44 +94,42 @@ pub fn is_tx_valid(tx: &Transaction, chain: &[Block]) -> Result<(), NodeError> {
 pub fn save_chain(chain: &[Block]) -> Result<(), NodeError> {
     let json = serde_json::to_string_pretty(chain)
         .map_err(|e| NodeError::SerializationError(e.to_string()))?;
-    fs::write("blockchain.json", json)
-        .map_err(|e| NodeError::NetworkError(e.to_string()))?;
-    Ok(())
+    write_data_file("blockchain.json", &json).map_err(|e| NodeError::NetworkError(e.to_string()))
 }
 
 pub fn load_chain() -> Result<Vec<Block>, NodeError> {
-    if Path::new("blockchain.json").exists() {
-        let json = fs::read_to_string("blockchain.json")
-            .map_err(|e| NodeError::NetworkError(e.to_string()))?;
-        serde_json::from_str(&json)
-            .map_err(|e| NodeError::SerializationError(e.to_string()))
-    } else {
-        Ok(vec![Block::new(0, vec![], "0".to_string(), "genesis".to_string())])
+    match read_data_file("blockchain.json").map_err(|e| NodeError::NetworkError(e.to_string()))? {
+        Some(json) => {
+            serde_json::from_str(&json).map_err(|e| NodeError::SerializationError(e.to_string()))
+        }
+        None => Ok(vec![Block::new(
+            0,
+            vec![],
+            "0".to_string(),
+            "genesis".to_string(),
+        )]),
     }
 }
 
 pub fn load_peers() -> Result<Vec<String>, NodeError> {
-    if Path::new("peers.json").exists() {
-        let json = fs::read_to_string("peers.json")
-            .map_err(|e| NodeError::NetworkError(e.to_string()))?;
-        serde_json::from_str(&json)
+    match read_data_file("peers.json").map_err(|e| NodeError::NetworkError(e.to_string()))? {
+        Some(json) => serde_json::from_str(&json)
             .map_err(|e| NodeError::SerializationError(e.to_string()))
-            .or(Ok(vec![]))
-    } else {
-        Ok(vec![])
+            .or(Ok(vec![])),
+        None => Ok(vec![]),
     }
 }
 
 pub fn save_peers(peers: &[String]) -> Result<(), NodeError> {
     let json = serde_json::to_string_pretty(peers)
         .map_err(|e| NodeError::SerializationError(e.to_string()))?;
-    fs::write("peers.json", json)
-        .map_err(|e| NodeError::NetworkError(e.to_string()))?;
-    Ok(())
+    write_data_file("peers.json", &json).map_err(|e| NodeError::NetworkError(e.to_string()))
 }
 
 pub fn load_valid_transactions(chain: &[Block]) -> Vec<Transaction> {
-    let parsed: Vec<Transaction> = fs::read_to_string("mempool.json")
+    let parsed: Vec<Transaction> = read_data_file("mempool.json")
+        .ok()
+        .flatten()
         .unwrap_or_default()
         .lines()
         .filter_map(|l| serde_json::from_str(l).ok())

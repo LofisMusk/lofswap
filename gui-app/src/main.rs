@@ -1,10 +1,18 @@
-use std::{process::{Command, Stdio, Child}, time::{Duration, Instant}, io::{Read, Write}, net::{TcpStream, SocketAddr}};
+use blockchain_core::{Block, Transaction};
 use eframe::{egui, NativeOptions};
 use serde::{Deserialize, Serialize};
-use blockchain_core::{Transaction, Block};
+use std::{
+    io::{Read, Write},
+    net::{SocketAddr, TcpStream},
+    process::{Child, Command, Stdio},
+    time::{Duration, Instant},
+};
 
 #[derive(Default, Clone, Serialize, Deserialize)]
-struct NodeIp { pub r#public: Option<String>, pub private: Option<String> }
+struct NodeIp {
+    pub r#public: Option<String>,
+    pub private: Option<String>,
+}
 
 struct App {
     status: String,
@@ -97,8 +105,12 @@ fn spawn_node() -> anyhow::Result<Child> {
         cmd.env("EXPLORER_BIND_ADDR", "127.0.0.1");
         cmd.env("BIND_ADDR", "0.0.0.0");
         cmd.arg("--no-peer-exchange");
-        cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-        if let Ok(child) = cmd.spawn() { return Ok(child); }
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if let Ok(child) = cmd.spawn() {
+            return Ok(child);
+        }
     }
     anyhow::bail!(format!("failed to start node-cli. Tried: {:?}", tried))
 }
@@ -109,27 +121,44 @@ fn http_request(method: &str, path: &str, body: Option<&[u8]>) -> Option<Vec<u8>
     let _ = stream.set_read_timeout(Some(Duration::from_millis(2_000)));
     let _ = stream.set_write_timeout(Some(Duration::from_millis(2_000)));
     let body_bytes: &[u8] = body.unwrap_or(&[]);
-    let headers = format!(
+    let headers =
+        format!(
         "{} {} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Length: {}\r\n{}\r\n",
         method,
         path,
         body_bytes.len(),
         if body.is_some() { "Content-Type: application/json\r\n" } else { "" }
     );
-    if stream.write_all(headers.as_bytes()).is_err() { return None; }
-    if !body_bytes.is_empty() { if stream.write_all(body_bytes).is_err() { return None; } }
+    if stream.write_all(headers.as_bytes()).is_err() {
+        return None;
+    }
+    if !body_bytes.is_empty() {
+        if stream.write_all(body_bytes).is_err() {
+            return None;
+        }
+    }
     let mut buf = Vec::new();
-    if stream.read_to_end(&mut buf).is_err() { return None; }
+    if stream.read_to_end(&mut buf).is_err() {
+        return None;
+    }
     // Split headers and body
     fn find_double_crlf(data: &[u8]) -> Option<usize> {
         let pat = b"\r\n\r\n";
-        if data.len() < 4 { return None; }
-        for i in 0..=data.len()-4 {
-            if &data[i..i+4] == pat { return Some(i); }
+        if data.len() < 4 {
+            return None;
+        }
+        for i in 0..=data.len() - 4 {
+            if &data[i..i + 4] == pat {
+                return Some(i);
+            }
         }
         None
     }
-    if let Some(i) = find_double_crlf(&buf) { Some(buf[i+4..].to_vec()) } else { Some(buf) }
+    if let Some(i) = find_double_crlf(&buf) {
+        Some(buf[i + 4..].to_vec())
+    } else {
+        Some(buf)
+    }
 }
 
 fn http_get_json<T: for<'de> Deserialize<'de>>(path: &str) -> Option<T> {
@@ -141,9 +170,15 @@ fn http_post_json<B: Serialize, T: for<'de> Deserialize<'de>>(path: &str, body: 
     let b = http_request("POST", path, Some(&payload))?;
     serde_json::from_slice(&b).ok()
 }
-fn http_post(path: &str) -> bool { http_request("POST", path, Some(&[])).is_some() }
-fn http_delete(path: &str) -> bool { http_request("DELETE", path, None).is_some() }
-fn http_get_bytes(path: &str) -> Option<Vec<u8>> { http_request("GET", path, None) }
+fn http_post(path: &str) -> bool {
+    http_request("POST", path, Some(&[])).is_some()
+}
+fn http_delete(path: &str) -> bool {
+    http_request("DELETE", path, None).is_some()
+}
+fn http_get_bytes(path: &str) -> Option<Vec<u8>> {
+    http_request("GET", path, None)
+}
 
 fn base58(bytes: &[u8]) -> String {
     const ALPH: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
@@ -155,13 +190,20 @@ fn base58(bytes: &[u8]) -> String {
             *d = (v % 58) as u8;
             carry = v / 58;
         }
-        while carry > 0 { digits.push((carry % 58) as u8); carry /= 58; }
+        while carry > 0 {
+            digits.push((carry % 58) as u8);
+            carry /= 58;
+        }
     }
-    digits.iter().rev().map(|&d| ALPH[d as usize] as char).collect::<String>()
+    digits
+        .iter()
+        .rev()
+        .map(|&d| ALPH[d as usize] as char)
+        .collect::<String>()
 }
 
 fn sha256(bytes: &[u8]) -> [u8; 32] {
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update(bytes);
     h.finalize().into()
@@ -178,31 +220,61 @@ impl eframe::App for App {
         if self.last_refresh.elapsed() > Duration::from_millis(750) {
             // Node data
             self.peers = http_get_json::<Vec<String>>("/peers").unwrap_or_default();
-            #[derive(Deserialize)] struct PeerStatus { peer: String, online: bool }
-            #[derive(Deserialize)] struct PeerStatusList { list: Vec<PeerStatus> }
-            self.peers_status = http_get_json::<PeerStatusList>("/peers/status").map(|x| x.list.into_iter().map(|p| (p.peer, p.online)).collect()).unwrap_or_default();
+            #[derive(Deserialize)]
+            struct PeerStatus {
+                peer: String,
+                online: bool,
+            }
+            #[derive(Deserialize)]
+            struct PeerStatusList {
+                list: Vec<PeerStatus>,
+            }
+            self.peers_status = http_get_json::<PeerStatusList>("/peers/status")
+                .map(|x| x.list.into_iter().map(|p| (p.peer, p.online)).collect())
+                .unwrap_or_default();
             self.mempool = http_get_json::<Vec<Transaction>>("/mempool").unwrap_or_default();
-            self.latest_tx = http_get_json::<Option<Transaction>>("/chain/latest-tx").unwrap_or(None);
-            #[derive(Deserialize)] struct Height { height: usize }
-            self.height = http_get_json::<Height>("/height").map(|h| h.height).unwrap_or(0);
+            self.latest_tx =
+                http_get_json::<Option<Transaction>>("/chain/latest-tx").unwrap_or(None);
+            #[derive(Deserialize)]
+            struct Height {
+                height: usize,
+            }
+            self.height = http_get_json::<Height>("/height")
+                .map(|h| h.height)
+                .unwrap_or(0);
             self.chain = http_get_json::<Vec<Block>>("/chain").unwrap_or_default();
             self.ip = http_get_json::<NodeIp>("/node/ip").unwrap_or_default();
 
             // Wallet
-            #[derive(Deserialize)] struct Info { public_key: Option<String> }
-            let info = http_get_json::<Info>("/wallet/info").unwrap_or(Info{ public_key: None });
+            #[derive(Deserialize)]
+            struct Info {
+                public_key: Option<String>,
+            }
+            let info = http_get_json::<Info>("/wallet/info").unwrap_or(Info { public_key: None });
             self.public_key = info.public_key.clone();
             if let Some(pk) = info.public_key {
                 let addr = derive_address(&pk);
                 self.address = Some(addr.clone());
-                #[derive(Deserialize)] struct Bal { balance: i128 }
-                self.balance = http_get_json::<Bal>(&format!("/address/{}/balance", addr)).map(|b| b.balance);
-                self.history = http_get_json::<Vec<Transaction>>(&format!("/address/{}/txs", addr)).unwrap_or_default();
+                #[derive(Deserialize)]
+                struct Bal {
+                    balance: i128,
+                }
+                self.balance =
+                    http_get_json::<Bal>(&format!("/address/{}/balance", addr)).map(|b| b.balance);
+                self.history = http_get_json::<Vec<Transaction>>(&format!("/address/{}/txs", addr))
+                    .unwrap_or_default();
             } else {
-                self.address = None; self.balance = None; self.history.clear();
+                self.address = None;
+                self.balance = None;
+                self.history.clear();
             }
-            #[derive(Deserialize)] struct PC { count: usize }
-            self.pending_count = http_get_json::<PC>("/wallet/pending-count").map(|p| p.count).unwrap_or(0);
+            #[derive(Deserialize)]
+            struct PC {
+                count: usize,
+            }
+            self.pending_count = http_get_json::<PC>("/wallet/pending-count")
+                .map(|p| p.count)
+                .unwrap_or(0);
 
             self.status.clear();
             self.last_refresh = Instant::now();
@@ -211,9 +283,13 @@ impl eframe::App for App {
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("Lofswap – Node & Wallet");
-                if !self.status.is_empty() { ui.label(self.status.clone()); }
+                if !self.status.is_empty() {
+                    ui.label(self.status.clone());
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Refresh").clicked() { self.last_refresh = Instant::now() - Duration::from_secs(999); }
+                    if ui.button("Refresh").clicked() {
+                        self.last_refresh = Instant::now() - Duration::from_secs(999);
+                    }
                 });
             });
         });

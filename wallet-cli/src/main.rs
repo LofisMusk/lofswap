@@ -10,12 +10,14 @@ use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream};
-use std::path::Path;
+use std::path::PathBuf;
 use std::time::Duration;
 
-static BOOTSTRAP_NODES: &[&str] = &["31.135.167.5:6000", "31.135.167.5:6001"];
+static BOOTSTRAP_NODES: &[&str] = &["89.168.107.239:6000", "92.5.16.170:6000"];
 
 const MEMPOOL_FILE: &str = "wallet_mempool.json";
+const WALLET_CACHE_DIR: &str = "wallet-cache";
+const PEER_CACHE_FILE: &str = "wallet-cache/peers_cache.json";
 
 // ---------- domyślny portfel ----------
 const DEFAULT_WALLET: &str = ".default_wallet";
@@ -37,18 +39,87 @@ fn load_default_wallet() -> Option<SecretKey> {
         })
 }
 
+fn default_address() -> Option<String> {
+    load_default_wallet().map(|sk| {
+        let pk = PublicKey::from_secret_key(&Secp256k1::new(), &sk);
+        format!(
+            "LFS{}",
+            bs58::encode(&Sha256::digest(&pk.serialize())[..20]).into_string()
+        )
+    })
+}
+
 // ---------- Peers ----------
-fn load_peers() -> Vec<String> {
-    if Path::new("peers.json").exists() {
-        if let Ok(txt) = fs::read_to_string("peers.json") {
+fn ensure_cache_dir() {
+    let _ = fs::create_dir_all(WALLET_CACHE_DIR);
+}
+
+fn peer_cache_path() -> PathBuf {
+    PathBuf::from(PEER_CACHE_FILE)
+}
+
+fn is_valid_peer(p: &str) -> bool {
+    p.parse::<SocketAddr>().is_ok()
+}
+
+struct PeerStore {
+    peers: Vec<String>,
+}
+
+impl PeerStore {
+    fn load() -> Self {
+        ensure_cache_dir();
+        let mut peers: Vec<String> = BOOTSTRAP_NODES.iter().map(|s| s.to_string()).collect();
+        if let Ok(txt) = fs::read_to_string(peer_cache_path()) {
             if let Ok(v) = serde_json::from_str::<Vec<String>>(&txt) {
-                if !v.is_empty() {
-                    return v;
+                for p in v {
+                    if is_valid_peer(&p) && !peers.contains(&p) {
+                        peers.push(p);
+                    }
+                }
+            }
+        }
+        PeerStore { peers }
+    }
+
+    fn save(&self) {
+        ensure_cache_dir();
+        let _ = fs::write(peer_cache_path(), serde_json::to_string_pretty(&self.peers).unwrap_or_default());
+    }
+
+    fn as_slice(&self) -> &[String] {
+        &self.peers
+    }
+
+    fn add_many(&mut self, list: &[String]) {
+        for p in list {
+            if is_valid_peer(p) && !self.peers.contains(p) {
+                self.peers.push(p.clone());
+            }
+        }
+    }
+
+    fn discover(&mut self) {
+        let candidates: Vec<String> = self
+            .peers
+            .iter()
+            .cloned()
+            .chain(BOOTSTRAP_NODES.iter().map(|s| s.to_string()))
+            .collect();
+
+        for peer in candidates {
+            if let Ok(mut stream) = TcpStream::connect_timeout(&peer.parse().unwrap(), Duration::from_millis(800)) {
+                let _ = stream.write_all(b"/peers");
+                let mut buf = Vec::new();
+                if stream.read_to_end(&mut buf).is_ok() {
+                    if let Ok(v) = serde_json::from_slice::<Vec<String>>(&buf) {
+                        let filtered: Vec<String> = v.into_iter().filter(|p| is_valid_peer(p)).collect();
+                        self.add_many(&filtered);
+                    }
                 }
             }
         }
     }
-    BOOTSTRAP_NODES.iter().map(|s| s.to_string()).collect()
 }
 
 fn connect_and_send(addr: &str, data: &[u8]) -> io::Result<()> {
@@ -60,8 +131,9 @@ fn connect_and_send(addr: &str, data: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-fn broadcast(json: &[u8], min_peers: usize) {
-    let peers = load_peers();
+fn broadcast(store: &mut PeerStore, json: &[u8], min_peers: usize) {
+    store.discover();
+    let peers = store.as_slice();
     if peers.is_empty() {
         println!("✗ Brak znanych nodów");
         return;
@@ -92,7 +164,7 @@ fn broadcast(json: &[u8], min_peers: usize) {
             .and_then(|mut f| f.write_all(json));
     } else {
         // If sent successfully, try to broadcast any pending transactions
-        try_broadcast_pending(min_peers);
+        try_broadcast_pending(store, min_peers);
     }
 }
 
@@ -120,29 +192,30 @@ fn build_tx(sk: &SecretKey, to: &str, amount: u64) -> Transaction {
     tx
 }
 
-fn send_default(to: &str, amount: u64, min_peers: usize) {
+fn send_default(store: &mut PeerStore, to: &str, amount: u64, min_peers: usize) {
     if let Some(sk) = load_default_wallet() {
         let tx = build_tx(&sk, to, amount);
         let payload = serde_json::to_vec(&tx).unwrap();
-        broadcast(&payload, min_peers);
+        broadcast(store, &payload, min_peers);
     } else {
         println!("✗ Brak domyślnego portfela");
     }
 }
-fn send_priv(priv_hex: &str, to: &str, amount: u64, min_peers: usize) {
+fn send_priv(store: &mut PeerStore, priv_hex: &str, to: &str, amount: u64, min_peers: usize) {
     if let Ok(sk) = SecretKey::from_slice(&hex::decode(priv_hex).unwrap_or_default()) {
         let tx = build_tx(&sk, to, amount);
         let payload = serde_json::to_vec(&tx).unwrap();
-        broadcast(&payload, min_peers);
+        broadcast(store, &payload, min_peers);
     } else {
         println!("✗ Niepoprawny klucz prywatny");
     }
 }
 
 // ---------- Saldo ----------
-fn balance(addr: &str) {
+fn balance(store: &mut PeerStore, addr: &str) {
+    store.discover();
     let query = format!("/balance/{}", addr);
-    for p in load_peers() {
+    for p in store.as_slice() {
         if let Ok(mut s) =
             TcpStream::connect_timeout(&p.parse().unwrap(), Duration::from_millis(800))
         {
@@ -159,7 +232,7 @@ fn balance(addr: &str) {
 }
 
 // ---------- Faucet ----------
-fn faucet(addr: &str) {
+fn faucet(store: &mut PeerStore, addr: &str) {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -175,7 +248,8 @@ fn faucet(addr: &str) {
     };
     tx.txid = tx.compute_txid();
     let data = serde_json::to_vec(&tx).unwrap();
-    for p in load_peers() {
+    store.discover();
+    for p in store.as_slice() {
         if connect_and_send(&p, &data).is_ok() {
             println!("✓ Faucet do {} via {}", addr, p);
             return;
@@ -215,7 +289,7 @@ fn export_dat(path: &str) {
 // ---------- CLI ----------
 fn help() {
     println!(
-        "Komendy:\n  help\n  create-wallet\n  import-priv <hex>\n  import-dat <plik>\n  export-dat <plik>\n  default-wallet\n  send <to> <amount> [n=2]\n  send-priv <priv> <to> <amount> [n=2]\n  balance [address]\n  faucet <address>\n  list-peers\n  print-mempool\n  exit"
+        "Komendy:\n  help\n  create-wallet\n  import-priv <hex>\n  import-dat <plik>\n  export-dat <plik>\n  default-wallet\n  send <to?> <amount> [n=2]   (to domyślnie = twój adres)\n  send-priv <priv> <to> <amount> [n=2]\n  balance [address]          (domyślnie twój adres)\n  faucet [address]           (domyślnie twój adres)\n  list-peers\n  print-mempool\n  exit"
     );
 }
 
@@ -257,8 +331,9 @@ fn import_priv(priv_hex: &str) {
     }
 }
 
-fn list_peers() {
-    let peers = load_peers();
+fn list_peers(store: &mut PeerStore) {
+    store.discover();
+    let peers = store.as_slice();
     println!("Dostępne peery ({}):", peers.len());
     for p in peers {
         println!("- {}", p);
@@ -277,13 +352,14 @@ fn show_mempool() {
     }
 }
 
-fn try_broadcast_pending(min_peers: usize) {
+fn try_broadcast_pending(store: &mut PeerStore, min_peers: usize) {
     if let Ok(txt) = fs::read_to_string(MEMPOOL_FILE) {
         let lines: Vec<_> = txt.lines().collect();
         if lines.is_empty() {
             return;
         }
-        let peers = load_peers();
+        store.discover();
+        let peers = store.as_slice();
         if peers.is_empty() {
             return;
         }
@@ -293,7 +369,7 @@ fn try_broadcast_pending(min_peers: usize) {
             if let Ok(tx) = serde_json::from_str::<serde_json::Value>(line) {
                 let payload = serde_json::to_vec(&tx).unwrap();
                 let mut ok = 0;
-                for p in &peers {
+                for p in peers {
                     if connect_and_send(p, &payload).is_ok() {
                         ok += 1;
                         if ok >= min_peers {
@@ -317,7 +393,9 @@ fn try_broadcast_pending(min_peers: usize) {
 }
 
 fn main() {
-    println!("Wallet CLI (peers.json + bootstrap)");
+    println!("Wallet CLI (bootstrap discovery, cached peers)");
+    let mut peers = PeerStore::load();
+    peers.discover();
     loop {
         print!("> ");
         let _ = io::stdout().flush();
@@ -348,41 +426,66 @@ fn main() {
                     println!("Brak domyślnego portfela");
                 }
             }
-            "send" if a.len() >= 3 => {
-                if let Ok(amount) = a[2].parse() {
-                    let n = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(2);
-                    send_default(a[1], amount, n);
-                } else {
-                    println!("Nieprawidłowa kwota");
+            "send" => {
+                // send <to> <amount> [n], or if <to> missing, use default address
+                match (a.get(1), a.get(2)) {
+                    (Some(to), Some(amt)) => {
+                        if let Ok(amount) = amt.parse() {
+                            let n = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(2);
+                            send_default(&mut peers, to, amount, n);
+                        } else {
+                            println!("Nieprawidłowa kwota");
+                        }
+                    }
+                    (None, Some(amt)) => {
+                        if let Some(def_to) = default_address() {
+                            if let Ok(amount) = amt.parse() {
+                                let n = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(2);
+                                send_default(&mut peers, &def_to, amount, n);
+                            } else {
+                                println!("Nieprawidłowa kwota");
+                            }
+                        } else {
+                            println!("Brak domyślnego portfela i adresu docelowego");
+                        }
+                    }
+                    _ => println!("Użycie: send <to?> <amount> [n_peers]"),
                 }
             }
             "send-priv" if a.len() >= 4 => {
                 if let Ok(amount) = a[3].parse() {
                     let n = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(2);
-                    send_priv(a[1], a[2], amount, n);
+                    send_priv(&mut peers, a[1], a[2], amount, n);
                 } else {
                     println!("Nieprawidłowa kwota");
                 }
             }
             "balance" => {
                 if a.len() == 2 {
-                    balance(a[1]);
-                } else if let Some(sk) = load_default_wallet() {
-                    let pk = PublicKey::from_secret_key(&Secp256k1::new(), &sk);
-                    let lfs_addr = format!(
-                        "LFS{}",
-                        bs58::encode(&Sha256::digest(&pk.serialize())[..20]).into_string()
-                    );
-                    balance(&lfs_addr);
+                    balance(&mut peers, a[1]);
+                } else if let Some(addr) = default_address() {
+                    balance(&mut peers, &addr);
                 } else {
                     println!("Brak domyślnego portfela");
                 }
             }
-            "faucet" if a.len() == 2 => faucet(a[1]),
-            "list-peers" => list_peers(),
+            "faucet" => {
+                if a.len() == 2 {
+                    faucet(&mut peers, a[1]);
+                } else if let Some(addr) = default_address() {
+                    faucet(&mut peers, &addr);
+                } else {
+                    println!("Brak domyślnego portfela i adresu");
+                }
+            }
+            "list-peers" => list_peers(&mut peers),
             "print-mempool" => show_mempool(),
-            "exit" => break,
+            "exit" => {
+                peers.save();
+                break;
+            }
             _ => println!("Nieznana komenda – wpisz 'help'"),
         }
     }
+    peers.save();
 }

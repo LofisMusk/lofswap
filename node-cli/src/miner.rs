@@ -1,15 +1,15 @@
 use std::sync::Arc;
 
-use blockchain_core::{Block, Transaction};
-use serde_json;
+use blockchain_core::Block;
 use tokio::{
     sync::Mutex,
-    time::{sleep, Duration},
+    time::{Duration, sleep},
 };
 
 use crate::{
     chain::{is_tx_valid, load_valid_transactions, save_chain},
     p2p::{broadcast_to_known_nodes, get_my_address},
+    storage::remove_data_file,
     wallet::read_mempool,
 };
 
@@ -29,7 +29,7 @@ pub async fn mine_block(blockchain: &Arc<Mutex<Vec<Block>>>) {
         pending_len
     );
 
-    let _ = std::fs::remove_file("mempool.json");
+    let _ = remove_data_file("mempool.json");
     let prev_hash = chain.last().unwrap().hash.clone();
     let miner = get_my_address()
         .await
@@ -46,6 +46,7 @@ pub async fn mine_block(blockchain: &Arc<Mutex<Vec<Block>>>) {
 
     drop(chain);
     broadcast_to_known_nodes(&block).await;
+    // brief pause to avoid immediate tight loop after broadcasting
     sleep(Duration::from_secs(1)).await;
 }
 
@@ -53,17 +54,14 @@ pub async fn miner_loop(blockchain: Arc<Mutex<Vec<Block>>>) {
     loop {
         {
             let chain = blockchain.lock().await;
-            let parsed: Vec<Transaction> = std::fs::read_to_string("mempool.json")
-                .unwrap_or_default()
-                .lines()
-                .filter_map(|l| serde_json::from_str(l).ok())
-                .collect();
+            let parsed = read_mempool();
             let has_any_valid = parsed.iter().any(|tx| is_tx_valid(tx, &chain).is_ok());
             drop(chain);
             if has_any_valid {
                 mine_block(&blockchain).await;
             }
         }
-        sleep(Duration::from_secs(5)).await;
+        // target ~1 block every 10s when transactions are present
+        sleep(Duration::from_secs(10)).await;
     }
 }

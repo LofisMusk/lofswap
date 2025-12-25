@@ -1,6 +1,6 @@
-use sha2::{Digest, Sha256};
-use serde::{Serialize, Deserialize};
 use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 // spec_v0.9 constants
 pub const SPEC_VERSION: &str = "0.9";
@@ -48,7 +48,12 @@ pub struct Block {
 }
 
 impl Block {
-    pub fn new(index: u64, mut transactions: Vec<Transaction>, previous_hash: String, miner: String) -> Self {
+    pub fn new(
+        index: u64,
+        mut transactions: Vec<Transaction>,
+        previous_hash: String,
+        miner: String,
+    ) -> Self {
         let timestamp = Utc::now().timestamp();
         // Ensure txids are populated for v0.9
         for tx in transactions.iter_mut() {

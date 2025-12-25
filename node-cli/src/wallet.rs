@@ -3,7 +3,6 @@ use std::{
     fs::{self, OpenOptions},
     io::Write,
     net::TcpStream as StdTcpStream,
-    path::Path,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -12,13 +11,20 @@ use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
 use serde_json::{self, Value};
 use sha2::{Digest, Sha256};
 
+use crate::{
+    chain,
+    storage::{data_path, ensure_parent_dir, read_data_file},
+};
+
 pub fn secret_key_from_bytes(bytes: Vec<u8>) -> Option<SecretKey> {
     let arr: [u8; 32] = bytes.try_into().ok()?;
     SecretKey::from_byte_array(arr).ok()
 }
 
 pub fn read_mempool() -> Vec<Transaction> {
-    fs::read_to_string("mempool.json")
+    read_data_file("mempool.json")
+        .ok()
+        .flatten()
         .unwrap_or_default()
         .lines()
         .filter_map(|l| serde_json::from_str(l).ok())
@@ -34,7 +40,8 @@ pub fn wallet_save_default(sk: &SecretKey) {
 }
 
 pub fn wallet_load_default() -> Option<SecretKey> {
-    fs::read_to_string(".default_wallet").ok()
+    fs::read_to_string(".default_wallet")
+        .ok()
         .and_then(|h| hex::decode(h.trim()).ok())
         .and_then(secret_key_from_bytes)
 }
@@ -74,7 +81,8 @@ pub fn export_wallet_dat_bytes() -> Option<Vec<u8>> {
 }
 
 pub fn wallet_pending_count() -> usize {
-    fs::read_to_string("wallet_mempool.json")
+    fs::read_to_string(data_path("wallet_mempool.json"))
+        .or_else(|_| fs::read_to_string("wallet_mempool.json"))
         .ok()
         .map(|s| s.lines().count())
         .unwrap_or(0)
@@ -105,12 +113,7 @@ pub fn build_tx(sk: &SecretKey, to: &str, amount: u64) -> Transaction {
 }
 
 pub fn broadcast_tx_payload(json: &[u8], min_peers: usize) -> (usize, usize) {
-    let peers: Vec<String> = if Path::new("peers.json").exists() {
-        serde_json::from_str(&fs::read_to_string("peers.json").unwrap_or("[]".into()))
-            .unwrap_or_default()
-    } else {
-        vec![]
-    };
+    let peers: Vec<String> = chain::load_peers().unwrap_or_default();
     let mut ok = 0usize;
     for p in &peers {
         if let Ok(addr) = p.parse::<std::net::SocketAddr>() {
@@ -122,30 +125,35 @@ pub fn broadcast_tx_payload(json: &[u8], min_peers: usize) -> (usize, usize) {
         }
     }
     if ok < min_peers {
-        let _ = OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open("wallet_mempool.json")
+        let path = data_path("wallet_mempool.json");
+        let _ = ensure_parent_dir(&path)
+            .and_then(|_| {
+                OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open(&path)
+            })
+            .or_else(|_| {
+                // legacy fallback to cwd
+                OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open("wallet_mempool.json")
+            })
             .and_then(|mut f| f.write_all(json).and_then(|_| f.write_all(b"\n")));
     }
     (ok, peers.len())
 }
 
 pub fn try_broadcast_pending(min_peers: usize) -> usize {
-    let txt = match fs::read_to_string("wallet_mempool.json") {
-        Ok(s) => s,
-        Err(_) => return 0,
-    };
+    let txt = fs::read_to_string(data_path("wallet_mempool.json"))
+        .or_else(|_| fs::read_to_string("wallet_mempool.json"))
+        .unwrap_or_default();
     let lines: Vec<_> = txt.lines().collect();
     if lines.is_empty() {
         return 0;
     }
-    let peers: Vec<String> = if Path::new("peers.json").exists() {
-        serde_json::from_str(&fs::read_to_string("peers.json").unwrap_or("[]".into()))
-            .unwrap_or_default()
-    } else {
-        vec![]
-    };
+    let peers: Vec<String> = chain::load_peers().unwrap_or_default();
     if peers.is_empty() {
         return 0;
     }
@@ -157,7 +165,9 @@ pub fn try_broadcast_pending(min_peers: usize) -> usize {
             let mut ok = 0usize;
             for p in &peers {
                 if let Ok(addr) = p.parse::<std::net::SocketAddr>() {
-                    if let Ok(mut s) = StdTcpStream::connect_timeout(&addr, Duration::from_millis(800)) {
+                    if let Ok(mut s) =
+                        StdTcpStream::connect_timeout(&addr, Duration::from_millis(800))
+                    {
                         if s.write_all(&payload).is_ok() {
                             ok += 1;
                             if ok >= min_peers {
@@ -174,6 +184,9 @@ pub fn try_broadcast_pending(min_peers: usize) -> usize {
             }
         }
     }
-    let _ = fs::write("wallet_mempool.json", failed.join("\n"));
+    let path = data_path("wallet_mempool.json");
+    let _ = ensure_parent_dir(&path)
+        .and_then(|_| fs::write(&path, failed.join("\n")))
+        .or_else(|_| fs::write("wallet_mempool.json", failed.join("\n")));
     sent
 }

@@ -1,29 +1,48 @@
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::sync::Arc;
+use std::time::Duration;
 
 use blockchain_core::{Block, Transaction};
 use serde_json;
 use tokio::sync::Mutex;
 
 use crate::{
+    OBSERVED_IP,
     chain::save_peers,
     miner::mine_block,
     p2p::{determine_public_ip_from_peers, get_my_address, ping_peer, sync_chain},
-    OBSERVED_IP,
+    storage::{read_data_file, remove_data_file},
 };
 
 pub async fn run_cli(blockchain: Arc<Mutex<Vec<Block>>>, peers: Arc<Mutex<Vec<String>>>) {
-    println!("Commands: mine | sync | print-chain | list-peers | add-peer | remove-peer | remove-offline-peers | clear-chain | print-mempool | get-publicip | print-my-addr | debug-peers | exit");
+    let interactive = io::stdin().is_terminal();
+    println!(
+        "Commands: mine | sync | print-chain | list-peers | add-peer | remove-peer | remove-offline-peers | clear-chain | print-mempool | get-publicip | print-my-addr | debug-peers | exit"
+    );
 
     loop {
-        print!("> ");
-        let _ = io::stdout().flush();
+        if interactive {
+            print!("> ");
+            let _ = io::stdout().flush();
+        }
         let mut line = String::new();
-        if io::stdin().read_line(&mut line).is_err() {
+        match io::stdin().read_line(&mut line) {
+            Ok(0) => {
+                // Stdin closed (common if container started without -i). Wait and retry so
+                // attaching later still allows commands, but don't spam prompts in non-interactive mode.
+                std::thread::sleep(Duration::from_millis(500));
+                continue;
+            }
+            Ok(_) => {}
+            Err(_) => continue,
+        }
+
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
             continue;
         }
 
-        match line.trim() {
+        match trimmed {
             "print-my-addr" => {
                 if let Some(addr) = get_my_address().await {
                     println!("My address: {}", addr);
@@ -33,7 +52,7 @@ pub async fn run_cli(blockchain: Arc<Mutex<Vec<Block>>>, peers: Arc<Mutex<Vec<St
             }
             "debug-peers" => debug_peers(&peers).await,
             "mine" => mine_block(&blockchain).await,
-            "sync" => sync_chain(&blockchain, &peers, false).await,
+            "sync" => sync_chain(&blockchain, &peers, false, true).await,
             "print-chain" => print_chain(&blockchain).await,
             "list-peers" => list_peers(&peers).await,
             "remove-offline-peers" => remove_offline_peers(&peers).await,
@@ -130,20 +149,15 @@ async fn remove_offline_peers(peers: &Arc<Mutex<Vec<String>>>) {
 }
 
 fn clear_chain() {
-    match std::fs::remove_file("blockchain.json") {
+    match remove_data_file("blockchain.json") {
         Ok(_) => println!("✓ Chain cleared"),
         Err(e) => eprintln!("Failed to clear chain: {}", e),
     }
 }
 
 fn print_mempool() {
-    match std::fs::read_to_string("mempool.json") {
-        Ok(mempool) => {
-            if mempool.trim().is_empty() {
-                println!("Mempool is empty");
-                return;
-            }
-
+    match read_data_file("mempool.json").ok().flatten() {
+        Some(mempool) if !mempool.trim().is_empty() => {
             println!("Mempool transactions:");
             for (i, line) in mempool.lines().enumerate() {
                 if let Ok(tx) = serde_json::from_str::<Transaction>(line) {
@@ -151,7 +165,7 @@ fn print_mempool() {
                 }
             }
         }
-        Err(_) => println!("Mempool is empty"),
+        _ => println!("Mempool is empty"),
     }
 }
 
@@ -159,17 +173,26 @@ async fn debug_peers(peers: &Arc<Mutex<Vec<String>>>) {
     println!("=== PEER DEBUG INFO ===");
 
     let memory_peers = peers.lock().await;
-    println!("In-memory peers ({}): {:?}", memory_peers.len(), *memory_peers);
+    println!(
+        "In-memory peers ({}): {:?}",
+        memory_peers.len(),
+        *memory_peers
+    );
     drop(memory_peers);
 
-    match std::fs::read_to_string("peers.json") {
-        Ok(content) => {
+    match read_data_file("peers.json") {
+        Ok(Some(content)) => {
             println!("Peers file content: {}", content);
             match serde_json::from_str::<Vec<String>>(&content) {
-                Ok(file_peers) => println!("Parsed peers from file ({}): {:?}", file_peers.len(), file_peers),
+                Ok(file_peers) => println!(
+                    "Parsed peers from file ({}): {:?}",
+                    file_peers.len(),
+                    file_peers
+                ),
                 Err(e) => println!("Failed to parse peers file: {}", e),
             }
         }
+        Ok(None) => println!("Peers file not found"),
         Err(e) => println!("Failed to read peers file: {}", e),
     }
 
