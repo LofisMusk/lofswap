@@ -275,7 +275,7 @@ async fn handle_transaction(
 ) -> Result<(), NodeError> {
     let chain = blockchain.lock().await;
     if is_tx_valid(&tx, &chain).is_ok() {
-        println!("✓ TX added to mempool");
+        println!("TX added to mempool");
         let path = data_path("mempool.json");
         let file = ensure_parent_dir(&path)
             .and_then(|_| {
@@ -297,7 +297,7 @@ async fn handle_transaction(
             let _ = writeln!(f, "{}", tx_json);
         }
     } else {
-        println!("✗ TX rejected (signature/balance)");
+        println!("TX rejected (signature/balance)");
     }
     Ok(())
 }
@@ -405,7 +405,7 @@ pub async fn bootstrap_and_discover_ip(peers: &Arc<Mutex<Vec<String>>>) {
             }
         }
         if let Err(e) = save_peers(&p) {
-            println!("[STARTUP] ✗ Failed to save bootstrap nodes to peers: {}", e);
+            println!("[STARTUP] Failed to save bootstrap nodes to peers: {}", e);
         }
     }
 
@@ -414,13 +414,13 @@ pub async fn bootstrap_and_discover_ip(peers: &Arc<Mutex<Vec<String>>>) {
         match timeout(Duration::from_secs(5), TcpStream::connect(bootstrap_node)).await {
             Ok(Ok(mut stream)) => {
                 println!(
-                    "[STARTUP] ✓ Connected to bootstrap node: {}",
+                    "[STARTUP] Connected to bootstrap node: {}",
                     bootstrap_node
                 );
 
                 if let Err(e) = stream.write_all(b"/peers").await {
                     println!(
-                        "[STARTUP] ✗ Failed to request peers from {}: {}",
+                        "[STARTUP] Failed to request peers from {}: {}",
                         bootstrap_node, e
                     );
                     continue;
@@ -439,7 +439,7 @@ pub async fn bootstrap_and_discover_ip(peers: &Arc<Mutex<Vec<String>>>) {
                         match serde_json::from_slice::<Vec<String>>(&buf[..n]) {
                             Ok(peer_list) => {
                                 println!(
-                                    "[STARTUP] ✓ Successfully parsed {} peers from {}",
+                                    "[STARTUP] Successfully parsed {} peers from {}",
                                     peer_list.len(),
                                     bootstrap_node
                                 );
@@ -452,7 +452,7 @@ pub async fn bootstrap_and_discover_ip(peers: &Arc<Mutex<Vec<String>>>) {
                             }
                             Err(e) => {
                                 println!(
-                                    "[STARTUP] ✗ Failed to parse peers from {}: {}",
+                                    "[STARTUP] Failed to parse peers from {}: {}",
                                     bootstrap_node, e
                                 );
                             }
@@ -460,7 +460,7 @@ pub async fn bootstrap_and_discover_ip(peers: &Arc<Mutex<Vec<String>>>) {
                     }
                     Err(e) => {
                         println!(
-                            "[STARTUP] ✗ Failed to read response from {}: {}",
+                            "[STARTUP] Failed to read response from {}: {}",
                             bootstrap_node, e
                         );
                     }
@@ -469,13 +469,13 @@ pub async fn bootstrap_and_discover_ip(peers: &Arc<Mutex<Vec<String>>>) {
             }
             Ok(Err(e)) => {
                 println!(
-                    "[STARTUP] ✗ Failed to connect to bootstrap node {}: {}",
+                    "[STARTUP] Failed to connect to bootstrap node {}: {}",
                     bootstrap_node, e
                 );
             }
             Err(_) => {
                 println!(
-                    "[STARTUP] ✗ Timeout connecting to bootstrap node: {}",
+                    "[STARTUP] Timeout connecting to bootstrap node: {}",
                     bootstrap_node
                 );
             }
@@ -490,9 +490,9 @@ pub async fn bootstrap_and_discover_ip(peers: &Arc<Mutex<Vec<String>>>) {
             }
         }
         if let Err(e) = save_peers(&p) {
-            println!("[STARTUP] ✗ Failed to save bootstrap peers: {}", e);
+            println!("[STARTUP] Failed to save bootstrap peers: {}", e);
         } else {
-            println!("[STARTUP] ✓ Saved {} peers to peers.json", p.len());
+            println!("[STARTUP] Saved {} peers to peers.json", p.len());
         }
     }
 
@@ -506,12 +506,12 @@ pub async fn bootstrap_and_discover_ip(peers: &Arc<Mutex<Vec<String>>>) {
         );
         determine_ip_from_specific_peer(&peer).await
     } else {
-        println!("[STARTUP] ✗ No peer selected for IP determination");
+        println!("[STARTUP] No peer selected for IP determination");
         None
     };
 
     if let Some(ip) = my_public_ip {
-        println!("[STARTUP] ✓ Public IP determined: {}", ip);
+        println!("[STARTUP] Public IP determined: {}", ip);
         *OBSERVED_IP.write().await = Some(ip.clone());
 
         println!(
@@ -524,10 +524,10 @@ pub async fn bootstrap_and_discover_ip(peers: &Arc<Mutex<Vec<String>>>) {
             p.push(my_address.clone());
 
             if let Err(e) = save_peers(&p) {
-                println!("[STARTUP] ✗ Failed to save updated peers: {}", e);
+                println!("[STARTUP] Failed to save updated peers: {}", e);
             } else {
-                println!("[STARTUP] ✓ Added our address to peers: {}", my_address);
-                println!("[STARTUP] ✓ Cleaned up duplicate addresses");
+                println!("[STARTUP] Added our address to peers: {}", my_address);
+                println!("[STARTUP] Cleaned up duplicate addresses");
             }
         }
 
@@ -535,11 +535,11 @@ pub async fn bootstrap_and_discover_ip(peers: &Arc<Mutex<Vec<String>>>) {
         broadcast_peers_to_network(peers, &my_address).await;
     } else {
         println!(
-            "[STARTUP] ⚠️ Could not determine public IP. Node will wait for incoming connections."
+            "[STARTUP] Could not determine public IP. Node will wait for incoming connections."
         );
     }
 
-    println!("[STARTUP] ✓ Bootstrap and IP discovery sequence completed");
+    println!("[STARTUP] Bootstrap and IP discovery sequence completed");
 }
 
 async fn determine_ip_from_specific_peer(peer: &str) -> Option<String> {
@@ -559,11 +559,11 @@ async fn determine_ip_from_specific_peer(peer: &str) -> Option<String> {
     let observed_ip_from_peer =
         match timeout(Duration::from_secs(3), TcpStream::connect(peer)).await {
             Ok(Ok(mut stream)) => {
-                println!("[STARTUP] ✓ Connected to peer {} for /resolve-ip", peer);
+                println!("[STARTUP] Connected to peer {} for /resolve-ip", peer);
 
                 let msg = format!("/resolve-ip/{}", temp_id);
                 if let Err(e) = stream.write_all(msg.as_bytes()).await {
-                    println!("[STARTUP] ✗ Failed to send /resolve-ip to {}: {}", peer, e);
+                    println!("[STARTUP] Failed to send /resolve-ip to {}: {}", peer, e);
                     let _ = stream.shutdown().await;
                     return None;
                 }
@@ -584,7 +584,7 @@ async fn determine_ip_from_specific_peer(peer: &str) -> Option<String> {
                     }
                     Err(e) => {
                         println!(
-                            "[STARTUP] ✗ Failed to read /resolve-ip response from {}: {}",
+                            "[STARTUP] Failed to read /resolve-ip response from {}: {}",
                             peer, e
                         );
                         None
@@ -595,14 +595,14 @@ async fn determine_ip_from_specific_peer(peer: &str) -> Option<String> {
             }
             Ok(Err(e)) => {
                 println!(
-                    "[STARTUP] ✗ Failed to connect to peer {} for /resolve-ip: {}",
+                    "[STARTUP] Failed to connect to peer {} for /resolve-ip: {}",
                     peer, e
                 );
                 None
             }
             Err(_) => {
                 println!(
-                    "[STARTUP] ✗ Timeout connecting to peer {} for /resolve-ip",
+                    "[STARTUP] Timeout connecting to peer {} for /resolve-ip",
                     peer
                 );
                 None
@@ -613,7 +613,7 @@ async fn determine_ip_from_specific_peer(peer: &str) -> Option<String> {
         Some(ip) => ip,
         None => {
             println!(
-                "[STARTUP] ✗ Peer {} could not provide a usable IP for id {}",
+                "[STARTUP] Peer {} could not provide a usable IP for id {}",
                 peer, temp_id
             );
             return None;
@@ -626,7 +626,7 @@ async fn determine_ip_from_specific_peer(peer: &str) -> Option<String> {
         Some(ip) => ip.to_string(),
         None => {
             println!(
-                "[STARTUP] ✗ public-ip library could not determine an IP for id {}",
+                "[STARTUP] public-ip library could not determine an IP for id {}",
                 temp_id
             );
             return None;
@@ -642,7 +642,7 @@ async fn determine_ip_from_specific_peer(peer: &str) -> Option<String> {
     // Primary case: both sources agree exactly.
     if observed_ip_from_peer == lib_ip {
         println!(
-            "[STARTUP] ✓ IP resolution successful for id {}: {}",
+            "[STARTUP] IP resolution successful for id {}: {}",
             temp_id, lib_ip
         );
         return Some(lib_ip);
@@ -655,7 +655,7 @@ async fn determine_ip_from_specific_peer(peer: &str) -> Option<String> {
     // cannot know our internal address beyond what the router exposes.
     if !is_public_ip(&observed_ip_from_peer) && is_public_ip(&lib_ip) {
         println!(
-            "[STARTUP] ⚠️ Peer {} reported non-public IP '{}' while public-ip reported '{}'. \
+            "[STARTUP] Peer {} reported non-public IP '{}' while public-ip reported '{}'. \
              Treating public-ip result as canonical for id {}.",
             peer, observed_ip_from_peer, lib_ip, temp_id
         );
@@ -664,7 +664,7 @@ async fn determine_ip_from_specific_peer(peer: &str) -> Option<String> {
 
     // Anything else is treated as a mismatch.
     println!(
-        "[STARTUP] ✗ IP resolution mismatch for id {} (peer: {}, public-ip: {})",
+        "[STARTUP] IP resolution mismatch for id {} (peer: {}, public-ip: {})",
         temp_id, observed_ip_from_peer, lib_ip
     );
     None
@@ -675,7 +675,7 @@ async fn broadcast_peers_to_network(peers: &Arc<Mutex<Vec<String>>>, my_address:
     let peers_json = match serde_json::to_string(&peer_list) {
         Ok(json) => json,
         Err(e) => {
-            println!("[STARTUP] ✗ Failed to serialize peers for broadcast: {}", e);
+            println!("[STARTUP] Failed to serialize peers for broadcast: {}", e);
             return;
         }
     };
@@ -694,29 +694,29 @@ async fn broadcast_peers_to_network(peers: &Arc<Mutex<Vec<String>>>, my_address:
                 let message = format!("/peers{}", peers_json);
                 match stream.write_all(message.as_bytes()).await {
                     Ok(_) => {
-                        println!("[STARTUP] ✓ Successfully broadcast peers to: {}", peer);
+                        println!("[STARTUP] Successfully broadcast peers to: {}", peer);
                         successful_broadcasts += 1;
                     }
                     Err(e) => {
-                        println!("[STARTUP] ✗ Failed to send peers to {}: {}", peer, e);
+                        println!("[STARTUP] Failed to send peers to {}: {}", peer, e);
                     }
                 }
                 let _ = stream.shutdown().await;
             }
             Ok(Err(e)) => {
                 println!(
-                    "[STARTUP] ✗ Failed to connect for broadcast to {}: {}",
+                    "[STARTUP] Failed to connect for broadcast to {}: {}",
                     peer, e
                 );
             }
             Err(_) => {
-                println!("[STARTUP] ✗ Timeout broadcasting to: {}", peer);
+                println!("[STARTUP] Timeout broadcasting to: {}", peer);
             }
         }
     }
 
     println!(
-        "[STARTUP] ✓ Broadcast completed: {}/{} successful",
+        "[STARTUP] Broadcast completed: {}/{} successful",
         successful_broadcasts,
         peer_list.len() - 1
     );
@@ -844,7 +844,7 @@ pub async fn sync_chain(
 
     let peer_list = peers.lock().await.clone();
     if peer_list.is_empty() {
-        log("✗ Sync failed - no peers");
+        log("Sync failed - no peers");
         return;
     }
 
@@ -873,7 +873,7 @@ pub async fn sync_chain(
                             eprintln!("Failed to save chain: {}", e);
                         } else {
                             if verbose {
-                                println!("✓ Sync completed with {} (force={})", peer, force);
+                                println!("Sync completed with {} (force={})", peer, force);
                             } else {
                                 println!("[SYNC] Background sync updated from {}", peer);
                             }
@@ -884,7 +884,7 @@ pub async fn sync_chain(
             }
         }
     }
-    log("✗ Sync failed - no suitable peers");
+    log("Sync failed - no suitable peers");
 }
 
 pub async fn ping_peer(peer: &str) -> bool {

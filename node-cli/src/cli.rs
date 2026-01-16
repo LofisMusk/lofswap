@@ -98,7 +98,7 @@ async fn add_peer_command(line: &str, peers: &Arc<Mutex<Vec<String>>>) {
             if let Err(e) = save_peers(&p) {
                 eprintln!("Failed to save peers: {}", e);
             } else {
-                println!("✓ Peer added: {}", new_peer);
+                println!("Peer added: {}", new_peer);
             }
         } else {
             println!("Peer already exists.");
@@ -119,7 +119,7 @@ async fn remove_peer_command(line: &str, peers: &Arc<Mutex<Vec<String>>>) {
             if let Err(e) = save_peers(&p) {
                 eprintln!("Failed to save peers: {}", e);
             } else {
-                println!("✓ Peer removed: {}", target_peer);
+                println!("Peer removed: {}", target_peer);
             }
         } else {
             println!("Peer not found.");
@@ -144,13 +144,13 @@ async fn remove_offline_peers(peers: &Arc<Mutex<Vec<String>>>) {
     if let Err(e) = save_peers(&p) {
         eprintln!("Failed to save peers: {}", e);
     } else {
-        println!("✓ Removed {} offline peers", removed);
+        println!("Removed {} offline peers", removed);
     }
 }
 
 fn clear_chain() {
     match remove_data_file("blockchain.json") {
-        Ok(_) => println!("✓ Chain cleared"),
+        Ok(_) => println!("Chain cleared"),
         Err(e) => eprintln!("Failed to clear chain: {}", e),
     }
 }

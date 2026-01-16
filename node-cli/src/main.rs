@@ -24,7 +24,7 @@ pub static ACTIVE_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
 
 pub const LISTEN_PORT: u16 = 6000;
 pub const EXPLORER_PORT_DEFAULT: u16 = 7000;
-pub const BOOTSTRAP_NODES: &[&str] = &["89.168.107.239:6000", "92.5.16.170:6000"];
+pub const BOOTSTRAP_NODES: &[&str] = &["89.168.107.239:6000", "79.76.116.108:6000"];
 pub const MAX_CONNECTIONS: usize = 50;
 pub const BUFFER_SIZE: usize = 8192;
 
@@ -73,10 +73,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 LISTEN_PORT
             );
             match upnp::setup_upnp(LISTEN_PORT).await {
-                Ok(_) => println!("[STARTUP] ✓ UPnP port mapping successful"),
+                Ok(_) => println!("[STARTUP] UPnP port mapping successful"),
                 Err(e) => {
                     eprintln!(
-                        "[STARTUP] ⚠️ UPnP port mapping failed: {}. Continuing without it.",
+                        "[STARTUP] UPnP port mapping failed: {}. Continuing without it.",
                         e
                     );
                 }
@@ -114,7 +114,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("[STARTUP] Skipping peer exchange and IP discovery (--no-peer-exchange flag set)");
         }
 
-        println!("[STARTUP] ✓ Node initialization complete!");
+        println!("[STARTUP] Node initialization complete!");
         println!("[STARTUP] Launching command line interface...");
     cli::run_cli(blockchain, peers).await;
 

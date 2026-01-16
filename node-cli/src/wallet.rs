@@ -91,14 +91,14 @@ pub fn wallet_pending_count() -> usize {
 pub fn build_tx(sk: &SecretKey, to: &str, amount: u64) -> Transaction {
     let secp = Secp256k1::new();
     let pk = PublicKey::from_secret_key(&secp, sk);
-    let preimage = format!("{}{}{}", pk, to, amount);
-    let hash = Sha256::digest(preimage.as_bytes());
-    let msg = Message::from_digest(hash.into());
-    let sig = secp.sign_ecdsa(msg, sk);
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs() as i64;
+        .as_millis() as i64;
+    let preimage = format!("{}|{}|{}|{}|{}", 1, pk, to, amount, ts);
+    let hash = Sha256::digest(preimage.as_bytes());
+    let msg = Message::from_digest(hash.into());
+    let sig = secp.sign_ecdsa(msg, sk);
     let mut tx = Transaction {
         version: 1,
         timestamp: ts,

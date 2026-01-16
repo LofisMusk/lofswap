@@ -7,7 +7,7 @@ use local_ip_address::local_ip;
 pub async fn setup_upnp(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     match try_igd_upnp(port).await {
         Ok(_) => return Ok(()),
-        Err(e) => eprintln!("[DEBUG] IGD UPnP failed: {} – trying easy_upnp fallback", e),
+        Err(e) => eprintln!("[DEBUG] IGD UPnP failed: {} - trying easy_upnp fallback", e),
     }
 
     let cfg = Arc::new(EasyConfig {
@@ -30,8 +30,8 @@ pub async fn setup_upnp(port: u16) -> Result<(), Box<dyn std::error::Error>> {
             };
             for result in delete_ports(std::iter::once(cleanup_cfg)) {
                 match result {
-                    Ok(_) => println!("🔌 Easy UPnP: port {} removed", port),
-                    Err(e) => eprintln!("⚠️ Easy UPnP: error removing port: {}", e),
+                    Ok(_) => println!("Easy UPnP: port {} removed", port),
+                    Err(e) => eprintln!("Easy UPnP: error removing port: {}", e),
                 }
             }
             std::process::exit(0);
@@ -49,10 +49,10 @@ pub async fn setup_upnp(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     })) {
         match result {
             Ok(_) => {
-                println!("✓ Port {} forwarded (Easy UPnP fallback)", port);
+                println!("Port {} forwarded (Easy UPnP fallback)", port);
                 return Ok(());
             }
-            Err(e) => eprintln!("⚠️ Easy UPnP: port forwarding error: {}", e),
+            Err(e) => eprintln!("Easy UPnP: port forwarding error: {}", e),
         }
     }
 
@@ -72,6 +72,6 @@ pub async fn try_igd_upnp(port: u16) -> Result<(), Box<dyn std::error::Error>> {
         .add_port(PortMappingProtocol::TCP, port, socket, 3600, "lofswap node")
         .await?;
 
-    println!("✓ Port {} forwarded to {} (IGD)", port, socket);
+    println!("Port {} forwarded to {} (IGD)", port, socket);
     Ok(())
 }

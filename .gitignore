@@ -10,6 +10,6 @@ peers.json
 linux-build
 .idea/
 .default_wallet
-.DS_Store
 __pycache__/
 wallet-cache/
+.DS_Store

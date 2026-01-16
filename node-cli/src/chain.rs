@@ -62,9 +62,16 @@ pub fn is_tx_valid(tx: &Transaction, chain: &[Block]) -> Result<(), NodeError> {
         ));
     }
 
-    let msg_data = format!("{}{}{}", tx.from, tx.to, tx.amount);
-    let hash = Sha256::digest(msg_data.as_bytes());
-    let msg = Message::from_digest(hash.into());
+    let msg_data_new = format!(
+        "{}|{}|{}|{}|{}",
+        tx.version, tx.from, tx.to, tx.amount, tx.timestamp
+    );
+    let hash_new = Sha256::digest(msg_data_new.as_bytes());
+    let msg_new = Message::from_digest(hash_new.into());
+
+    let msg_data_legacy = format!("{}{}{}", tx.from, tx.to, tx.amount);
+    let hash_legacy = Sha256::digest(msg_data_legacy.as_bytes());
+    let msg_legacy = Message::from_digest(hash_legacy.into());
 
     let sig_bytes = hex::decode(&tx.signature)
         .map_err(|_| NodeError::ValidationError("Invalid signature format".to_string()))?;
@@ -85,7 +92,8 @@ pub fn is_tx_valid(tx: &Transaction, chain: &[Block]) -> Result<(), NodeError> {
         ));
     }
 
-    secp.verify_ecdsa(msg, &signature, &from_pubkey)
+    secp.verify_ecdsa(msg_new, &signature, &from_pubkey)
+        .or_else(|_| secp.verify_ecdsa(msg_legacy, &signature, &from_pubkey))
         .map_err(|_| NodeError::ValidationError("Signature verification failed".to_string()))?;
 
     Ok(())
