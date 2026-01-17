@@ -6,7 +6,7 @@ on:
     # paths: ['node-cli/**', 'blockchain-core/**']   # odkomentuj, jeśli chcesz uruchamiać tylko przy zmianach w tych folderach
 
 jobs:
-  build-and-deploy:
+  build:
     runs-on: ubuntu-latest
 
     steps:
@@ -23,7 +23,7 @@ jobs:
 
       - name: Build Release
         run: |
-          cargo build --release --bin node-cli
+          cargo build -r -p node-cli
           mkdir -p artifacts
           cp target/release/node-cli artifacts/
           # jeśli masz dodatkowe pliki (config.toml, .env.example itp.)
@@ -37,6 +37,17 @@ jobs:
           name: node-cli-binary
           path: node-cli.zip
           retention-days: 1
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: node-cli-binary
+          path: .
 
       - name: Setup SSH key & known_hosts
         run: |
