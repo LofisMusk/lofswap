@@ -1,0 +1,53 @@
+name: Deploy Node-CLI to Servers
+
+on:
+  push:
+    branches: [ main ]  
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest  
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable  
+
+      - name: Build Release
+        run: |
+          cargo build --release --bin node-cli 
+          mkdir artifacts
+          cp target/release/node-cli artifacts/
+          zip -r artifacts.zip artifacts/
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-cli-artifact
+          path: artifacts.zip
+
+
+
+      - name: Deploy to Server 2
+        uses: appleboy/scp-action@v0.1.4
+        with:
+          host: ${{ secrets.SSH_HOST2 }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: artifacts.zip
+          target: ${{ secrets.DEPLOY_PATH }}
+          strip_components: 1
+
+      - name: Extract and Restart on Server 2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST2 }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            cd ${{ secrets.DEPLOY_PATH }}
+            unzip -o artifacts.zip
+            rm artifacts.zip
+            chmod +x node-cli
+            sudo systemctl restart node-cli
