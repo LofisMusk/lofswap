@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-20.04
+    runs-on: self-hosted
 
     steps:
       - name: Checkout code
@@ -39,7 +39,7 @@ jobs:
           retention-days: 1
 
   deploy:
-    runs-on: ubuntu-20.04
+    runs-on: self-hosted
     needs: build
 
     steps:
