@@ -44,7 +44,7 @@ jobs:
           chmod 700 ~/.ssh
 
           # Najbezpieczniejszy sposób – printf gwarantuje trailing newline
-          printf '%s\n' "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          printf '%s\n' "${{ secrets.SSH_KEY }}" > ~/.ssh/deploy_key
 
           chmod 600 ~/.ssh/deploy_key
 

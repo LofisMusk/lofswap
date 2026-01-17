@@ -127,12 +127,7 @@ pub fn broadcast_tx_payload(json: &[u8], min_peers: usize) -> (usize, usize) {
     if ok < min_peers {
         let path = data_path("wallet_mempool.json");
         let _ = ensure_parent_dir(&path)
-            .and_then(|_| {
-                OpenOptions::new()
-                    .append(true)
-                    .create(true)
-                    .open(&path)
-            })
+            .and_then(|_| OpenOptions::new().append(true).create(true).open(&path))
             .or_else(|_| {
                 // legacy fallback to cwd
                 OpenOptions::new()

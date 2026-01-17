@@ -1,6 +1,7 @@
 use std::sync::{Arc, atomic::AtomicUsize};
 
 use once_cell::sync::Lazy;
+use rand::RngCore;
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::Duration;
 
@@ -15,11 +16,13 @@ mod ui;
 mod upnp;
 mod wallet;
 
-use storage::ensure_data_dir;
+use storage::{ensure_data_dir, read_data_file, write_data_file};
 
 pub use errors::NodeError;
 
 pub static OBSERVED_IP: Lazy<RwLock<Option<String>>> = Lazy::new(|| RwLock::new(None));
+pub static NODE_ID: Lazy<String> = Lazy::new(|| load_or_create_node_id());
+pub const NODE_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub static ACTIVE_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
 
 pub const LISTEN_PORT: u16 = 6000;
@@ -111,12 +114,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if !no_peer_exchange {
             p2p::bootstrap_and_discover_ip(&peers).await;
         } else {
-            println!("[STARTUP] Skipping peer exchange and IP discovery (--no-peer-exchange flag set)");
+            println!(
+                "[STARTUP] Skipping peer exchange and IP discovery (--no-peer-exchange flag set)"
+            );
         }
 
         println!("[STARTUP] Node initialization complete!");
         println!("[STARTUP] Launching command line interface...");
-    cli::run_cli(blockchain, peers).await;
+        cli::run_cli(blockchain, peers).await;
 
         Ok::<(), Box<dyn std::error::Error>>(())
     })?;
@@ -127,10 +132,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::remove_data_file;
     use blockchain_core::{Block, Transaction};
     use secp256k1::{PublicKey, Secp256k1, SecretKey};
     use serde_json;
-    use crate::storage::remove_data_file;
 
     fn tmp_clean_files() {
         let _ = remove_data_file("mempool.json");
@@ -210,4 +215,21 @@ mod tests {
             _ => panic!("unexpected error"),
         }
     }
+}
+
+fn load_or_create_node_id() -> String {
+    if let Ok(Some(contents)) = read_data_file("node_id.txt") {
+        let trimmed = contents.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+
+    let mut bytes = [0u8; 32];
+    rand::rng().fill_bytes(&mut bytes);
+    let generated = hex::encode(bytes);
+    if let Err(e) = write_data_file("node_id.txt", &generated) {
+        eprintln!("[STARTUP] Failed to persist node id: {}", e);
+    }
+    generated
 }

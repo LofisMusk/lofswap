@@ -4,7 +4,7 @@
 
 use blockchain_core::{Block, Transaction};
 use rand::seq::IndexedRandom;
-use secp256k1::{ecdsa::Signature, Message, PublicKey, Secp256k1, SecretKey};
+use secp256k1::{Message, PublicKey, Secp256k1, SecretKey, ecdsa::Signature};
 use serde_json;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
@@ -84,7 +84,10 @@ impl PeerStore {
 
     fn save(&self) {
         ensure_cache_dir();
-        let _ = fs::write(peer_cache_path(), serde_json::to_string_pretty(&self.peers).unwrap_or_default());
+        let _ = fs::write(
+            peer_cache_path(),
+            serde_json::to_string_pretty(&self.peers).unwrap_or_default(),
+        );
     }
 
     fn as_slice(&self) -> &[String] {
@@ -108,12 +111,15 @@ impl PeerStore {
             .collect();
 
         for peer in candidates {
-            if let Ok(mut stream) = TcpStream::connect_timeout(&peer.parse().unwrap(), Duration::from_millis(800)) {
+            if let Ok(mut stream) =
+                TcpStream::connect_timeout(&peer.parse().unwrap(), Duration::from_millis(800))
+            {
                 let _ = stream.write_all(b"/peers");
                 let mut buf = Vec::new();
                 if stream.read_to_end(&mut buf).is_ok() {
                     if let Ok(v) = serde_json::from_slice::<Vec<String>>(&buf) {
-                        let filtered: Vec<String> = v.into_iter().filter(|p| is_valid_peer(p)).collect();
+                        let filtered: Vec<String> =
+                            v.into_iter().filter(|p| is_valid_peer(p)).collect();
                         self.add_many(&filtered);
                     }
                 }
@@ -181,9 +187,7 @@ fn broadcast(store: &mut PeerStore, json: &[u8], min_peers: usize) {
         }
     }
     if ok < min_peers {
-        println!(
-            "Sent to {ok}/{min_peers} peers; transaction saved to local mempool"
-        );
+        println!("Sent to {ok}/{min_peers} peers; transaction saved to local mempool");
         append_pending(json);
     } else {
         // If sent successfully, try to broadcast any pending transactions

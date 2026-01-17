@@ -3,7 +3,8 @@ use std::{fs::OpenOptions, io::Write, sync::Arc, time::Duration};
 use blockchain_core::{Block, Transaction};
 use local_ip_address::local_ip;
 use public_ip;
-use rand::RngCore;
+use rand::seq::SliceRandom;
+use serde::{Deserialize, Serialize};
 use serde_json;
 use sha2::{Digest, Sha256};
 use tokio::{
@@ -14,11 +15,27 @@ use tokio::{
 };
 
 use crate::{
-    ACTIVE_CONNECTIONS, BOOTSTRAP_NODES, BUFFER_SIZE, LISTEN_PORT, MAX_CONNECTIONS, OBSERVED_IP,
+    ACTIVE_CONNECTIONS, BOOTSTRAP_NODES, BUFFER_SIZE, LISTEN_PORT, MAX_CONNECTIONS, NODE_ID,
+    NODE_VERSION, OBSERVED_IP,
     chain::{calculate_balance, is_tx_valid, load_peers, save_chain, save_peers},
     errors::NodeError,
     storage::{data_path, ensure_parent_dir},
 };
+
+const PEER_GOSSIP_LIMIT: usize = 16;
+const HANDSHAKE_TIMEOUT_SECS: u64 = 4;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PeerInfo {
+    pub public_ip: Option<String>,
+    pub port: u16,
+    pub node_id: String,
+    pub version: String,
+    #[serde(default)]
+    pub peers: Vec<String>,
+    #[serde(default)]
+    pub observed_ip: Option<String>,
+}
 
 pub async fn start_tcp_server(
     blockchain: Arc<Mutex<Vec<Block>>>,
@@ -158,23 +175,10 @@ async fn handle_request(
             .write_all(hex::encode(hash).as_bytes())
             .await
             .map_err(|e| NodeError::NetworkError(e.to_string()))?;
+    } else if request.trim() == "/whoami" || request.trim() == "/peer-info" {
+        respond_with_peer_info(stream, &peers).await?;
     } else if let Some(id) = request.strip_prefix("/resolve-ip/") {
         handle_resolve_ip_request(id.trim(), stream).await?;
-    } else if request.trim() == "/whoami" {
-        if let Some(ip) = OBSERVED_IP.read().await.as_ref() {
-            let response = format!("{}:{}", ip, LISTEN_PORT);
-            println!("[DEBUG] Responding to /whoami with: {}", response);
-            stream
-                .write_all(response.as_bytes())
-                .await
-                .map_err(|e| NodeError::NetworkError(e.to_string()))?;
-        } else {
-            println!("[DEBUG] /whoami requested but no IP set yet");
-            stream
-                .write_all(b"unknown")
-                .await
-                .map_err(|e| NodeError::NetworkError(e.to_string()))?;
-        }
     } else if let Some(new_peer) = request.strip_prefix("/iam/") {
         handle_iam_request(new_peer.trim(), peers).await?;
     } else if let Some(rest) = request.strip_prefix("/peers") {
@@ -191,6 +195,40 @@ async fn handle_request(
         .await
         .map_err(|e| NodeError::NetworkError(e.to_string()))?;
     Ok(())
+}
+
+async fn respond_with_peer_info(
+    stream: &mut TcpStream,
+    peers: &Arc<Mutex<Vec<String>>>,
+) -> Result<(), NodeError> {
+    let observed_ip = stream.peer_addr().ok().map(|addr| addr.ip().to_string());
+    let public_ip = OBSERVED_IP.read().await.clone();
+    let mut peer_snapshot = peers.lock().await.clone();
+    if let Some(ref ip) = public_ip {
+        let self_addr = format!("{}:{}", ip, LISTEN_PORT);
+        peer_snapshot.retain(|peer| peer != &self_addr);
+    }
+    {
+        let mut rng = rand::rng();
+        peer_snapshot.shuffle(&mut rng);
+    }
+    peer_snapshot.truncate(PEER_GOSSIP_LIMIT);
+
+    let info = PeerInfo {
+        public_ip,
+        port: LISTEN_PORT,
+        node_id: NODE_ID.clone(),
+        version: NODE_VERSION.to_string(),
+        peers: peer_snapshot,
+        observed_ip,
+    };
+
+    let payload =
+        serde_json::to_vec(&info).map_err(|e| NodeError::SerializationError(e.to_string()))?;
+    stream
+        .write_all(&payload)
+        .await
+        .map_err(|e| NodeError::NetworkError(e.to_string()))
 }
 
 async fn handle_resolve_ip_request(id: &str, stream: &mut TcpStream) -> Result<(), NodeError> {
@@ -278,12 +316,7 @@ async fn handle_transaction(
         println!("TX added to mempool");
         let path = data_path("mempool.json");
         let file = ensure_parent_dir(&path)
-            .and_then(|_| {
-                OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&path)
-            })
+            .and_then(|_| OpenOptions::new().create(true).append(true).open(&path))
             .or_else(|_| {
                 OpenOptions::new()
                     .create(true)
@@ -344,6 +377,7 @@ pub async fn maintenance_loop(blockchain: Arc<Mutex<Vec<Block>>>, peers: Arc<Mut
             if Some(peer.as_str()) == my_addr.as_deref() {
                 continue;
             }
+            let _ = handshake_with_peer(peer, &peers).await;
             if let Ok(mut stream) = TcpStream::connect(peer).await {
                 let _ = stream.write_all(b"/peers").await;
                 let mut buf = vec![0u8; 8192];
@@ -413,10 +447,7 @@ pub async fn bootstrap_and_discover_ip(peers: &Arc<Mutex<Vec<String>>>) {
         println!("[STARTUP] Trying bootstrap node: {}", bootstrap_node);
         match timeout(Duration::from_secs(5), TcpStream::connect(bootstrap_node)).await {
             Ok(Ok(mut stream)) => {
-                println!(
-                    "[STARTUP] Connected to bootstrap node: {}",
-                    bootstrap_node
-                );
+                println!("[STARTUP] Connected to bootstrap node: {}", bootstrap_node);
 
                 if let Err(e) = stream.write_all(b"/peers").await {
                     println!(
@@ -496,26 +527,26 @@ pub async fn bootstrap_and_discover_ip(peers: &Arc<Mutex<Vec<String>>>) {
         }
     }
 
-    println!("[STARTUP] Step 3: Selecting random peer to determine public IP...");
-    let selected_peer = bootstrap_peers.get(0).cloned();
+    println!("[STARTUP] Step 3: Handshaking with bootstrap peers to determine our public IP...");
+    {
+        let mut has_ip = OBSERVED_IP.read().await.is_some();
+        if !has_ip {
+            for peer in &bootstrap_peers {
+                let _ = handshake_with_peer(peer, peers).await;
+                has_ip = OBSERVED_IP.read().await.is_some();
+                if has_ip {
+                    break;
+                }
+            }
+        }
+    }
 
-    let my_public_ip = if let Some(peer) = selected_peer {
+    let observed_ip = OBSERVED_IP.read().await.clone();
+
+    if let Some(ip) = observed_ip {
+        println!("[STARTUP] Public IP determined via peers: {}", ip);
         println!(
-            "[STARTUP] Step 4: Determining public IP from peer: {}",
-            peer
-        );
-        determine_ip_from_specific_peer(&peer).await
-    } else {
-        println!("[STARTUP] No peer selected for IP determination");
-        None
-    };
-
-    if let Some(ip) = my_public_ip {
-        println!("[STARTUP] Public IP determined: {}", ip);
-        *OBSERVED_IP.write().await = Some(ip.clone());
-
-        println!(
-            "[STARTUP] Step 5: Adding our address to peers.json and cleaning up duplicates..."
+            "[STARTUP] Step 4: Adding our address to peers.json and cleaning up duplicates..."
         );
         let my_address = format!("{}:{}", ip, LISTEN_PORT);
         {
@@ -531,143 +562,15 @@ pub async fn bootstrap_and_discover_ip(peers: &Arc<Mutex<Vec<String>>>) {
             }
         }
 
-        println!("[STARTUP] Step 6: Broadcasting updated peers.json to network...");
+        println!("[STARTUP] Step 5: Broadcasting updated peers.json to network...");
         broadcast_peers_to_network(peers, &my_address).await;
     } else {
         println!(
-            "[STARTUP] Could not determine public IP. Node will wait for incoming connections."
+            "[STARTUP] Could not determine public IP from peers. Node will wait for incoming connections."
         );
     }
 
     println!("[STARTUP] Bootstrap and IP discovery sequence completed");
-}
-
-async fn determine_ip_from_specific_peer(peer: &str) -> Option<String> {
-    println!("[STARTUP] Contacting peer {} for IP discovery...", peer);
-
-    // Step 1: generate a temporary unique ID for this resolution attempt.
-    let mut rng = rand::rng();
-    let mut id_bytes = [0u8; 16];
-    rng.fill_bytes(&mut id_bytes);
-    let temp_id = hex::encode(id_bytes);
-    println!(
-        "[STARTUP] Using temporary ID {} for public IP resolution",
-        temp_id
-    );
-
-    // Step 2: ask the chosen peer what IP it sees for this ID.
-    let observed_ip_from_peer =
-        match timeout(Duration::from_secs(3), TcpStream::connect(peer)).await {
-            Ok(Ok(mut stream)) => {
-                println!("[STARTUP] Connected to peer {} for /resolve-ip", peer);
-
-                let msg = format!("/resolve-ip/{}", temp_id);
-                if let Err(e) = stream.write_all(msg.as_bytes()).await {
-                    println!("[STARTUP] Failed to send /resolve-ip to {}: {}", peer, e);
-                    let _ = stream.shutdown().await;
-                    return None;
-                }
-
-                let mut buf = vec![0; 64];
-                let result = match stream.read(&mut buf).await {
-                    Ok(n) => {
-                        let response = String::from_utf8_lossy(&buf[..n]).trim().to_string();
-                        println!(
-                            "[STARTUP] Raw /resolve-ip response from {}: '{}'",
-                            peer, response
-                        );
-                        if response.is_empty() || response == "unknown" {
-                            None
-                        } else {
-                            Some(response)
-                        }
-                    }
-                    Err(e) => {
-                        println!(
-                            "[STARTUP] Failed to read /resolve-ip response from {}: {}",
-                            peer, e
-                        );
-                        None
-                    }
-                };
-                let _ = stream.shutdown().await;
-                result
-            }
-            Ok(Err(e)) => {
-                println!(
-                    "[STARTUP] Failed to connect to peer {} for /resolve-ip: {}",
-                    peer, e
-                );
-                None
-            }
-            Err(_) => {
-                println!(
-                    "[STARTUP] Timeout connecting to peer {} for /resolve-ip",
-                    peer
-                );
-                None
-            }
-        };
-
-    let observed_ip_from_peer = match observed_ip_from_peer {
-        Some(ip) => ip,
-        None => {
-            println!(
-                "[STARTUP] Peer {} could not provide a usable IP for id {}",
-                peer, temp_id
-            );
-            return None;
-        }
-    };
-
-    // Step 3: ask the public-ip library for our public IP.
-    let lib_ip_opt = public_ip::addr().await;
-    let lib_ip = match lib_ip_opt {
-        Some(ip) => ip.to_string(),
-        None => {
-            println!(
-                "[STARTUP] public-ip library could not determine an IP for id {}",
-                temp_id
-            );
-            return None;
-        }
-    };
-
-    println!(
-        "[STARTUP] IP from peer {}: {} ; IP from public-ip: {}",
-        peer, observed_ip_from_peer, lib_ip
-    );
-
-    // Step 4: compare results.
-    // Primary case: both sources agree exactly.
-    if observed_ip_from_peer == lib_ip {
-        println!(
-            "[STARTUP] IP resolution successful for id {}: {}",
-            temp_id, lib_ip
-        );
-        return Some(lib_ip);
-    }
-
-    // NAT / local-network case:
-    // - Peer might see our *private* or router IP (e.g. 192.168.x.x),
-    // - public-ip library sees our true public/WAN IP.
-    // In that case we still trust the library result, since the peer
-    // cannot know our internal address beyond what the router exposes.
-    if !is_public_ip(&observed_ip_from_peer) && is_public_ip(&lib_ip) {
-        println!(
-            "[STARTUP] Peer {} reported non-public IP '{}' while public-ip reported '{}'. \
-             Treating public-ip result as canonical for id {}.",
-            peer, observed_ip_from_peer, lib_ip, temp_id
-        );
-        return Some(lib_ip);
-    }
-
-    // Anything else is treated as a mismatch.
-    println!(
-        "[STARTUP] IP resolution mismatch for id {} (peer: {}, public-ip: {})",
-        temp_id, observed_ip_from_peer, lib_ip
-    );
-    None
 }
 
 async fn broadcast_peers_to_network(peers: &Arc<Mutex<Vec<String>>>, my_address: &str) {
@@ -761,6 +664,127 @@ pub async fn broadcast_to_known_nodes(block: &Block) {
     }
 }
 
+pub async fn handshake_with_peer(peer: &str, peers: &Arc<Mutex<Vec<String>>>) -> Option<PeerInfo> {
+    let info = fetch_peer_info_once(peer).await?;
+    integrate_peer_info_from_handshake(peer, &info, peers).await;
+    Some(info)
+}
+
+async fn fetch_peer_info_once(peer: &str) -> Option<PeerInfo> {
+    println!("[DEBUG] Initiating handshake with {}", peer);
+    match timeout(
+        Duration::from_secs(HANDSHAKE_TIMEOUT_SECS),
+        TcpStream::connect(peer),
+    )
+    .await
+    {
+        Ok(Ok(mut stream)) => {
+            if let Err(e) = stream.write_all(b"/whoami").await {
+                println!("[DEBUG] Failed to send /whoami to {}: {}", peer, e);
+                let _ = stream.shutdown().await;
+                return None;
+            }
+            let mut buf = vec![0; BUFFER_SIZE];
+            let info = match stream.read(&mut buf).await {
+                Ok(0) => None,
+                Ok(n) => parse_peer_info(&buf[..n]),
+                Err(e) => {
+                    println!("[DEBUG] Failed to read handshake data from {}: {}", peer, e);
+                    None
+                }
+            };
+            let _ = stream.shutdown().await;
+            info
+        }
+        Ok(Err(e)) => {
+            println!("[DEBUG] Handshake connect error for {}: {}", peer, e);
+            None
+        }
+        Err(_) => {
+            println!("[DEBUG] Handshake timed out while connecting to {}", peer);
+            None
+        }
+    }
+}
+
+fn parse_peer_info(bytes: &[u8]) -> Option<PeerInfo> {
+    if bytes.is_empty() {
+        return None;
+    }
+    if let Ok(info) = serde_json::from_slice::<PeerInfo>(bytes) {
+        return Some(info);
+    }
+
+    let text = String::from_utf8_lossy(bytes).trim().to_string();
+    if text.is_empty() || text == "unknown" {
+        return None;
+    }
+    let mut parts = text.split(':');
+    let ip = parts.next()?.to_string();
+    let port = parts
+        .next()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(LISTEN_PORT);
+    Some(PeerInfo {
+        public_ip: Some(ip),
+        port,
+        node_id: String::new(),
+        version: String::new(),
+        peers: Vec::new(),
+        observed_ip: None,
+    })
+}
+
+async fn integrate_peer_info_from_handshake(
+    original_addr: &str,
+    info: &PeerInfo,
+    peers: &Arc<Mutex<Vec<String>>>,
+) {
+    if let Some(observed) = info.observed_ip.as_ref() {
+        if !observed.is_empty() && is_public_ip(observed) {
+            let mut lock = OBSERVED_IP.write().await;
+            if lock.as_ref() != Some(observed) {
+                println!(
+                    "[DEBUG] Learned our public IP ({}) from handshake with {}",
+                    observed, original_addr
+                );
+                *lock = Some(observed.clone());
+            }
+        }
+    }
+
+    let peer_addr = info
+        .public_ip
+        .as_ref()
+        .map(|ip| format!("{}:{}", ip, info.port))
+        .unwrap_or_else(|| original_addr.to_string());
+    let self_addr = {
+        OBSERVED_IP
+            .read()
+            .await
+            .as_ref()
+            .map(|ip| format!("{}:{}", ip, LISTEN_PORT))
+    };
+    if self_addr.as_deref() == Some(peer_addr.as_str()) {
+        return;
+    }
+
+    let mut peers_guard = peers.lock().await;
+    if !peers_guard.contains(&peer_addr) {
+        println!(
+            "[DEBUG] Added peer {} via handshake (node_id={})",
+            peer_addr, info.node_id
+        );
+        peers_guard.push(peer_addr.clone());
+        if let Err(e) = save_peers(&peers_guard) {
+            eprintln!(
+                "Failed to save peers after handshake with {}: {}",
+                peer_addr, e
+            );
+        }
+    }
+}
+
 pub async fn determine_public_ip_from_peers() -> Option<String> {
     let peers = match load_peers() {
         Ok(peers) => peers,
@@ -776,54 +800,15 @@ pub async fn determine_public_ip_from_peers() -> Option<String> {
     }
 
     println!("[DEBUG] Loaded {} peers from file", peers.len());
-    for peer in &peers {
-        println!("[DEBUG] Available peer: {}", peer);
-    }
-
-    let shuffled = peers.clone();
-    for peer in shuffled.into_iter().take(3) {
-        println!("[DEBUG] Trying to get IP from peer: {}", peer);
-        match timeout(Duration::from_secs(3), TcpStream::connect(&peer)).await {
-            Ok(Ok(mut stream)) => {
-                println!("[DEBUG] Connected to peer {}, sending /whoami", peer);
-                if let Err(e) = stream.write_all(b"/whoami").await {
-                    println!("[DEBUG] Failed to send /whoami to {}: {}", peer, e);
-                    continue;
-                }
-
-                let mut buf = vec![0; 64];
-                match stream.read(&mut buf).await {
-                    Ok(n) => {
-                        let response = String::from_utf8_lossy(&buf[..n]).trim().to_string();
-                        println!("[DEBUG] Raw response from {}: '{}'", peer, response);
-
-                        if !response.is_empty() {
-                            let ip_part = response.split(':').next().unwrap_or("").to_string();
-                            println!("[DEBUG] Extracted IP: '{}'", ip_part);
-
-                            if !ip_part.is_empty() && is_public_ip(&ip_part) {
-                                println!(
-                                    "[DEBUG] Got valid public IP from peer {}: {}",
-                                    peer, ip_part
-                                );
-                                return Some(ip_part);
-                            } else {
-                                println!("[DEBUG] IP '{}' is not valid or not public", ip_part);
-                            }
-                        } else {
-                            println!("[DEBUG] Peer {} returned empty response", peer);
-                        }
-                    }
-                    Err(e) => {
-                        println!("[DEBUG] Failed to read response from {}: {}", peer, e);
-                    }
-                }
-            }
-            Ok(Err(e)) => {
-                println!("[DEBUG] Failed to connect to peer {}: {}", peer, e);
-            }
-            Err(_) => {
-                println!("[DEBUG] Timeout connecting to peer {}", peer);
+    for peer in peers.iter().take(5) {
+        println!("[DEBUG] Trying to learn our IP via {}", peer);
+        if let Some(info) = fetch_peer_info_once(peer).await {
+            if let Some(observed) = info.observed_ip.filter(|ip| !ip.is_empty()) {
+                println!(
+                    "[DEBUG] Peer {} sees us as {} -> using as public IP",
+                    peer, observed
+                );
+                return Some(observed);
             }
         }
     }
@@ -858,6 +843,7 @@ pub async fn sync_chain(
             continue;
         }
         log(&format!("[SYNC] Connecting to {}", peer));
+        let _ = handshake_with_peer(&peer, peers).await;
         if let Ok(mut stream) = TcpStream::connect(&peer).await {
             log("[SYNC] Requesting chain");
             if stream.write_all(b"/chain").await.is_err() {
