@@ -1,51 +1,52 @@
-name: Deploy Node-CLI to Servers
+name: Deploy Node-CLI to Server 2
 
 on:
   push:
-    branches: [ main ]  
+    branches: [ main ]
+
 jobs:
   build-and-deploy:
-    runs-on: ubuntu-latest  
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable  
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Build Release
         run: |
-          cargo build --release --bin node-cli 
-          mkdir artifacts
+          cargo build --release --bin node-cli   # jeśli binary nazywa się inaczej – sprawdź w Cargo.toml
+          mkdir -p artifacts
           cp target/release/node-cli artifacts/
-          zip -r artifacts.zip artifacts/
+          # jeśli masz configi/env – dodaj: cp config.toml artifacts/
+          cd artifacts
+          zip -r ../node-cli.zip .
 
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: node-cli-artifact
-          path: artifacts.zip
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
 
-      - name: Deploy to Server 2
-        uses: appleboy/scp-action@v1
-        with:
-          host: ${{ secrets.SSH_HOST2 }}
-          username: ${{ secrets.SSH_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          source: artifacts.zip
-          target: ${{ secrets.DEPLOY_PATH }}
-          strip_components: 1
+          # Zapisz klucz prywatny z secreta (usuwa \r z Windows line endings)
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" | tr -d '\r' > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
 
-      - name: Extract and Restart on Server 2
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.SSH_HOST2 }}
-          username: ${{ secrets.SSH_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          script: |
+          # Dodaj fingerprint hosta (unikamy StrictHostKeyChecking no – bezpieczniej)
+          ssh-keyscan -H ${{ secrets.SSH_HOST2 }} >> ~/.ssh/known_hosts
+
+      - name: Deploy to Server 2 (SCP + extract + restart)
+        run: |
+          # Kopiuj zip
+          scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no node-cli.zip ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST2 }}:${{ secrets.DEPLOY_PATH }}/
+
+          # Zdalne komendy (extract, chmod, restart usługi)
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST2 }} << 'EOF'
             cd ${{ secrets.DEPLOY_PATH }}
-            unzip -o artifacts.zip
-            rm artifacts.zip
+            unzip -o node-cli.zip
+            rm node-cli.zip
             chmod +x node-cli
-            sudo systemctl restart node-cli
+            sudo systemctl restart node-cli   # lub pm2 restart / supervisorctl restart jeśli nie systemd
+            systemctl status node-cli --no-pager   # opcjonalnie: log status do GH logów
+          EOF
