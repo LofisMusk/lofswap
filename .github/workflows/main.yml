@@ -27,10 +27,8 @@ jobs:
           name: node-cli-artifact
           path: artifacts.zip
 
-
-
       - name: Deploy to Server 2
-        uses: appleboy/scp-action@v0.1.4
+        uses: appleboy/scp-action@v1
         with:
           host: ${{ secrets.SSH_HOST2 }}
           username: ${{ secrets.SSH_USER }}
