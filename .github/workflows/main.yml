@@ -3,6 +3,7 @@ name: Deploy Node-CLI to Server 2
 on:
   push:
     branches: [ main ]
+    # paths: ['node-cli/**', 'blockchain-core/**']   # odkomentuj, jeśli chcesz uruchamiać tylko przy zmianach w tych folderach
 
 jobs:
   build-and-deploy:
@@ -15,38 +16,72 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "."   # jeśli masz workspace, dostosuj
+
       - name: Build Release
         run: |
-          cargo build --release --bin node-cli   # jeśli binary nazywa się inaczej – sprawdź w Cargo.toml
+          cargo build --release --bin node-cli
           mkdir -p artifacts
           cp target/release/node-cli artifacts/
-          # jeśli masz configi/env – dodaj: cp config.toml artifacts/
+          # jeśli masz dodatkowe pliki (config.toml, .env.example itp.)
+          # cp config/* artifacts/
           cd artifacts
           zip -r ../node-cli.zip .
 
-      - name: Setup SSH
+      - name: Upload artifact for debugging (opcjonalnie)
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-cli-binary
+          path: node-cli.zip
+          retention-days: 1
+
+      - name: Setup SSH key & known_hosts
         run: |
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
 
-          # Zapisz klucz prywatny z secreta (usuwa \r z Windows line endings)
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" | tr -d '\r' > ~/.ssh/deploy_key
+          # Najbezpieczniejszy sposób – printf gwarantuje trailing newline
+          printf '%s\n' "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+
           chmod 600 ~/.ssh/deploy_key
 
-          # Dodaj fingerprint hosta (unikamy StrictHostKeyChecking no – bezpieczniej)
-          ssh-keyscan -H ${{ secrets.SSH_HOST2 }} >> ~/.ssh/known_hosts
+          # Debug – sprawdzamy format pliku (bezpiecznie, nie pokazuje całego klucza)
+          echo "Key file size: $(stat -c %s ~/.ssh/deploy_key) bytes"
+          head -n 3 ~/.ssh/deploy_key | sed 's/./*/g'   # maskowane pierwsze linie
+          tail -n 3 ~/.ssh/deploy_key | sed 's/./*/g'   # maskowane ostatnie linie
+
+          # Dodajemy host do known_hosts (mniej ostrzeżeń MITM)
+          ssh-keyscan -H ${{ secrets.SSH_HOST2 }} >> ~/.ssh/known_hosts 2>/dev/null || true
+          chmod 644 ~/.ssh/known_hosts
 
       - name: Deploy to Server 2 (SCP + extract + restart)
         run: |
-          # Kopiuj zip
-          scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no node-cli.zip ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST2 }}:${{ secrets.DEPLOY_PATH }}/
+          echo "Deploying to ${{ secrets.SSH_HOST2 }} as ${{ secrets.SSH_USER }}"
 
-          # Zdalne komendy (extract, chmod, restart usługi)
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST2 }} << 'EOF'
-            cd ${{ secrets.DEPLOY_PATH }}
-            unzip -o node-cli.zip
-            rm node-cli.zip
-            chmod +x node-cli
-            sudo systemctl restart node-cli   # lub pm2 restart / supervisorctl restart jeśli nie systemd
-            systemctl status node-cli --no-pager   # opcjonalnie: log status do GH logów
+          # Kopiowanie z verbose
+          scp -v \
+            -i ~/.ssh/deploy_key \
+            -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=15 \
+            node-cli.zip ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST2 }}:${{ secrets.DEPLOY_PATH }}/
+
+          # Zdalne wykonanie komend
+          ssh -v \
+            -i ~/.ssh/deploy_key \
+            -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=15 \
+            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST2 }} << 'EOF'
+              echo "Połączono z serwerem"
+              cd ${{ secrets.DEPLOY_PATH }} || { echo "Błąd: katalog nie istnieje"; exit 1; }
+              unzip -o node-cli.zip || { echo "Błąd unzip"; exit 1; }
+              rm -f node-cli.zip
+              chmod +x node-cli
+              sudo systemctl daemon-reload
+              sudo systemctl restart node-cli || { echo "Restart nieudany"; exit 1; }
+              sleep 2
+              sudo systemctl status node-cli --no-pager || true
+              echo "Deploy zakończony"
           EOF
