@@ -95,18 +95,25 @@ jobs:
           ssh-keyscan -H ${{ secrets.SSH_HOST2 }} >> ~/.ssh/known_hosts 2>/dev/null || true
           chmod 644 ~/.ssh/known_hosts
 
-      - name: Deploy to Server 2 (SCP + extract + restart)
+      - name: Deploy to Server 2 (prepare remote dir, SCP + extract + restart)
         run: |
           echo "Deploying to ${{ secrets.SSH_HOST2 }} as ${{ secrets.SSH_USER }}"
 
-          # Kopiowanie z verbose - use the explicit path to the zip in workspace root
+          # Ensure remote directory exists and show info (helps diagnose 'Is a directory' errors)
+          ssh -v \
+            -i ~/.ssh/deploy_key \
+            -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=15 \
+            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST2 }} "mkdir -p '${{ secrets.DEPLOY_PATH }}' && echo 'Remote directory info:' && ls -ld '${{ secrets.DEPLOY_PATH }}' || true"
+
+          # Kopiowanie z explicit filename to avoid ambiguity
           scp -v \
             -i ~/.ssh/deploy_key \
             -o StrictHostKeyChecking=no \
             -o ConnectTimeout=15 \
-            "./node-cli.zip" ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST2 }}:${{ secrets.DEPLOY_PATH }}/
+            "./node-cli.zip" ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST2 }}:"${{ secrets.DEPLOY_PATH }}/node-cli.zip"
 
-          # Zdalne wykonanie komend
+          # Zdalne wykonanie komend: unzip, restart
           ssh -v \
             -i ~/.ssh/deploy_key \
             -o StrictHostKeyChecking=no \
