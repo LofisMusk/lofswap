@@ -49,6 +49,33 @@ jobs:
           name: node-cli-binary
           path: .
 
+      - name: Prepare artifact file for scp
+        run: |
+          # actions/download-artifact extracts into ./node-cli-binary by artifact name.
+          # Move the zip to workspace root so scp can find ./node-cli.zip
+          set -e
+          echo "Workspace contents before move:"
+          ls -la
+
+          if [ -d "./node-cli-binary" ]; then
+            echo "Found ./node-cli-binary, listing:"
+            ls -la node-cli-binary || true
+            # Move any zip found in that folder to workspace root
+            mv node-cli-binary/*.zip ./ || true
+          fi
+
+          # fallback: find any node-cli*.zip and copy to ./node-cli.zip
+          if [ ! -f "./node-cli.zip" ]; then
+            found=$(find . -maxdepth 3 -type f -name 'node-cli*.zip' | head -n1 || true)
+            if [ -n "$found" ]; then
+              echo "Found zip at: $found — copying to ./node-cli.zip"
+              cp "$found" ./node-cli.zip
+            fi
+          fi
+
+          echo "Workspace contents after move:"
+          ls -la
+
       - name: Setup SSH key & known_hosts
         run: |
           mkdir -p ~/.ssh
@@ -72,12 +99,12 @@ jobs:
         run: |
           echo "Deploying to ${{ secrets.SSH_HOST2 }} as ${{ secrets.SSH_USER }}"
 
-          # Kopiowanie z verbose
+          # Kopiowanie z verbose - use the explicit path to the zip in workspace root
           scp -v \
             -i ~/.ssh/deploy_key \
             -o StrictHostKeyChecking=no \
             -o ConnectTimeout=15 \
-            node-cli.zip ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST2 }}:${{ secrets.DEPLOY_PATH }}/
+            "./node-cli.zip" ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST2 }}:${{ secrets.DEPLOY_PATH }}/
 
           # Zdalne wykonanie komend
           ssh -v \
