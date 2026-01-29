@@ -39,7 +39,7 @@ jobs:
           retention-days: 1
 
   deploy:
-    runs-on: self-hosted
+    runs-on: ubuntu-22.04
     needs: build
 
     steps:
