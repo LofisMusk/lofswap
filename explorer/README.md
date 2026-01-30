@@ -5,20 +5,20 @@ This folder contains a standalone static explorer page.
 What it expects
 - An Explorer HTTP API that exposes the same read-only endpoints used by the old in-node explorer:
   /health
+  /telemetry
   /height
   /chain
   /chain/latest-tx
+  /block/{hash}
   /mempool
   /peers
   /peers/status
-  /node/ip
   /address/{addr}/balance
   /address/{addr}/txs
 
 How to host
 1) Copy `explorer/index.html` to your Apache web root.
 2) Point the page to an API base:
-   - Use the input box in the page, or
    - Add a query param: `?api=https://host:port`, or
    - Leave it empty if the API is on the same origin (recommended for HTTPS).
 

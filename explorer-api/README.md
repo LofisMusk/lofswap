@@ -17,6 +17,7 @@ Endpoints
 - GET /peers/status
 - GET /chain
 - GET /chain/latest-tx
+- GET /block/{hash}
 - GET /height
 - GET /mempool
 - GET /node/ip
@@ -31,6 +32,7 @@ Config (env)
 - PEER_TIMEOUT: seconds (default: 2.0)
 - MAX_PEERS: number of peers to query (default: 8)
 - CONSENSUS_TTL: cache seconds (default: 5.0)
+- EXPLORER_SELF_PEER: include host node in peers list (e.g. 89.168.107.239:6000)
 
 Run
   ./server.py

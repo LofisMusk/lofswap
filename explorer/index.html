@@ -136,6 +136,9 @@
     th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
     .muted { color: var(--muted); font-size: 12px; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 12px; }
+    .wrap { word-break: break-all; }
+    .block-link { color: var(--accent); text-decoration: none; }
+    .block-link:hover { text-decoration: underline; }
     .ok { color: var(--accent); }
     .danger { color: var(--danger); }
     .flex-between { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
@@ -272,20 +275,6 @@
 
     <div class="section">
       <div class="flex-between">
-        <h2>API Target</h2>
-        <div class="pill" id="apiStatus">Checking</div>
-      </div>
-      <div class="row" style="margin: 10px 0 6px;">
-        <input id="apiInput" placeholder="https://host:port or multiple, comma separated" />
-        <button id="apiSave" class="primary">Save</button>
-        <button id="apiReset">Reset</button>
-      </div>
-      <div class="tagline">Active: <span id="apiActive" class="mono">-</span></div>
-      <div class="muted" style="margin-top:6px;">Tip: Leave empty to use same-origin (recommended for HTTPS).</div>
-    </div>
-
-    <div class="section">
-      <div class="flex-between">
         <h2>Telemetry</h2>
         <div class="pill" id="telemetryStatus">-</div>
       </div>
@@ -304,22 +293,36 @@
       <div class="muted" id="telemetryDetail" style="margin-top:10px;">-</div>
     </div>
 
+    <div class="section" id="blockDetail" style="display:none;">
+      <div class="flex-between">
+        <h2>Block Details</h2>
+        <div class="row">
+          <button id="blockClose">Close</button>
+        </div>
+      </div>
+      <div class="muted">Hash: <span id="blockHash" class="mono wrap">-</span></div>
+      <div class="row muted" style="margin-top:8px;">
+        <div>Height: <span id="blockIndex">-</span></div>
+        <div>Time: <span id="blockTime">-</span></div>
+        <div>Nonce: <span id="blockNonce">-</span></div>
+        <div>Difficulty: <span id="blockDiff">-</span></div>
+        <div>Miner: <span id="blockMiner">-</span></div>
+      </div>
+      <div class="card subtle" style="margin-top:12px;">
+        <div class="flex-between" style="margin-bottom:8px"><h2 style="margin:0">Transactions</h2></div>
+        <table>
+          <thead><tr><th>From</th><th>To</th><th>Amount</th><th>Signature</th><th>TXID</th><th>Timestamp</th></tr></thead>
+          <tbody id="blockTxs"></tbody>
+        </table>
+      </div>
+      <div class="muted" id="blockNotFound" style="margin-top:10px; display:none;">Block not found.</div>
+    </div>
+
     <div class="section">
       <div class="flex-between">
         <h2>Network</h2>
         <div class="row">
           <button id="refreshNode" class="primary">Refresh</button>
-        </div>
-      </div>
-
-      <div class="cols-2" style="margin: 8px 0 14px">
-        <div class="card subtle">
-          <div class="stat-label">Public IP</div>
-          <div id="pubip" class="mono">-</div>
-        </div>
-        <div class="card subtle">
-          <div class="stat-label">Private IP</div>
-          <div id="privip" class="mono">-</div>
         </div>
       </div>
 
@@ -369,29 +372,15 @@
 
   <script>
     const APP_VERSION = "0.xx";
-    const DEFAULT_API_BASES = [""];
-
     const shorten = (s, n=10) => s ? (s.length > n ? (s.slice(0, n) + "..." + s.slice(-4)) : s) : "-";
 
     const stripSlash = (s) => s.endsWith("/") ? s.slice(0, -1) : s;
 
-    const parseBases = (value) => {
-      if (!value) return [];
-      return value.split(",").map(v => stripSlash(v.trim())).filter(Boolean);
-    };
-
     const loadApiBases = () => {
       const params = new URLSearchParams(window.location.search);
       const fromQuery = params.get("api");
-      if (fromQuery) return parseBases(fromQuery);
-      const stored = localStorage.getItem("lofswap_explorer_api_bases");
-      if (stored) return parseBases(stored);
-      return DEFAULT_API_BASES.slice();
-    };
-
-    const saveApiBases = (bases) => {
-      const value = bases.join(",");
-      localStorage.setItem("lofswap_explorer_api_bases", value);
+      if (fromQuery) return [stripSlash(fromQuery.trim())];
+      return [""];
     };
 
     let apiBases = loadApiBases();
@@ -411,17 +400,7 @@
       }, 350);
     };
 
-    const apiStatus = document.getElementById("apiStatus");
-    const apiActive = document.getElementById("apiActive");
-    const apiInput = document.getElementById("apiInput");
     const telemetryStatus = document.getElementById("telemetryStatus");
-
-    const setApiStatus = (ok, base, message) => {
-      apiStatus.textContent = message;
-      apiStatus.classList.remove("ok", "danger");
-      apiStatus.classList.add(ok ? "ok" : "danger");
-      apiActive.textContent = base ? base : "(same origin)";
-    };
 
     const fetchWithTimeout = async (url, options, timeoutMs) => {
       const controller = new AbortController();
@@ -450,13 +429,11 @@
       for (const base of bases) {
         if (await probeBase(base)) {
           apiBase = base;
-          setApiStatus(true, apiBase, "Online");
           return apiBase;
         }
       }
 
       apiBase = bases[0] || "";
-      setApiStatus(false, apiBase, "Offline");
       return apiBase;
     };
 
@@ -492,6 +469,84 @@
       }
     };
 
+    const blockDetail = document.getElementById("blockDetail");
+    const blockHashEl = document.getElementById("blockHash");
+    const blockIndexEl = document.getElementById("blockIndex");
+    const blockTimeEl = document.getElementById("blockTime");
+    const blockNonceEl = document.getElementById("blockNonce");
+    const blockDiffEl = document.getElementById("blockDiff");
+    const blockMinerEl = document.getElementById("blockMiner");
+    const blockTxsEl = document.getElementById("blockTxs");
+    const blockNotFoundEl = document.getElementById("blockNotFound");
+    const blockCloseBtn = document.getElementById("blockClose");
+
+    const showBlockDetail = (show) => {
+      if (!blockDetail) return;
+      blockDetail.style.display = show ? "block" : "none";
+      if (!show) {
+        blockNotFoundEl.style.display = "none";
+      }
+    };
+
+    const renderBlock = (block) => {
+      if (!block) {
+        blockHashEl.textContent = "-";
+        blockIndexEl.textContent = "-";
+        blockTimeEl.textContent = "-";
+        blockNonceEl.textContent = "-";
+        blockDiffEl.textContent = "-";
+        blockMinerEl.textContent = "-";
+        blockTxsEl.innerHTML = "";
+        blockNotFoundEl.style.display = "block";
+        return;
+      }
+
+      blockNotFoundEl.style.display = "none";
+      blockHashEl.textContent = block.hash || "-";
+      blockIndexEl.textContent = block.index ?? "-";
+      blockTimeEl.textContent = block.timestamp ?? "-";
+      blockNonceEl.textContent = block.nonce ?? "-";
+      blockDiffEl.textContent = block.difficulty ?? "-";
+      blockMinerEl.textContent = block.miner ?? "-";
+
+      blockTxsEl.innerHTML = "";
+      const txs = block.transactions || [];
+      if (txs.length === 0) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = "<td colspan=6 class=muted>No transactions</td>";
+        blockTxsEl.appendChild(tr);
+        return;
+      }
+      txs.forEach(tx => {
+        const tr = document.createElement("tr");
+        tr.innerHTML =
+          "<td class='mono wrap'>" + (tx.from || "(reward)") + "</td>" +
+          "<td class='mono wrap'>" + (tx.to || "-") + "</td>" +
+          "<td>" + (tx.amount ?? "-") + "</td>" +
+          "<td class='mono wrap'>" + (tx.signature || "-") + "</td>" +
+          "<td class='mono wrap'>" + (tx.txid || "-") + "</td>" +
+          "<td>" + (tx.timestamp ?? "-") + "</td>";
+        blockTxsEl.appendChild(tr);
+      });
+    };
+
+    const fetchBlock = async (hash) => {
+      const direct = await apiGetJson("/block/" + encodeURIComponent(hash), null);
+      if (direct) return direct;
+      const chain = await apiGetJson("/chain", []);
+      return chain.find(b => b.hash === hash) || null;
+    };
+
+    const openBlock = async (hash, push) => {
+      if (!hash) return;
+      if (push) {
+        history.pushState({ hash }, "", "/" + hash);
+      }
+      showBlockDetail(true);
+      const block = await fetchBlock(hash);
+      renderBlock(block);
+    };
+
     async function refreshNode(){
       const tag = document.getElementById("networkTag");
       try {
@@ -522,10 +577,6 @@
           telemetryStatus.classList.add("danger");
           telemetryStatus.classList.remove("ok");
         }
-
-        const ip = await apiGetJson("/node/ip", { public: null, private: null });
-        document.getElementById("pubip").textContent = ip.public || "-";
-        document.getElementById("privip").textContent = ip.private || "-";
 
         const peers = await apiGetJson("/peers", []);
         const status = await apiGetJson("/peers/status", { list: [] });
@@ -575,8 +626,17 @@
         cbody.innerHTML = "";
         chain.slice(-10).reverse().forEach(b => {
           const tr = document.createElement("tr");
-          tr.innerHTML = "<td>" + b.index + "</td><td class=mono>" + shorten(b.hash, 28) + "</td><td>" + (b.transactions || []).length + "</td>";
+          const hash = b.hash || "";
+          const link = "<a class='mono block-link' href='/" + hash + "' data-hash='" + hash + "'>" + shorten(hash, 28) + "</a>";
+          tr.innerHTML = "<td>" + b.index + "</td><td>" + link + "</td><td>" + (b.transactions || []).length + "</td>";
           cbody.appendChild(tr);
+          const a = tr.querySelector("a[data-hash]");
+          if (a) {
+            a.onclick = (ev) => {
+              ev.preventDefault();
+              openBlock(hash, true);
+            };
+          }
         });
 
         const txBody = document.getElementById("recentTx");
@@ -606,29 +666,35 @@
     }
 
     document.getElementById("refreshNode").onclick = () => { refreshNode(); };
+    if (blockCloseBtn) {
+      blockCloseBtn.onclick = () => {
+        showBlockDetail(false);
+        history.pushState({}, "", "/");
+      };
+    }
 
-    document.getElementById("apiSave").onclick = () => {
-      const raw = apiInput.value.trim();
-      const bases = parseBases(raw);
-      apiBases = bases.length ? bases : [""];
-      saveApiBases(apiBases);
-      apiBase = null;
-      selectApiBase(true).then(() => refreshNode());
-    };
-
-    document.getElementById("apiReset").onclick = () => {
-      apiBases = DEFAULT_API_BASES.slice();
-      saveApiBases(apiBases);
-      apiInput.value = apiBases.join(",");
-      apiBase = null;
-      selectApiBase(true).then(() => refreshNode());
-    };
-
-    apiInput.value = apiBases.join(",");
+    window.addEventListener("popstate", () => {
+      const path = window.location.pathname || "/";
+      if (path !== "/") {
+        const hash = path.replace(/^\/+/, "").split("/")[0];
+        if (hash) {
+          openBlock(hash, false);
+          return;
+        }
+      }
+      showBlockDetail(false);
+    });
 
     (async function(){
       await selectApiBase(true);
       await refreshNode();
+      const path = window.location.pathname || "/";
+      if (path !== "/") {
+        const hash = path.replace(/^\/+/, "").split("/")[0];
+        if (hash) {
+          openBlock(hash, false);
+        }
+      }
     })();
   </script>
 </body>

@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 DATA_DIR = os.environ.get("DATA_DIR", "data")
 LISTEN_ADDR = os.environ.get("EXPLORER_API_BIND", "127.0.0.1")
 LISTEN_PORT = int(os.environ.get("EXPLORER_API_PORT", "7000"))
+SELF_PEER = os.environ.get("EXPLORER_SELF_PEER", "").strip()
 PEER_TIMEOUT = float(os.environ.get("PEER_TIMEOUT", "2.0"))
 MAX_PEERS = int(os.environ.get("MAX_PEERS", "8"))
 CACHE_TTL = float(os.environ.get("CONSENSUS_TTL", "5.0"))
@@ -51,7 +52,10 @@ def load_peers():
     peers = read_json_file(data_path("peers.json"), [])
     if not isinstance(peers, list):
         return []
-    return [p for p in peers if isinstance(p, str) and p]
+    out = [p for p in peers if isinstance(p, str) and p]
+    if SELF_PEER and SELF_PEER not in out:
+        out.insert(0, SELF_PEER)
+    return out
 
 
 def tcp_request(peer: str, payload: str, timeout: float):
@@ -326,6 +330,14 @@ class Handler(BaseHTTPRequestHandler):
                 addr = rest[:-len("/txs")]
                 chain = consensus_chain()
                 return self._send_json(200, address_txs(addr, chain))
+
+        if path.startswith("/block/"):
+            block_hash = path[len("/block/"):]
+            chain = consensus_chain()
+            for block in chain:
+                if isinstance(block, dict) and block.get("hash") == block_hash:
+                    return self._send_json(200, block)
+            return self._send_json(200, None)
 
         self._send_json(404, {"error": "not found"})
 

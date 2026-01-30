@@ -25,6 +25,7 @@ struct AppState {
     max_peers: usize,
     cache_ttl: Duration,
     cache: Arc<Mutex<Cache>>,
+    self_peer: Option<String>,
 }
 
 #[derive(Default)]
@@ -87,16 +88,22 @@ fn read_lines_json(path: &Path) -> Vec<Value> {
     out
 }
 
-fn load_peers(dir: &Path) -> Vec<String> {
+fn load_peers(dir: &Path, self_peer: Option<&str>) -> Vec<String> {
     let path = data_path(dir, "peers.json");
     let json = read_json_file(&path, Value::Array(vec![]));
-    match json {
+    let mut peers = match json {
         Value::Array(list) => list
             .into_iter()
             .filter_map(|v| v.as_str().map(|s| s.to_string()))
             .collect(),
         _ => vec![],
+    };
+    if let Some(self_peer) = self_peer {
+        if !self_peer.is_empty() && !peers.iter().any(|p| p == self_peer) {
+            peers.insert(0, self_peer.to_string());
+        }
     }
+    peers
 }
 
 fn tcp_request(peer: &str, payload: &str, timeout: Duration) -> Option<String> {
@@ -172,7 +179,7 @@ fn consensus_state(state: &AppState) -> (Vec<Value>, Telemetry) {
         _ => vec![],
     };
 
-    let peers_all = load_peers(&state.data_dir);
+    let peers_all = load_peers(&state.data_dir, state.self_peer.as_deref());
     let peers = peers_all.iter().take(state.max_peers).cloned().collect::<Vec<_>>();
 
     let mut chains = vec![("local".to_string(), local_chain.clone())];
@@ -279,11 +286,14 @@ async fn health(State(state): State<Arc<AppState>>) -> Response {
 }
 
 async fn peers(State(state): State<Arc<AppState>>) -> Response {
-    json_response(StatusCode::OK, load_peers(&state.data_dir))
+    json_response(
+        StatusCode::OK,
+        load_peers(&state.data_dir, state.self_peer.as_deref()),
+    )
 }
 
 async fn peers_status(State(state): State<Arc<AppState>>) -> Response {
-    let peers = load_peers(&state.data_dir);
+    let peers = load_peers(&state.data_dir, state.self_peer.as_deref());
     let mut list = Vec::new();
     for peer in peers.iter().take(state.max_peers) {
         list.push(serde_json::json!({
@@ -376,6 +386,23 @@ async fn telemetry(State(state): State<Arc<AppState>>) -> Response {
     json_response(StatusCode::OK, meta)
 }
 
+async fn block_by_hash(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(hash): axum::extract::Path<String>,
+) -> Response {
+    let (chain, _) = tokio::task::spawn_blocking(move || consensus_state(&state))
+        .await
+        .unwrap_or_else(|_| (Vec::new(), Telemetry::default()));
+    for block in chain {
+        if let Value::Object(obj) = &block {
+            if obj.get("hash").and_then(|v| v.as_str()) == Some(hash.as_str()) {
+                return json_response(StatusCode::OK, block);
+            }
+        }
+    }
+    json_response(StatusCode::OK, Value::Null)
+}
+
 fn calculate_balance(addr: &str, chain: &[Value]) -> i64 {
     let mut bal = 0i64;
     for block in chain {
@@ -445,6 +472,7 @@ async fn main() {
         max_peers,
         cache_ttl,
         cache: Arc::new(Mutex::new(Cache::default())),
+        self_peer: env::var("EXPLORER_SELF_PEER").ok().filter(|v| !v.trim().is_empty()),
     });
 
     let app = Router::new()
@@ -454,6 +482,7 @@ async fn main() {
         .route("/peers/status", get(peers_status))
         .route("/chain", get(chain))
         .route("/chain/latest-tx", get(latest_tx))
+        .route("/block/:hash", get(block_by_hash))
         .route("/height", get(height))
         .route("/mempool", get(mempool))
         .route("/node/ip", get(node_ip))
