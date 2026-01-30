@@ -1,0 +1,32 @@
+Lofswap Explorer (static)
+
+This folder contains a standalone static explorer page.
+
+What it expects
+- An Explorer HTTP API that exposes the same read-only endpoints used by the old in-node explorer:
+  /health
+  /height
+  /chain
+  /chain/latest-tx
+  /mempool
+  /peers
+  /peers/status
+  /node/ip
+  /address/{addr}/balance
+  /address/{addr}/txs
+
+How to host
+1) Copy `explorer/index.html` to your Apache web root.
+2) Point the page to an API base:
+   - Use the input box in the page, or
+   - Add a query param: `?api=http://host:port`, or
+   - Leave it empty if the API is on the same origin.
+
+CORS note
+If the API is on a different domain or port, it must send CORS headers. The simplest setup is to
+reverse-proxy the API under the same Apache host so the page can call `/health`, `/chain`, etc.
+
+Defaults
+The page defaults to the bootstrap hosts:
+- http://89.168.107.239
+- http://79.76.116.108

@@ -1,70 +1,70 @@
 Changelog — Branch: proof-of-work
 
-This file lists every commit on the current branch (newest first). Each entry shows date, short hash, and the original commit subject.
+This file lists every commit on the current branch (newest first). Each entry shows date, short hash, version, and the original commit subject.
 
-- 2025-11-11 3601ad8 feat(wallet-cli): add timestamp and txid to transactions
-- 2025-11-01 236652c feat: add Docker support with multi-stage build for node-cli and CI configuration
-- 2025-08-07 01966b4 feat: added public ip finding via other peers, refactored node-cli code
-- 2025-08-01 d29ba4d feat: added miner field to block structure in order to add miner's ip in the future
-- 2025-08-01 b931ad4 updated todo
-- 2025-08-01 0fdeb69 fix: prevent broadcasting blocks to self in peer communication
-- 2025-08-01 580d829 feat: enhance block handling with response messages for existing, accepted, and rejected blocks
-- 2025-08-01 6d3d9e4 fix: fixed wallet displaying 0 balance because of using wallet address instead of pubkey
-- 2025-08-01 2a3525b fix: update peer handling in broadcast function to parse JSON list
-- 2025-08-01 930a473 fix: increase buffer size for TCP stream to improve data handling
-- 2025-08-01 b7b0d5e feat: add debug logging for block broadcasting to peers
-- 2025-08-01 72949cb feat: add debug logging for block verification process in main function
-- 2025-08-01 ccf148a feat: add command-line flags to control UPnP setup and peer exchange
-- 2025-08-01 3c922aa fix: working peer discovery
-- 2025-08-01 2d30227 fix: fixed wallet not sending transactions to the network even when 2+ nodes online, fixed peer finding
-- 2025-07-28 2effb91 fix: fixed new peers being added from random ports after syncing the chain
-- 2025-07-28 63a5075 feat: add 'remove-offline-peers' command and enhance sync_chain functionality
-- 2025-07-28 f04de3a TEST: added timeout to prevent the node from booting for 5 minutes
-- 2025-07-28 00cba5f replaced bootstrap nodes with ip instad of domain names
-- 2025-07-28 9a0b7cc test: reduce minimum peers required to sync chain from 2 to 1
-- 2025-07-28 025ca74 added manual peer management to node-cli
-- 2025-07-28 0b2dd17 testing: reduces peers needed to sync chain to 1
-- 2025-07-27 57dc6b7 added new peer mechanism to wallet, added wallet addresses instead of public keys for increased safety
-- 2025-07-27 f61600c fixed peer finding
-- 2025-07-27 5fa6cb7 fixed the issue with the network accepting edited tx signatures in mempool
-- 2025-07-27 4b85562 added needed dependencies for upnp / branch upnp-test is now deprecated
-- 2025-07-27 bfe9c73 Merge branch 'upnp-test'
-- 2025-07-27 ee29b9d added fallback to easy_upnp for older routers
-- 2025-07-26 c053186 Revert "reworking wallet-cli"
-- 2025-07-26 992841c reworking wallet-cli
-- 2025-07-21 803288c merged changes from upnp-test
-- 2025-07-21 92bb0b5 Revert "upnp update"
-- 2025-07-21 2a60a61 added print-mempool command
-- 2025-07-21 811fbf7 Merge branch 'main' into upnp-test
-- 2025-07-21 3c86ddd added todo
-- 2025-07-20 0bc47e9 upnp update
-- 2025-07-17 df85d60 updated gitignore
-- 2025-07-17 482f37f added todo messages
-- 2025-07-17 33a10b5 upnp fixes, not completed yet
-- 2025-07-16 e318b38 reworked upnp using easyupnp lib, added todo contraptions
-- 2025-07-08 fce4382 debug msg upnp
-- 2025-07-08 811616e debug nodes
-- 2025-07-08 7199c84 fixing p2p and peer discovery
-- 2025-07-08 94793ca added upnp
-- 2025-07-06 7fb0108 123
-- 2025-07-06 3abce2b fixed tokens being generated from thin air
-- 2025-07-04 94c7938 chore: remove obsolete rust.yml workflow file
-- 2025-07-04 6fd3b06 boom
-- 2025-07-04 84ccef9 fix: correct command syntax in test step of rust.yml
-- 2025-07-04 9d3b835 update test step in rust.yml to execute node-cli
-- 2025-07-04 9fa26e0 format rust.yml for consistency and add test step
-- 2025-07-04 9b38364 added transaction rejection to node-cli
-- 2025-07-04 6546978 update
-- 2025-07-03 4ddfd46 Create rust.yml
-- 2025-07-02 eb9136f Add files via upload
-- 2025-07-01 47be848 Create .gitignore
-- 2025-07-01 4a77518 Delete node-cli/target directory
-- 2025-07-01 b098066 Delete wallet-cli/target directory
-- 2025-07-01 98d6772 Delete blockchain-core/target directory
-- 2025-07-01 01b0036 new blockchain
-- 2025-07-01 9688868 remove
-- 2025-07-01 ab43877 Delete wallet/lofswap_wallet directory
-- 2025-06-15 db388dd Add peer management functionality; implement printConnectedPeers command
-- 2025-06-15 4ff27a0 Refactor network handling and UI layout; add peer management and error logging
-- 2025-06-15 60fe96d 1
+- 2025-11-11 3601ad8 v0.xx feat(wallet-cli): add timestamp and txid to transactions
+- 2025-11-01 236652c v0.xx feat: add Docker support with multi-stage build for node-cli and CI configuration
+- 2025-08-07 01966b4 v0.xx feat: added public ip finding via other peers, refactored node-cli code
+- 2025-08-01 d29ba4d v0.xx feat: added miner field to block structure in order to add miner's ip in the future
+- 2025-08-01 b931ad4 v0.xx updated todo
+- 2025-08-01 0fdeb69 v0.xx fix: prevent broadcasting blocks to self in peer communication
+- 2025-08-01 580d829 v0.xx feat: enhance block handling with response messages for existing, accepted, and rejected blocks
+- 2025-08-01 6d3d9e4 v0.xx fix: fixed wallet displaying 0 balance because of using wallet address instead of pubkey
+- 2025-08-01 2a3525b v0.xx fix: update peer handling in broadcast function to parse JSON list
+- 2025-08-01 930a473 v0.xx fix: increase buffer size for TCP stream to improve data handling
+- 2025-08-01 b7b0d5e v0.xx feat: add debug logging for block broadcasting to peers
+- 2025-08-01 72949cb v0.xx feat: add debug logging for block verification process in main function
+- 2025-08-01 ccf148a v0.xx feat: add command-line flags to control UPnP setup and peer exchange
+- 2025-08-01 3c922aa v0.xx fix: working peer discovery
+- 2025-08-01 2d30227 v0.xx fix: fixed wallet not sending transactions to the network even when 2+ nodes online, fixed peer finding
+- 2025-07-28 2effb91 v0.xx fix: fixed new peers being added from random ports after syncing the chain
+- 2025-07-28 63a5075 v0.xx feat: add 'remove-offline-peers' command and enhance sync_chain functionality
+- 2025-07-28 f04de3a v0.xx TEST: added timeout to prevent the node from booting for 5 minutes
+- 2025-07-28 00cba5f v0.xx replaced bootstrap nodes with ip instad of domain names
+- 2025-07-28 9a0b7cc v0.xx test: reduce minimum peers required to sync chain from 2 to 1
+- 2025-07-28 025ca74 v0.xx added manual peer management to node-cli
+- 2025-07-28 0b2dd17 v0.xx testing: reduces peers needed to sync chain to 1
+- 2025-07-27 57dc6b7 v0.xx added new peer mechanism to wallet, added wallet addresses instead of public keys for increased safety
+- 2025-07-27 f61600c v0.xx fixed peer finding
+- 2025-07-27 5fa6cb7 v0.xx fixed the issue with the network accepting edited tx signatures in mempool
+- 2025-07-27 4b85562 v0.xx added needed dependencies for upnp / branch upnp-test is now deprecated
+- 2025-07-27 bfe9c73 v0.xx Merge branch 'upnp-test'
+- 2025-07-27 ee29b9d v0.xx added fallback to easy_upnp for older routers
+- 2025-07-26 c053186 v0.xx Revert "reworking wallet-cli"
+- 2025-07-26 992841c v0.xx reworking wallet-cli
+- 2025-07-21 803288c v0.xx merged changes from upnp-test
+- 2025-07-21 92bb0b5 v0.xx Revert "upnp update"
+- 2025-07-21 2a60a61 v0.xx added print-mempool command
+- 2025-07-21 811fbf7 v0.xx Merge branch 'main' into upnp-test
+- 2025-07-21 3c86ddd v0.xx added todo
+- 2025-07-20 0bc47e9 v0.xx upnp update
+- 2025-07-17 df85d60 v0.xx updated gitignore
+- 2025-07-17 482f37f v0.xx added todo messages
+- 2025-07-17 33a10b5 v0.xx upnp fixes, not completed yet
+- 2025-07-16 e318b38 v0.xx reworked upnp using easyupnp lib, added todo contraptions
+- 2025-07-08 fce4382 v0.xx debug msg upnp
+- 2025-07-08 811616e v0.xx debug nodes
+- 2025-07-08 7199c84 v0.xx fixing p2p and peer discovery
+- 2025-07-08 94793ca v0.xx added upnp
+- 2025-07-06 7fb0108 v0.xx 123
+- 2025-07-06 3abce2b v0.xx fixed tokens being generated from thin air
+- 2025-07-04 94c7938 v0.xx chore: remove obsolete rust.yml workflow file
+- 2025-07-04 6fd3b06 v0.xx boom
+- 2025-07-04 84ccef9 v0.xx fix: correct command syntax in test step of rust.yml
+- 2025-07-04 9d3b835 v0.xx update test step in rust.yml to execute node-cli
+- 2025-07-04 9fa26e0 v0.xx format rust.yml for consistency and add test step
+- 2025-07-04 9b38364 v0.xx added transaction rejection to node-cli
+- 2025-07-04 6546978 v0.xx update
+- 2025-07-03 4ddfd46 v0.xx Create rust.yml
+- 2025-07-02 eb9136f v0.xx Add files via upload
+- 2025-07-01 47be848 v0.xx Create .gitignore
+- 2025-07-01 4a77518 v0.xx Delete node-cli/target directory
+- 2025-07-01 b098066 v0.xx Delete wallet-cli/target directory
+- 2025-07-01 98d6772 v0.xx Delete blockchain-core/target directory
+- 2025-07-01 01b0036 v0.xx new blockchain
+- 2025-07-01 9688868 v0.xx remove
+- 2025-07-01 ab43877 v0.xx Delete wallet/lofswap_wallet directory
+- 2025-06-15 db388dd v0.xx Add peer management functionality; implement printConnectedPeers command
+- 2025-06-15 4ff27a0 v0.xx Refactor network handling and UI layout; add peer management and error logging
+- 2025-06-15 60fe96d v0.xx 1
 
