@@ -26,7 +26,7 @@ pub const NODE_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub static ACTIVE_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
 
 pub const LISTEN_PORT: u16 = 6000;
-pub const EXPLORER_PORT_DEFAULT: u16 = 7000;
+pub const EXPLORER_PORT_DEFAULT: u16 = 80;
 pub const BOOTSTRAP_NODES: &[&str] = &["89.168.107.239:6000", "79.76.116.108:6000"];
 pub const MAX_CONNECTIONS: usize = 50;
 pub const BUFFER_SIZE: usize = 8192;
@@ -35,27 +35,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let mut no_upnp = false;
     let mut no_peer_exchange = false;
-    let mut miner_mode = false;
+    let mut _miner_mode = false;
     let mut fullnode_mode = false;
-    let mut explorer_port: u16 = EXPLORER_PORT_DEFAULT;
+    let mut explorer_enabled = false;
 
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
             "--no-upnp" => no_upnp = true,
             "--no-peer-exchange" => no_peer_exchange = true,
-            "--miner" => miner_mode = true,
+            "--miner" => _miner_mode = true,
             "--fullnode" => fullnode_mode = true,
-            "-exp-port" => {
-                if let Some(port_str) = args.get(i + 1) {
-                    explorer_port = port_str
-                        .parse::<u16>()
-                        .map_err(|_| format!("Invalid port for -exp-port: {}", port_str))?;
-                    i += 1;
-                } else {
-                    return Err("Missing value after -exp-port".into());
-                }
-            }
+            "--explorer" => explorer_enabled = true,
             _ => {}
         }
         i += 1;
@@ -94,11 +85,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("[STARTUP] Starting TCP server on port {}...", LISTEN_PORT);
         p2p::start_tcp_server(blockchain.clone(), peers.clone()).await?;
 
-        if !miner_mode {
+        if explorer_enabled {
             tokio::spawn(explorer::start_http_explorer(
                 blockchain.clone(),
                 peers.clone(),
-                explorer_port,
+                EXPLORER_PORT_DEFAULT,
             ));
         }
 
