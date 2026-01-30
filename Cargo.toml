@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "blockchain-core",
+    "explorer-api",
     "wallet-cli",
     "node-cli",
     "gui-app"

@@ -24,8 +24,10 @@ jobs:
       - name: Build Release
         run: |
           cargo build -r -p node-cli
-          mkdir -p artifacts
+          cargo build -r -p explorer-api
+          mkdir -p artifacts/explorer-api
           cp target/release/node-cli artifacts/
+          cp target/release/explorer-api artifacts/explorer-api/
           # jeśli masz dodatkowe pliki (config.toml, .env.example itp.)
           # cp config/* artifacts/
           cd artifacts
@@ -124,9 +126,12 @@ jobs:
               unzip -o node-cli.zip || { echo "Błąd unzip"; exit 1; }
               rm -f node-cli.zip
               chmod +x node-cli
+              chmod +x explorer-api/explorer-api || true
               sudo systemctl daemon-reload
               sudo systemctl restart node-cli || { echo "Restart nieudany"; exit 1; }
+              sudo systemctl restart explorer-api || { echo "Restart explorer-api nieudany"; exit 1; }
               sleep 2
               sudo systemctl status node-cli --no-pager || true
+              sudo systemctl status explorer-api --no-pager || true
               echo "Deploy zakończony"
           EOF

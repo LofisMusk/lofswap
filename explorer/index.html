@@ -13,7 +13,7 @@
       --text: #f1f5fb;
       --muted: #93a0b3;
       --accent: #31c48d;
-      --accent-2: #ffb347;
+      --accent-2: #ffb956;
       --danger: #ff6b6b;
       --glow: 0 0 28px rgba(49,196,141,0.18);
       --shadow: 0 18px 60px rgba(6, 10, 18, 0.55);
@@ -210,9 +210,9 @@
       color: var(--muted);
     }
     @keyframes loading-slide {
-      0% { transform: translateX(-30%); }
-      50% { transform: translateX(80%); }
-      100% { transform: translateX(-30%); }
+      0% { transform: translateX(-10%); }
+      50% { transform: translateX(120%); }
+      100% { transform: translateX(-10%); }
     }
     @keyframes rise {
       from { opacity: 0; transform: translateY(10px); }
@@ -276,12 +276,32 @@
         <div class="pill" id="apiStatus">Checking</div>
       </div>
       <div class="row" style="margin: 10px 0 6px;">
-        <input id="apiInput" placeholder="http://host:port or multiple, comma separated" />
+        <input id="apiInput" placeholder="https://host:port or multiple, comma separated" />
         <button id="apiSave" class="primary">Save</button>
         <button id="apiReset">Reset</button>
       </div>
       <div class="tagline">Active: <span id="apiActive" class="mono">-</span></div>
-      <div class="muted" style="margin-top:6px;">Tip: If you reverse-proxy the API on the same host, leave this empty.</div>
+      <div class="muted" style="margin-top:6px;">Tip: Leave empty to use same-origin (recommended for HTTPS).</div>
+    </div>
+
+    <div class="section">
+      <div class="flex-between">
+        <h2>Telemetry</h2>
+        <div class="pill" id="telemetryStatus">-</div>
+      </div>
+      <div class="cols-2" style="margin-top: 10px;">
+        <div class="card subtle">
+          <div class="stat-label">Consensus Height</div>
+          <div class="stat-value" id="consensusHeight">-</div>
+          <div class="stat-sub mono" id="consensusHash">-</div>
+        </div>
+        <div class="card subtle">
+          <div class="stat-label">Peer Checks</div>
+          <div class="stat-value" id="telemetryPeers">-</div>
+          <div class="stat-sub" id="telemetryHealth">-</div>
+        </div>
+      </div>
+      <div class="muted" id="telemetryDetail" style="margin-top:10px;">-</div>
     </div>
 
     <div class="section">
@@ -349,10 +369,7 @@
 
   <script>
     const APP_VERSION = "0.xx";
-    const DEFAULT_API_BASES = [
-      "http://89.168.107.239",
-      "http://79.76.116.108"
-    ];
+    const DEFAULT_API_BASES = [""];
 
     const shorten = (s, n=10) => s ? (s.length > n ? (s.slice(0, n) + "..." + s.slice(-4)) : s) : "-";
 
@@ -397,6 +414,7 @@
     const apiStatus = document.getElementById("apiStatus");
     const apiActive = document.getElementById("apiActive");
     const apiInput = document.getElementById("apiInput");
+    const telemetryStatus = document.getElementById("telemetryStatus");
 
     const setApiStatus = (ok, base, message) => {
       apiStatus.textContent = message;
@@ -478,6 +496,32 @@
       const tag = document.getElementById("networkTag");
       try {
         await selectApiBase(false);
+
+        const telemetry = await apiGetJson("/telemetry", null);
+        if (telemetry) {
+          const height = telemetry.consensus_height ?? "-";
+          const hash = telemetry.consensus_hash ? shorten(telemetry.consensus_hash, 26) : "-";
+          document.getElementById("consensusHeight").textContent = height;
+          document.getElementById("consensusHash").textContent = hash;
+          const peersSampled = telemetry.peers_sampled ?? 0;
+          const pingOk = telemetry.ping_ok ?? 0;
+          const chainOk = telemetry.chain_ok ?? 0;
+          document.getElementById("telemetryPeers").textContent = pingOk + "/" + peersSampled;
+          document.getElementById("telemetryHealth").textContent = "chain ok: " + chainOk + " | candidates: " + (telemetry.candidates ?? 0);
+          const detail = [
+            "total peers: " + (telemetry.peers_total ?? 0),
+            "local height: " + (telemetry.height_local ?? 0),
+            "min/med/max: " + (telemetry.height_min ?? 0) + "/" + (telemetry.height_median ?? 0) + "/" + (telemetry.height_max ?? 0)
+          ].join(" · ");
+          document.getElementById("telemetryDetail").textContent = detail;
+          telemetryStatus.textContent = "Live";
+          telemetryStatus.classList.add("ok");
+          telemetryStatus.classList.remove("danger");
+        } else {
+          telemetryStatus.textContent = "Offline";
+          telemetryStatus.classList.add("danger");
+          telemetryStatus.classList.remove("ok");
+        }
 
         const ip = await apiGetJson("/node/ip", { public: null, private: null });
         document.getElementById("pubip").textContent = ip.public || "-";
