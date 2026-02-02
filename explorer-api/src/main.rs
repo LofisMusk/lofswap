@@ -111,7 +111,8 @@ fn tcp_request(peer: &str, payload: &str, timeout: Duration) -> Option<String> {
     let port = parts.next()?.parse::<u16>().ok()?;
     let host = parts.next()?;
     let addr = format!("{}:{}", host, port);
-    let mut stream = TcpStream::connect(addr).ok()?;
+    let sock = addr.parse::<SocketAddr>().ok()?;
+    let mut stream = TcpStream::connect_timeout(&sock, timeout).ok()?;
     let _ = stream.set_read_timeout(Some(timeout));
     let _ = stream.set_write_timeout(Some(timeout));
     if stream.write_all(payload.as_bytes()).is_err() {
