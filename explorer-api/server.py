@@ -487,8 +487,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send_json(200, block)
             return self._send_json(200, None)
 
-        if path.startswith("/peer/"):
-            peer = unquote(path[len("/peer/"):])
+        if path.startswith("/peer/") or path.startswith("/api/peer/"):
+            peer = unquote(path.split("/peer/", 1)[1])
             chain, meta = consensus_state()
             consensus_height = (meta or {}).get("consensus_height", len(chain))
             blocks_mined = 0

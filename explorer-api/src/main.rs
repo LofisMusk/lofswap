@@ -729,6 +729,7 @@ async fn main() {
         .route("/peers", get(peers))
         .route("/peers/status", get(peers_status))
         .route("/peer/:peer", get(peer_detail))
+        .route("/api/peer/:peer", get(peer_detail))
         .route("/api/network", get(api_network))
         .route("/api/peers", get(api_peers))
         .route("/chain", get(chain))

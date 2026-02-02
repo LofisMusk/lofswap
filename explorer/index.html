@@ -596,7 +596,7 @@
     };
 
     const fetchBlock = async (hash) => {
-      const direct = await apiGetJson("/block/" + encodeURIComponent(hash), null);
+      const direct = await apiGetJson("/api/block/" + encodeURIComponent(hash), null);
       if (direct) return direct;
       const chain = await apiGetJson("/chain", []);
       return chain.find(b => b.hash === hash) || null;
@@ -667,7 +667,7 @@
 
     const fetchPeer = async (peer) => {
       if (!peer) return null;
-      return await apiGetJson("/peer/" + encodeURIComponent(peer), null);
+      return await apiGetJson("/api/peer/" + encodeURIComponent(peer), null);
     };
 
     const openPeer = async (peer, push) => {
