@@ -15,7 +15,7 @@ use std::{
     net::{SocketAddr, TcpStream, UdpSocket},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 #[derive(Clone)]
@@ -128,10 +128,38 @@ fn tcp_request(peer: &str, payload: &str, timeout: Duration) -> Option<String> {
     Some(String::from_utf8_lossy(&buf).to_string())
 }
 
+fn tcp_request_timed(peer: &str, payload: &str, timeout: Duration) -> Option<(String, Duration)> {
+    let mut parts = peer.rsplitn(2, ':');
+    let port = parts.next()?.parse::<u16>().ok()?;
+    let host = parts.next()?;
+    let addr = format!("{}:{}", host, port);
+    let sock = addr.parse::<SocketAddr>().ok()?;
+    let start = Instant::now();
+    let mut stream = TcpStream::connect_timeout(&sock, timeout).ok()?;
+    let _ = stream.set_read_timeout(Some(timeout));
+    let _ = stream.set_write_timeout(Some(timeout));
+    if stream.write_all(payload.as_bytes()).is_err() {
+        return None;
+    }
+    let mut buf = Vec::new();
+    if stream.read_to_end(&mut buf).is_err() {
+        return None;
+    }
+    if buf.is_empty() {
+        return None;
+    }
+    Some((String::from_utf8_lossy(&buf).to_string(), start.elapsed()))
+}
+
 fn ping_peer(peer: &str, timeout: Duration) -> bool {
     tcp_request(peer, "/ping", timeout)
         .map(|s| s.trim() == "pong")
         .unwrap_or(false)
+}
+
+fn ping_peer_timed(peer: &str, timeout: Duration) -> Option<Duration> {
+    tcp_request_timed(peer, "/ping", timeout)
+        .and_then(|(s, dur)| if s.trim() == "pong" { Some(dur) } else { None })
 }
 
 fn chain_from_peer(peer: &str, timeout: Duration) -> Option<Vec<Value>> {
@@ -161,6 +189,58 @@ fn median(mut values: Vec<usize>) -> usize {
     } else {
         (values[mid - 1] + values[mid]) / 2
     }
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
+}
+
+fn average_block_time_sec(chain: &[Value], sample: usize) -> Option<f64> {
+    let mut ts = Vec::new();
+    for block in chain.iter().rev().take(sample) {
+        if let Some(t) = block.get("timestamp").and_then(|v| v.as_i64()) {
+            ts.push(t);
+        }
+    }
+    if ts.len() < 2 {
+        return None;
+    }
+    let mut diffs = Vec::new();
+    for w in ts.windows(2) {
+        let d = (w[0] - w[1]).abs();
+        if d > 0 {
+            diffs.push(d as f64);
+        }
+    }
+    if diffs.is_empty() {
+        return None;
+    }
+    let sum: f64 = diffs.iter().sum();
+    Some((sum / diffs.len() as f64) / 1000.0)
+}
+
+fn estimate_hashrate(difficulty: i64, avg_block_time_sec: Option<f64>) -> Option<String> {
+    let avg = avg_block_time_sec?;
+    if avg <= 0.0 || difficulty < 0 {
+        return None;
+    }
+    let trials = 16f64.powi(difficulty as i32);
+    let rate = trials / avg;
+    let (value, unit) = if rate >= 1e12 {
+        (rate / 1e12, "TH/s")
+    } else if rate >= 1e9 {
+        (rate / 1e9, "GH/s")
+    } else if rate >= 1e6 {
+        (rate / 1e6, "MH/s")
+    } else if rate >= 1e3 {
+        (rate / 1e3, "KH/s")
+    } else {
+        (rate, "H/s")
+    };
+    Some(format!("{:.2} {}", value, unit))
 }
 
 fn consensus_state(state: &AppState) -> (Vec<Value>, Telemetry) {
@@ -261,6 +341,44 @@ fn consensus_state(state: &AppState) -> (Vec<Value>, Telemetry) {
     (chosen, telemetry)
 }
 
+fn peer_status_list(state: &AppState, consensus_height: usize) -> Vec<Value> {
+    let peers = load_peers(&state.data_dir, state.self_peer.as_deref());
+    let mut list = Vec::new();
+    for peer in peers.iter().take(state.max_peers) {
+        let mut status = "offline".to_string();
+        let mut online = false;
+        let mut rtt_ms: Option<i64> = None;
+        let mut last_seen: Option<i64> = None;
+        let mut peer_height: Option<usize> = None;
+
+        if let Some(rtt) = ping_peer_timed(peer, state.peer_timeout) {
+            online = true;
+            rtt_ms = Some(rtt.as_millis() as i64);
+            last_seen = Some(now_ms());
+            status = "online".to_string();
+        }
+
+        if online {
+            if let Some(chain) = chain_from_peer(peer, state.peer_timeout) {
+                peer_height = Some(chain.len());
+                if consensus_height > 0 && chain.len() + 1 < consensus_height {
+                    status = "syncing".to_string();
+                }
+            }
+        }
+
+        list.push(serde_json::json!({
+            "peer": peer,
+            "status": status,
+            "online": online,
+            "rtt_ms": rtt_ms,
+            "last_seen": last_seen,
+            "height": peer_height
+        }));
+    }
+    list
+}
+
 fn json_response<T: Serialize>(status: StatusCode, payload: T) -> Response {
     let mut headers = HeaderMap::new();
     headers.insert("Access-Control-Allow-Origin", "*".parse().unwrap());
@@ -294,14 +412,11 @@ async fn peers(State(state): State<Arc<AppState>>) -> Response {
 }
 
 async fn peers_status(State(state): State<Arc<AppState>>) -> Response {
-    let peers = load_peers(&state.data_dir, state.self_peer.as_deref());
-    let mut list = Vec::new();
-    for peer in peers.iter().take(state.max_peers) {
-        list.push(serde_json::json!({
-            "peer": peer,
-            "online": ping_peer(peer, state.peer_timeout)
-        }));
-    }
+    let state_clone = state.clone();
+    let (_, meta) = tokio::task::spawn_blocking(move || consensus_state(&state_clone))
+        .await
+        .unwrap_or_else(|_| (Vec::new(), Telemetry::default()));
+    let list = peer_status_list(&state, meta.consensus_height);
     json_response(StatusCode::OK, serde_json::json!({ "list": list }))
 }
 
@@ -404,6 +519,138 @@ async fn block_by_hash(
     json_response(StatusCode::OK, Value::Null)
 }
 
+async fn api_network(State(state): State<Arc<AppState>>) -> Response {
+    let state_clone = state.clone();
+    let (chain, meta) = tokio::task::spawn_blocking(move || consensus_state(&state_clone))
+        .await
+        .unwrap_or_else(|_| (Vec::new(), Telemetry::default()));
+
+    let consensus_height = meta.consensus_height;
+    let difficulty = chain
+        .last()
+        .and_then(|b| b.get("difficulty"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+
+    let avg_block_time_sec = average_block_time_sec(&chain, 20);
+    let hash_rate = estimate_hashrate(difficulty, avg_block_time_sec);
+
+    let peers_list = peer_status_list(&state, consensus_height);
+    let active_peers = peers_list.iter().filter(|p| p.get("online").and_then(|v| v.as_bool()) == Some(true)).count();
+
+    json_response(
+        StatusCode::OK,
+        serde_json::json!({
+            "chainHeight": consensus_height,
+            "activePeers": active_peers,
+            "difficulty": difficulty,
+            "hashRate": hash_rate,
+            "avgBlockTimeSec": avg_block_time_sec,
+            "lastUpdated": now_ms(),
+        }),
+    )
+}
+
+async fn api_peers(State(state): State<Arc<AppState>>) -> Response {
+    let state_clone = state.clone();
+    let (_, meta) = tokio::task::spawn_blocking(move || consensus_state(&state_clone))
+        .await
+        .unwrap_or_else(|_| (Vec::new(), Telemetry::default()));
+    let list = peer_status_list(&state, meta.consensus_height);
+    let peers = list
+        .into_iter()
+        .map(|p| {
+            serde_json::json!({
+                "address": p.get("peer").cloned().unwrap_or(Value::Null),
+                "status": p.get("status").cloned().unwrap_or(Value::String("offline".to_string())),
+                "lastSeen": p.get("last_seen").cloned().unwrap_or(Value::Null),
+                "rttMs": p.get("rtt_ms").cloned().unwrap_or(Value::Null),
+                "height": p.get("height").cloned().unwrap_or(Value::Null)
+            })
+        })
+        .collect::<Vec<_>>();
+    json_response(StatusCode::OK, serde_json::json!({ "peers": peers }))
+}
+
+async fn peer_detail(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(peer): axum::extract::Path<String>,
+) -> Response {
+    let state_clone = state.clone();
+    let (chain, meta) = tokio::task::spawn_blocking(move || consensus_state(&state_clone))
+        .await
+        .unwrap_or_else(|_| (Vec::new(), Telemetry::default()));
+
+    let consensus_height = meta.consensus_height;
+    let mut blocks_mined = 0usize;
+    let mut last_block = Value::Null;
+    let mut first_ts: Option<i64> = None;
+    let mut last_ts: Option<i64> = None;
+    let now = now_ms();
+    let mut mined_blocks = Vec::new();
+
+    for block in &chain {
+        if let Some(miner) = block.get("miner").and_then(|v| v.as_str()) {
+            if miner == peer {
+                blocks_mined += 1;
+                let idx = block.get("index").and_then(|v| v.as_i64()).unwrap_or(0);
+                let ts = block.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0);
+                if first_ts.is_none() || ts < first_ts.unwrap_or(ts) {
+                    first_ts = Some(ts);
+                }
+                if last_ts.is_none() || ts > last_ts.unwrap_or(ts) {
+                    last_ts = Some(ts);
+                    last_block = block.clone();
+                }
+                mined_blocks.push(serde_json::json!({
+                    "index": idx,
+                    "hash": block.get("hash").cloned().unwrap_or(Value::Null),
+                    "timestamp": ts
+                }));
+            }
+        }
+    }
+
+    let mut status = "offline".to_string();
+    let mut rtt_ms: Option<i64> = None;
+    let mut last_seen: Option<i64> = None;
+    let mut peer_height: Option<usize> = None;
+    let mut online = false;
+
+    if let Some(rtt) = ping_peer_timed(&peer, state.peer_timeout) {
+        online = true;
+        rtt_ms = Some(rtt.as_millis() as i64);
+        last_seen = Some(now_ms());
+        status = "online".to_string();
+    }
+    if online {
+        if let Some(chain) = chain_from_peer(&peer, state.peer_timeout) {
+            peer_height = Some(chain.len());
+            if consensus_height > 0 && chain.len() + 1 < consensus_height {
+                status = "syncing".to_string();
+            }
+        }
+    }
+
+    json_response(
+        StatusCode::OK,
+        serde_json::json!({
+            "peer": peer,
+            "status": status,
+            "online": online,
+            "rtt_ms": rtt_ms,
+            "last_seen": last_seen,
+            "peer_height": peer_height,
+            "consensus_height": consensus_height,
+            "blocks_mined": blocks_mined,
+            "first_mined_ts": first_ts,
+            "last_mined_ts": last_ts,
+            "uptime_sec": first_ts.map(|ts| (now - ts).max(0) / 1000),
+            "last_block": last_block,
+            "mined_blocks": mined_blocks
+        }),
+    )
+}
 fn calculate_balance(addr: &str, chain: &[Value]) -> i64 {
     let mut bal = 0i64;
     for block in chain {
@@ -481,9 +728,13 @@ async fn main() {
         .route("/telemetry", get(telemetry))
         .route("/peers", get(peers))
         .route("/peers/status", get(peers_status))
+        .route("/peer/:peer", get(peer_detail))
+        .route("/api/network", get(api_network))
+        .route("/api/peers", get(api_peers))
         .route("/chain", get(chain))
         .route("/chain/latest-tx", get(latest_tx))
         .route("/block/:hash", get(block_by_hash))
+        .route("/api/block/:hash", get(block_by_hash))
         .route("/height", get(height))
         .route("/mempool", get(mempool))
         .route("/node/ip", get(node_ip))

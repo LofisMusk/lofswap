@@ -318,6 +318,38 @@
       <div class="muted" id="blockNotFound" style="margin-top:10px; display:none;">Block not found.</div>
     </div>
 
+    <div class="section" id="peerDetail" style="display:none;">
+      <div class="flex-between">
+        <h2>Peer Details</h2>
+        <div class="row">
+          <button id="peerClose">Close</button>
+        </div>
+      </div>
+      <div class="muted">Peer: <span id="peerAddr" class="mono wrap">-</span></div>
+      <div class="row muted" style="margin-top:8px;">
+        <div>Status: <span id="peerStatus">-</span></div>
+        <div>RTT: <span id="peerRtt">-</span></div>
+        <div>Last seen: <span id="peerLastSeen">-</span></div>
+      </div>
+      <div class="row muted" style="margin-top:8px;">
+        <div>Peer height: <span id="peerHeight">-</span></div>
+        <div>Consensus height: <span id="peerConsensus">-</span></div>
+        <div>Blocks mined: <span id="peerBlocksMined">-</span></div>
+      </div>
+      <div class="row muted" style="margin-top:8px;">
+        <div>Last block mined: <span id="peerLastMined">-</span></div>
+        <div>Uptime (est.): <span id="peerUptime">-</span></div>
+      </div>
+      <div class="card subtle" style="margin-top:12px;">
+        <div class="flex-between" style="margin-bottom:8px"><h2 style="margin:0">Blocks Mined</h2></div>
+        <table>
+          <thead><tr><th>#</th><th>Hash</th><th>Timestamp</th></tr></thead>
+          <tbody id="peerBlocks"></tbody>
+        </table>
+      </div>
+      <div class="muted" id="peerNotFound" style="margin-top:10px; display:none;">Peer not found.</div>
+    </div>
+
     <div class="section">
       <div class="flex-between">
         <h2>Network</h2>
@@ -330,7 +362,7 @@
         <div class="card subtle">
           <div class="flex-between" style="margin-bottom:8px"><h2 style="margin:0">Peers</h2></div>
           <table>
-            <thead><tr><th>Peer</th><th>Status</th></tr></thead>
+            <thead><tr><th>Peer</th><th>Status</th><th>RTT</th><th>Last seen</th><th></th></tr></thead>
             <tbody id="peers"></tbody>
           </table>
         </div>
@@ -479,12 +511,45 @@
     const blockTxsEl = document.getElementById("blockTxs");
     const blockNotFoundEl = document.getElementById("blockNotFound");
     const blockCloseBtn = document.getElementById("blockClose");
+    const peerDetail = document.getElementById("peerDetail");
+    const peerAddrEl = document.getElementById("peerAddr");
+    const peerStatusEl = document.getElementById("peerStatus");
+    const peerRttEl = document.getElementById("peerRtt");
+    const peerLastSeenEl = document.getElementById("peerLastSeen");
+    const peerHeightEl = document.getElementById("peerHeight");
+    const peerConsensusEl = document.getElementById("peerConsensus");
+    const peerBlocksMinedEl = document.getElementById("peerBlocksMined");
+    const peerLastMinedEl = document.getElementById("peerLastMined");
+    const peerUptimeEl = document.getElementById("peerUptime");
+    const peerBlocksEl = document.getElementById("peerBlocks");
+    const peerNotFoundEl = document.getElementById("peerNotFound");
+    const peerCloseBtn = document.getElementById("peerClose");
+
+    const formatTs = (ts) => {
+      if (!ts && ts !== 0) return "-";
+      const d = new Date(ts);
+      return isNaN(d.getTime()) ? String(ts) : d.toISOString();
+    };
 
     const showBlockDetail = (show) => {
       if (!blockDetail) return;
       blockDetail.style.display = show ? "block" : "none";
       if (!show) {
         blockNotFoundEl.style.display = "none";
+      }
+      if (show && peerDetail) {
+        peerDetail.style.display = "none";
+      }
+    };
+
+    const showPeerDetail = (show) => {
+      if (!peerDetail) return;
+      peerDetail.style.display = show ? "block" : "none";
+      if (!show) {
+        peerNotFoundEl.style.display = "none";
+      }
+      if (show && blockDetail) {
+        blockDetail.style.display = "none";
       }
     };
 
@@ -540,11 +605,79 @@
     const openBlock = async (hash, push) => {
       if (!hash) return;
       if (push) {
-        history.pushState({ hash }, "", "/" + hash);
+        history.pushState({ hash }, "", "/block/" + encodeURIComponent(hash));
       }
       showBlockDetail(true);
       const block = await fetchBlock(hash);
       renderBlock(block);
+    };
+
+    const renderPeer = (peer) => {
+      if (!peer) {
+        peerAddrEl.textContent = "-";
+        peerStatusEl.textContent = "-";
+        peerRttEl.textContent = "-";
+        peerLastSeenEl.textContent = "-";
+        peerHeightEl.textContent = "-";
+        peerConsensusEl.textContent = "-";
+      peerBlocksMinedEl.textContent = "-";
+      peerLastMinedEl.textContent = "-";
+      peerUptimeEl.textContent = "-";
+        peerBlocksEl.innerHTML = "";
+        peerNotFoundEl.style.display = "block";
+        return;
+      }
+      peerNotFoundEl.style.display = "none";
+      peerAddrEl.textContent = peer.peer || "-";
+      peerStatusEl.textContent = peer.status || "-";
+      peerRttEl.textContent = peer.rtt_ms != null ? (peer.rtt_ms + " ms") : "-";
+      peerLastSeenEl.textContent = peer.last_seen != null ? formatTs(peer.last_seen) : "-";
+      peerHeightEl.textContent = peer.peer_height ?? "-";
+      peerConsensusEl.textContent = peer.consensus_height ?? "-";
+      peerBlocksMinedEl.textContent = peer.blocks_mined ?? 0;
+      peerUptimeEl.textContent = peer.uptime_sec != null ? (Math.round(peer.uptime_sec / 60) + " min") : "-";
+      if (peer.last_block && peer.last_block.hash) {
+        peerLastMinedEl.innerHTML = "<a class='mono block-link' href='/block/" + peer.last_block.hash + "' data-hash='" + peer.last_block.hash + "'>" + shorten(peer.last_block.hash, 28) + "</a>";
+      } else {
+        peerLastMinedEl.textContent = "-";
+      }
+      peerBlocksEl.innerHTML = "";
+      const mined = peer.mined_blocks || [];
+      if (mined.length === 0) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = "<td colspan=3 class=muted>No blocks mined</td>";
+        peerBlocksEl.appendChild(tr);
+        return;
+      }
+      mined.slice(-20).reverse().forEach(b => {
+        const tr = document.createElement("tr");
+        const hash = b.hash || "";
+        const link = "<a class='mono block-link' href='/block/" + hash + "' data-hash='" + hash + "'>" + shorten(hash, 28) + "</a>";
+        tr.innerHTML = "<td>" + (b.index ?? "-") + "</td><td>" + link + "</td><td>" + (b.timestamp ? formatTs(b.timestamp) : "-") + "</td>";
+        peerBlocksEl.appendChild(tr);
+        const a = tr.querySelector("a[data-hash]");
+        if (a) {
+          a.onclick = (ev) => {
+            ev.preventDefault();
+            openBlock(hash, true);
+          };
+        }
+      });
+    };
+
+    const fetchPeer = async (peer) => {
+      if (!peer) return null;
+      return await apiGetJson("/peer/" + encodeURIComponent(peer), null);
+    };
+
+    const openPeer = async (peer, push) => {
+      if (!peer) return;
+      if (push) {
+        history.pushState({ peer }, "", "/peer/" + encodeURIComponent(peer));
+      }
+      showPeerDetail(true);
+      const detail = await fetchPeer(peer);
+      renderPeer(detail);
     };
 
     async function refreshNode(){
@@ -586,10 +719,24 @@
 
         const tbody = document.getElementById("peers");
         tbody.innerHTML = "";
-        (status.list || peers.map(p => ({ peer: p, online: false }))).forEach(p => {
+        (status.list || peers.map(p => ({ peer: p, online: false, status: "offline" }))).forEach(p => {
           const tr = document.createElement("tr");
-          tr.innerHTML = "<td class=mono>" + p.peer + "</td><td>" + (p.online ? "<span class=ok>online</span>" : "<span class=danger>offline</span>") + "</td>";
+          const statusLabel = p.status || (p.online ? "online" : "offline");
+          const statusHtml = statusLabel === "online"
+            ? "<span class=ok>online</span>"
+            : (statusLabel === "syncing" ? "<span class=muted>syncing</span>" : "<span class=danger>offline</span>");
+          const rtt = p.rtt_ms != null ? (p.rtt_ms + " ms") : "-";
+          const lastSeen = p.last_seen != null ? formatTs(p.last_seen) : "-";
+          const link = "<a class='mono block-link' href='/peer/" + encodeURIComponent(p.peer) + "' data-peer='" + p.peer + "'>open</a>";
+          tr.innerHTML = "<td class=mono>" + p.peer + "</td><td>" + statusHtml + "</td><td>" + rtt + "</td><td>" + lastSeen + "</td><td>" + link + "</td>";
           tbody.appendChild(tr);
+          const a = tr.querySelector("a[data-peer]");
+          if (a) {
+            a.onclick = (ev) => {
+              ev.preventDefault();
+              openPeer(p.peer, true);
+            };
+          }
         });
 
         const onlineBody = document.getElementById("peersOnline");
@@ -627,7 +774,7 @@
         chain.slice(-10).reverse().forEach(b => {
           const tr = document.createElement("tr");
           const hash = b.hash || "";
-          const link = "<a class='mono block-link' href='/" + hash + "' data-hash='" + hash + "'>" + shorten(hash, 28) + "</a>";
+          const link = "<a class='mono block-link' href='/block/" + hash + "' data-hash='" + hash + "'>" + shorten(hash, 28) + "</a>";
           tr.innerHTML = "<td>" + b.index + "</td><td>" + link + "</td><td>" + (b.transactions || []).length + "</td>";
           cbody.appendChild(tr);
           const a = tr.querySelector("a[data-hash]");
@@ -672,17 +819,32 @@
         history.pushState({}, "", "/");
       };
     }
+    if (peerCloseBtn) {
+      peerCloseBtn.onclick = () => {
+        showPeerDetail(false);
+        history.pushState({}, "", "/");
+      };
+    }
 
     window.addEventListener("popstate", () => {
       const path = window.location.pathname || "/";
       if (path !== "/") {
-        const hash = path.replace(/^\/+/, "").split("/")[0];
-        if (hash) {
-          openBlock(hash, false);
+        const parts = path.replace(/^\/+/, "").split("/");
+        if (parts[0] === "block" && parts[1]) {
+          openBlock(decodeURIComponent(parts[1]), false);
+          return;
+        }
+        if (parts[0] === "peer" && parts[1]) {
+          openPeer(decodeURIComponent(parts[1]), false);
+          return;
+        }
+        if (parts[0]) {
+          openBlock(parts[0], false);
           return;
         }
       }
       showBlockDetail(false);
+      showPeerDetail(false);
     });
 
     (async function(){
@@ -690,9 +852,13 @@
       await refreshNode();
       const path = window.location.pathname || "/";
       if (path !== "/") {
-        const hash = path.replace(/^\/+/, "").split("/")[0];
-        if (hash) {
-          openBlock(hash, false);
+        const parts = path.replace(/^\/+/, "").split("/");
+        if (parts[0] === "block" && parts[1]) {
+          openBlock(decodeURIComponent(parts[1]), false);
+        } else if (parts[0] === "peer" && parts[1]) {
+          openPeer(decodeURIComponent(parts[1]), false);
+        } else if (parts[0]) {
+          openBlock(parts[0], false);
         }
       }
     })();

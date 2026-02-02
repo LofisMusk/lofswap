@@ -5,7 +5,7 @@ import socket
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 
 DATA_DIR = os.environ.get("DATA_DIR", "data")
 LISTEN_ADDR = os.environ.get("EXPLORER_API_BIND", "127.0.0.1")
@@ -86,9 +86,49 @@ def tcp_request(peer: str, payload: str, timeout: float):
         return None
 
 
+def tcp_request_timed(peer: str, payload: str, timeout: float):
+    if ":" not in peer:
+        return None
+    host, port = peer.rsplit(":", 1)
+    try:
+        port = int(port)
+    except ValueError:
+        return None
+    start = time.time()
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as sock:
+            sock.settimeout(timeout)
+            sock.sendall(payload.encode("utf-8"))
+            chunks = []
+            while True:
+                try:
+                    data = sock.recv(65536)
+                except socket.timeout:
+                    break
+                if not data:
+                    break
+                chunks.append(data)
+            if not chunks:
+                return None
+            rtt_ms = int((time.time() - start) * 1000)
+            return b"".join(chunks).decode("utf-8", errors="ignore"), rtt_ms
+    except Exception:
+        return None
+
+
 def ping_peer(peer: str) -> bool:
     resp = tcp_request(peer, "/ping", PEER_TIMEOUT)
     return resp is not None and resp.strip() == "pong"
+
+
+def ping_peer_timed(peer: str):
+    resp = tcp_request_timed(peer, "/ping", PEER_TIMEOUT)
+    if not resp:
+        return None
+    body, rtt_ms = resp
+    if body.strip() == "pong":
+        return rtt_ms
+    return None
 
 
 def chain_from_peer(peer: str):
@@ -197,6 +237,74 @@ def consensus_state():
 def consensus_chain():
     return consensus_state()[0]
 
+def now_ms():
+    return int(time.time() * 1000)
+
+def average_block_time_sec(chain, sample=20):
+    ts = []
+    for block in reversed(chain[-sample:]):
+        if isinstance(block, dict) and isinstance(block.get("timestamp"), (int, float)):
+            ts.append(int(block.get("timestamp")))
+    if len(ts) < 2:
+        return None
+    diffs = []
+    for i in range(1, len(ts)):
+        d = abs(ts[i-1] - ts[i])
+        if d > 0:
+            diffs.append(d)
+    if not diffs:
+        return None
+    return (sum(diffs) / len(diffs)) / 1000.0
+
+def estimate_hashrate(difficulty, avg_block_time_sec):
+    if avg_block_time_sec is None or avg_block_time_sec <= 0 or difficulty is None:
+        return None
+    try:
+        diff = int(difficulty)
+    except Exception:
+        return None
+    trials = 16 ** diff
+    rate = trials / avg_block_time_sec
+    if rate >= 1e12:
+        return f"{rate / 1e12:.2f} TH/s"
+    if rate >= 1e9:
+        return f"{rate / 1e9:.2f} GH/s"
+    if rate >= 1e6:
+        return f"{rate / 1e6:.2f} MH/s"
+    if rate >= 1e3:
+        return f"{rate / 1e3:.2f} KH/s"
+    return f"{rate:.2f} H/s"
+
+def peer_status_list(consensus_height):
+    out = []
+    for peer in load_peers()[:MAX_PEERS]:
+        status = "offline"
+        online = False
+        rtt_ms = None
+        last_seen = None
+        peer_height = None
+        rtt = ping_peer_timed(peer)
+        if rtt is not None:
+            online = True
+            rtt_ms = rtt
+            last_seen = now_ms()
+            status = "online"
+        if online:
+            chain = chain_from_peer(peer)
+            if chain is not None:
+                peer_height = len(chain)
+                if consensus_height and peer_height + 1 < consensus_height:
+                    status = "syncing"
+        out.append({
+            "peer": peer,
+            "status": status,
+            "online": online,
+            "rtt_ms": rtt_ms,
+            "last_seen": last_seen,
+            "height": peer_height,
+        })
+    return out
+
 
 def calculate_balance(addr: str, chain):
     bal = 0
@@ -282,10 +390,42 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(200, load_peers())
 
         if path == "/peers/status":
-            status = []
-            for peer in load_peers()[:MAX_PEERS]:
-                status.append({"peer": peer, "online": ping_peer(peer)})
+            _, meta = consensus_state()
+            status = peer_status_list((meta or {}).get("consensus_height", 0))
             return self._send_json(200, {"list": status})
+
+        if path == "/api/network":
+            chain, meta = consensus_state()
+            consensus_height = (meta or {}).get("consensus_height", len(chain))
+            difficulty = 0
+            if chain and isinstance(chain[-1], dict):
+                difficulty = chain[-1].get("difficulty", 0)
+            avg_block = average_block_time_sec(chain)
+            hash_rate = estimate_hashrate(difficulty, avg_block)
+            peers_list = peer_status_list(consensus_height)
+            active_peers = len([p for p in peers_list if p.get("online")])
+            return self._send_json(200, {
+                "chainHeight": consensus_height,
+                "activePeers": active_peers,
+                "difficulty": difficulty,
+                "hashRate": hash_rate,
+                "avgBlockTimeSec": avg_block,
+                "lastUpdated": now_ms(),
+            })
+
+        if path == "/api/peers":
+            _, meta = consensus_state()
+            peers_list = peer_status_list((meta or {}).get("consensus_height", 0))
+            peers = []
+            for p in peers_list:
+                peers.append({
+                    "address": p.get("peer"),
+                    "status": p.get("status"),
+                    "lastSeen": p.get("last_seen"),
+                    "rttMs": p.get("rtt_ms"),
+                    "height": p.get("height"),
+                })
+            return self._send_json(200, {"peers": peers})
 
         if path == "/mempool":
             return self._send_json(200, read_lines_json(data_path("mempool.json")))
@@ -338,6 +478,72 @@ class Handler(BaseHTTPRequestHandler):
                 if isinstance(block, dict) and block.get("hash") == block_hash:
                     return self._send_json(200, block)
             return self._send_json(200, None)
+
+        if path.startswith("/api/block/"):
+            block_hash = path[len("/api/block/"):]
+            chain = consensus_chain()
+            for block in chain:
+                if isinstance(block, dict) and block.get("hash") == block_hash:
+                    return self._send_json(200, block)
+            return self._send_json(200, None)
+
+        if path.startswith("/peer/"):
+            peer = unquote(path[len("/peer/"):])
+            chain, meta = consensus_state()
+            consensus_height = (meta or {}).get("consensus_height", len(chain))
+            blocks_mined = 0
+            last_block = None
+            mined_blocks = []
+            first_ts = None
+            last_ts = None
+            now = now_ms()
+            for block in chain:
+                if isinstance(block, dict) and block.get("miner") == peer:
+                    blocks_mined += 1
+                    idx = block.get("index", 0)
+                    ts = block.get("timestamp", 0)
+                    if first_ts is None or ts < first_ts:
+                        first_ts = ts
+                    if last_ts is None or ts > last_ts:
+                        last_ts = ts
+                        last_block = block
+                    mined_blocks.append({
+                        "index": idx,
+                        "hash": block.get("hash"),
+                        "timestamp": ts,
+                    })
+            status = "offline"
+            online = False
+            rtt_ms = None
+            last_seen = None
+            peer_height = None
+            rtt = ping_peer_timed(peer)
+            if rtt is not None:
+                online = True
+                rtt_ms = rtt
+                last_seen = now_ms()
+                status = "online"
+            if online:
+                pchain = chain_from_peer(peer)
+                if pchain is not None:
+                    peer_height = len(pchain)
+                    if consensus_height and peer_height + 1 < consensus_height:
+                        status = "syncing"
+            return self._send_json(200, {
+                "peer": peer,
+                "status": status,
+                "online": online,
+                "rtt_ms": rtt_ms,
+                "last_seen": last_seen,
+                "peer_height": peer_height,
+                "consensus_height": consensus_height,
+                "blocks_mined": blocks_mined,
+                "first_mined_ts": first_ts,
+                "last_mined_ts": last_ts,
+                "uptime_sec": int((now - first_ts) / 1000) if first_ts else None,
+                "last_block": last_block,
+                "mined_blocks": mined_blocks,
+            })
 
         self._send_json(404, {"error": "not found"})
 
