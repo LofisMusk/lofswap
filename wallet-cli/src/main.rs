@@ -454,13 +454,17 @@ fn faucet(store: &mut PeerStore, addr: &str) {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
+    let mut nonce = [0u8; 8];
+    use rand::RngCore;
+    rand::rng().fill_bytes(&mut nonce);
+    let reward_sig = format!("reward:{}:{}", ts, hex::encode(nonce));
     let mut tx = Transaction {
         version: 1,
         timestamp: ts,
         from: String::new(),
         to: addr.into(),
         amount: 1000,
-        signature: "reward".into(),
+        signature: reward_sig,
         txid: String::new(),
     };
     tx.txid = tx.compute_txid();

@@ -40,7 +40,7 @@ pub fn calculate_balances(chain: &[Block]) -> HashMap<String, i128> {
 }
 
 pub fn is_tx_valid(tx: &Transaction, chain: &[Block]) -> Result<(), NodeError> {
-    if tx.from.is_empty() && tx.signature == "reward" {
+    if tx.from.is_empty() && tx.signature.starts_with("reward") {
         return Ok(());
     }
 
@@ -100,7 +100,7 @@ pub fn is_tx_valid(tx: &Transaction, chain: &[Block]) -> Result<(), NodeError> {
 }
 
 fn verify_tx_signature(tx: &Transaction) -> Result<(), NodeError> {
-    if tx.from.is_empty() && tx.signature == "reward" {
+    if tx.from.is_empty() && tx.signature.starts_with("reward") {
         return Ok(());
     }
 

@@ -1,6 +1,6 @@
 # Lofswap
 
-Lofswap is a production/audit-ready Proof-of-Work blockchain designed to enable cross-chain swaps (e.g., BTC → SOL) via a secure protocol and supporting infrastructure. This repo contains the core node, wallet CLI, and GUI app.
+Lofswap is a Proof-of-Work blockchain designed to enable cross-chain swaps (e.g., BTC → SOL) via a secure protocol and supporting infrastructure. This repo contains the core node, wallet CLI, and GUI app.
 
 ## What is in this repo
 - `blockchain-core/` Core data structures and hashing logic
