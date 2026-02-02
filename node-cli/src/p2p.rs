@@ -17,16 +17,31 @@ use tokio::{
 use crate::{
     ACTIVE_CONNECTIONS, BOOTSTRAP_NODES, BUFFER_SIZE, LISTEN_PORT, MAX_CONNECTIONS, NODE_ID,
     NODE_VERSION, OBSERVED_IP,
-    chain::{calculate_balance, is_tx_valid, load_peers, save_chain, save_peers},
+    chain::{
+        calculate_balance, is_tx_valid, load_peers, save_chain, save_peers, validate_block,
+        validate_chain,
+    },
     errors::NodeError,
     storage::{data_path, ensure_parent_dir},
 };
+
+fn debug_log(msg: &str) {
+    if cfg!(debug_assertions) {
+        println!("[DEBUG] {}", msg);
+    }
+}
+
+fn maint_log(msg: &str) {
+    if cfg!(debug_assertions) {
+        println!("[MAINT] {}", msg);
+    }
+}
 
 const PEER_GOSSIP_LIMIT: usize = 16;
 const HANDSHAKE_TIMEOUT_SECS: u64 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct PeerInfo {
+pub(crate) struct PeerInfo {
     pub public_ip: Option<String>,
     pub port: u16,
     pub node_id: String,
@@ -53,10 +68,10 @@ pub async fn start_tcp_server(
                     if ACTIVE_CONNECTIONS.load(std::sync::atomic::Ordering::Relaxed)
                         >= MAX_CONNECTIONS
                     {
-                        println!(
-                            "[DEBUG] Max connections reached, dropping connection from {}",
+                        debug_log(&format!(
+                            "Max connections reached, dropping connection from {}",
                             addr
-                        );
+                        ));
                         continue;
                     }
 
@@ -66,10 +81,10 @@ pub async fn start_tcp_server(
                         let ip = addr.ip().to_string();
                         if is_public_ip(&ip) {
                             if OBSERVED_IP.read().await.is_none() {
-                                println!(
-                                    "[DEBUG] Setting public IP from incoming connection: {}",
+                                debug_log(&format!(
+                                    "Setting public IP from incoming connection: {}",
                                     ip
-                                );
+                                ));
                                 *OBSERVED_IP.write().await = Some(ip.clone());
                             }
 
@@ -90,12 +105,12 @@ pub async fn start_tcp_server(
 
                     tokio::spawn(async move {
                         if let Err(e) = handle_connection(stream, blockchain, peers).await {
-                            eprintln!("[DEBUG] Connection handling error: {}", e);
+                            debug_log(&format!("Connection handling error: {}", e));
                         }
                         ACTIVE_CONNECTIONS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                     });
                 }
-                Err(e) => eprintln!("[DEBUG] Failed to accept connection: {}", e),
+                Err(e) => debug_log(&format!("Failed to accept connection: {}", e)),
             }
         }
     });
@@ -184,7 +199,7 @@ async fn handle_request(
     } else if let Some(rest) = request.strip_prefix("/peers") {
         handle_peers_request(rest, peers).await?;
     } else if let Ok(tx) = serde_json::from_slice::<Transaction>(request.as_bytes()) {
-        handle_transaction(tx, blockchain).await?;
+        handle_transaction(tx, stream, blockchain).await?;
     } else if let Ok(block) = serde_json::from_slice::<Block>(request.as_bytes()) {
         handle_block(block, stream, blockchain).await?;
         return Ok(());
@@ -236,20 +251,20 @@ async fn handle_resolve_ip_request(id: &str, stream: &mut TcpStream) -> Result<(
     match stream.peer_addr() {
         Ok(addr) => {
             let ip = addr.ip().to_string();
-            println!(
-                "[DEBUG] /resolve-ip for id '{}' resolved caller IP as {}",
+            debug_log(&format!(
+                "/resolve-ip for id '{}' resolved caller IP as {}",
                 id, ip
-            );
+            ));
             stream
                 .write_all(ip.as_bytes())
                 .await
                 .map_err(|e| NodeError::NetworkError(e.to_string()))?;
         }
         Err(e) => {
-            println!(
-                "[DEBUG] Failed to get peer addr for /resolve-ip (id='{}'): {}",
+            debug_log(&format!(
+                "Failed to get peer addr for /resolve-ip (id='{}'): {}",
                 id, e
-            );
+            ));
             stream
                 .write_all(b"unknown")
                 .await
@@ -273,7 +288,7 @@ async fn handle_iam_request(
                 save_peers(&p)?;
             }
         } else {
-            println!("[DEBUG] Ignoring /iam/ request from self: {}", new_peer);
+            debug_log(&format!("Ignoring /iam/ request from self: {}", new_peer));
         }
     }
     Ok(())
@@ -297,10 +312,10 @@ async fn handle_peers_request(rest: &str, peers: Arc<Mutex<Vec<String>>>) -> Res
 
             if added_count > 0 {
                 save_peers(&p)?;
-                println!(
-                    "[DEBUG] Added {} new peers from /peers request",
+                debug_log(&format!(
+                    "Added {} new peers from /peers request",
                     added_count
-                );
+                ));
             }
         }
     }
@@ -309,10 +324,12 @@ async fn handle_peers_request(rest: &str, peers: Arc<Mutex<Vec<String>>>) -> Res
 
 async fn handle_transaction(
     tx: Transaction,
+    stream: &mut TcpStream,
     blockchain: Arc<Mutex<Vec<Block>>>,
 ) -> Result<(), NodeError> {
     let chain = blockchain.lock().await;
-    if is_tx_valid(&tx, &chain).is_ok() {
+    match is_tx_valid(&tx, &chain) {
+        Ok(()) => {
         println!("TX added to mempool");
         let path = data_path("mempool.json");
         let file = ensure_parent_dir(&path)
@@ -329,8 +346,20 @@ async fn handle_transaction(
                 .map_err(|e| NodeError::SerializationError(e.to_string()))?;
             let _ = writeln!(f, "{}", tx_json);
         }
-    } else {
-        println!("TX rejected (signature/balance)");
+        stream
+            .write_all(b"ok")
+            .await
+            .map_err(|e| NodeError::NetworkError(e.to_string()))?;
+        }
+        Err(e) => {
+            let reason = e.to_string();
+            println!("TX rejected: {}", reason);
+            let msg = format!("reject: {}", reason);
+            stream
+                .write_all(msg.as_bytes())
+                .await
+                .map_err(|e| NodeError::NetworkError(e.to_string()))?;
+        }
     }
     Ok(())
 }
@@ -341,27 +370,38 @@ async fn handle_block(
     blockchain: Arc<Mutex<Vec<Block>>>,
 ) -> Result<(), NodeError> {
     let mut chain = blockchain.lock().await;
-    if block.index == chain.len() as u64 {
-        println!("Received new block {}", block.hash);
-        chain.push(block.clone());
-        save_chain(&chain)?;
-        drop(chain);
-        broadcast_to_known_nodes(&block).await;
-        stream
-            .write_all(b"accepted")
-            .await
-            .map_err(|e| NodeError::NetworkError(e.to_string()))?;
-    } else {
+    let expected_index = chain.len() as u64;
+    if block.index != expected_index {
         println!(
             "Received block with invalid index (got {}, expected {})",
-            block.index,
-            chain.len()
+            block.index, expected_index
         );
         stream
             .write_all(b"invalid index")
             .await
             .map_err(|e| NodeError::NetworkError(e.to_string()))?;
+        return Ok(());
     }
+
+    let prev = chain.last();
+    if let Err(e) = validate_block(&block, prev, &chain) {
+        println!("Rejected block {}: {}", block.hash, e);
+        stream
+            .write_all(b"invalid block")
+            .await
+            .map_err(|e| NodeError::NetworkError(e.to_string()))?;
+        return Ok(());
+    }
+
+    println!("Received new block {}", block.hash);
+    chain.push(block.clone());
+    save_chain(&chain)?;
+    drop(chain);
+    broadcast_to_known_nodes(&block).await;
+    stream
+        .write_all(b"accepted")
+        .await
+        .map_err(|e| NodeError::NetworkError(e.to_string()))?;
     Ok(())
 }
 
@@ -400,12 +440,17 @@ pub async fn maintenance_loop(blockchain: Arc<Mutex<Vec<Block>>>, peers: Arc<Mut
             }
         }
         if added > 0 {
-            println!("[MAINT] Added {} peers from refresh", added);
+            maint_log(&format!("Added {} peers from refresh", added));
         }
 
         let current = peers.lock().await.clone();
+        let my_addr = get_my_address().await;
         let mut alive = Vec::with_capacity(current.len());
         for peer in current.iter() {
+            if Some(peer) == my_addr.as_ref() {
+                alive.push(peer.clone());
+                continue;
+            }
             if ping_peer(peer).await {
                 alive.push(peer.clone());
             }
@@ -417,7 +462,7 @@ pub async fn maintenance_loop(blockchain: Arc<Mutex<Vec<Block>>>, peers: Arc<Mut
                 *p = alive;
                 let _ = save_peers(&p);
             }
-            println!("[MAINT] Removed {} dead peers", removed);
+            maint_log(&format!("Removed {} dead peers", removed));
         }
     }
 }
@@ -629,7 +674,7 @@ pub async fn broadcast_to_known_nodes(block: &Block) {
     let my_addr = match get_my_address().await {
         Some(addr) => addr,
         None => {
-            println!("[DEBUG] Skipping broadcast - public IP not yet determined");
+            debug_log("Skipping broadcast - public IP not yet determined");
             return;
         }
     };
@@ -641,7 +686,7 @@ pub async fn broadcast_to_known_nodes(block: &Block) {
             continue;
         }
 
-        println!("[DEBUG] Attempting to send block to peer: {}", peer);
+        debug_log(&format!("Attempting to send block to peer: {}", peer));
         match TcpStream::connect(&peer).await {
             Ok(mut stream) => {
                 if let Ok(json) = serde_json::to_string(block) {
@@ -649,16 +694,16 @@ pub async fn broadcast_to_known_nodes(block: &Block) {
                     let mut resp_buf = vec![0; 64];
                     if let Ok(n) = stream.read(&mut resp_buf).await {
                         let resp = String::from_utf8_lossy(&resp_buf[..n]);
-                        println!("[DEBUG] Response from peer {}: {}", peer, resp.trim());
+                        debug_log(&format!("Response from peer {}: {}", peer, resp.trim()));
                     }
                     let _ = stream.shutdown().await;
-                    println!("[DEBUG] Block sent to peer: {}", peer);
+                    debug_log(&format!("Block sent to peer: {}", peer));
                 } else {
-                    println!("[DEBUG] Failed to serialize block");
+                    debug_log("Failed to serialize block");
                 }
             }
             Err(_) => {
-                println!("[DEBUG] Failed to connect to peer: {}", peer);
+                debug_log(&format!("Failed to connect to peer: {}", peer));
             }
         }
     }
@@ -671,7 +716,7 @@ pub async fn handshake_with_peer(peer: &str, peers: &Arc<Mutex<Vec<String>>>) ->
 }
 
 async fn fetch_peer_info_once(peer: &str) -> Option<PeerInfo> {
-    println!("[DEBUG] Initiating handshake with {}", peer);
+    debug_log(&format!("Initiating handshake with {}", peer));
     match timeout(
         Duration::from_secs(HANDSHAKE_TIMEOUT_SECS),
         TcpStream::connect(peer),
@@ -680,7 +725,7 @@ async fn fetch_peer_info_once(peer: &str) -> Option<PeerInfo> {
     {
         Ok(Ok(mut stream)) => {
             if let Err(e) = stream.write_all(b"/whoami").await {
-                println!("[DEBUG] Failed to send /whoami to {}: {}", peer, e);
+                debug_log(&format!("Failed to send /whoami to {}: {}", peer, e));
                 let _ = stream.shutdown().await;
                 return None;
             }
@@ -689,7 +734,7 @@ async fn fetch_peer_info_once(peer: &str) -> Option<PeerInfo> {
                 Ok(0) => None,
                 Ok(n) => parse_peer_info(&buf[..n]),
                 Err(e) => {
-                    println!("[DEBUG] Failed to read handshake data from {}: {}", peer, e);
+                    debug_log(&format!("Failed to read handshake data from {}: {}", peer, e));
                     None
                 }
             };
@@ -697,11 +742,11 @@ async fn fetch_peer_info_once(peer: &str) -> Option<PeerInfo> {
             info
         }
         Ok(Err(e)) => {
-            println!("[DEBUG] Handshake connect error for {}: {}", peer, e);
+            debug_log(&format!("Handshake connect error for {}: {}", peer, e));
             None
         }
         Err(_) => {
-            println!("[DEBUG] Handshake timed out while connecting to {}", peer);
+            debug_log(&format!("Handshake timed out while connecting to {}", peer));
             None
         }
     }
@@ -744,10 +789,10 @@ async fn integrate_peer_info_from_handshake(
         if !observed.is_empty() && is_public_ip(observed) {
             let mut lock = OBSERVED_IP.write().await;
             if lock.as_ref() != Some(observed) {
-                println!(
-                    "[DEBUG] Learned our public IP ({}) from handshake with {}",
+                debug_log(&format!(
+                    "Learned our public IP ({}) from handshake with {}",
                     observed, original_addr
-                );
+                ));
                 *lock = Some(observed.clone());
             }
         }
@@ -771,10 +816,10 @@ async fn integrate_peer_info_from_handshake(
 
     let mut peers_guard = peers.lock().await;
     if !peers_guard.contains(&peer_addr) {
-        println!(
-            "[DEBUG] Added peer {} via handshake (node_id={})",
+        debug_log(&format!(
+            "Added peer {} via handshake (node_id={})",
             peer_addr, info.node_id
-        );
+        ));
         peers_guard.push(peer_addr.clone());
         if let Err(e) = save_peers(&peers_guard) {
             eprintln!(
@@ -789,25 +834,25 @@ pub async fn determine_public_ip_from_peers() -> Option<String> {
     let peers = match load_peers() {
         Ok(peers) => peers,
         Err(e) => {
-            println!("[DEBUG] Failed to load peers: {}", e);
+            debug_log(&format!("Failed to load peers: {}", e));
             return None;
         }
     };
 
     if peers.is_empty() {
-        println!("[DEBUG] No peers available to determine public IP");
+        debug_log("No peers available to determine public IP");
         return None;
     }
 
-    println!("[DEBUG] Loaded {} peers from file", peers.len());
+    debug_log(&format!("Loaded {} peers from file", peers.len()));
     for peer in peers.iter().take(5) {
-        println!("[DEBUG] Trying to learn our IP via {}", peer);
+        debug_log(&format!("Trying to learn our IP via {}", peer));
         if let Some(info) = fetch_peer_info_once(peer).await {
             if let Some(observed) = info.observed_ip.filter(|ip| !ip.is_empty()) {
-                println!(
-                    "[DEBUG] Peer {} sees us as {} -> using as public IP",
+                debug_log(&format!(
+                    "Peer {} sees us as {} -> using as public IP",
                     peer, observed
-                );
+                ));
                 return Some(observed);
             }
         }
@@ -826,6 +871,13 @@ pub async fn sync_chain(
             println!("{}", msg);
         }
     };
+
+    {
+        let local = blockchain.lock().await;
+        if let Err(e) = validate_chain(&local) {
+            log(&format!("[SYNC] Local chain failed validation: {}", e));
+        }
+    }
 
     let peer_list = peers.lock().await.clone();
     if peer_list.is_empty() {
@@ -852,17 +904,25 @@ pub async fn sync_chain(
             let mut buffer = vec![0u8; 65536];
             if let Ok(n) = stream.read(&mut buffer).await {
                 if let Ok(peer_chain) = serde_json::from_slice::<Vec<Block>>(&buffer[..n]) {
-                    if peer_chain.len() > blockchain.lock().await.len() || force {
+                    if let Err(e) = validate_chain(&peer_chain) {
+                        log(&format!("[SYNC] Rejecting invalid chain from {}: {}", peer, e));
+                        continue;
+                    }
+                    let local_len = blockchain.lock().await.len();
+                    if peer_chain.len() > local_len || force {
                         let mut local = blockchain.lock().await;
+                        let old_len = local.len();
                         *local = peer_chain;
                         if let Err(e) = save_chain(&local) {
                             eprintln!("Failed to save chain: {}", e);
+                        } else if verbose {
+                            println!("Sync completed with {} (force={})", peer, force);
+                            println!("[SYNC] Reorg: {} -> {}", old_len, local.len());
                         } else {
-                            if verbose {
-                                println!("Sync completed with {} (force={})", peer, force);
-                            } else {
-                                println!("[SYNC] Background sync updated from {}", peer);
-                            }
+                            println!(
+                                "[SYNC] Background sync updated from {} ({} -> {})",
+                                peer, old_len, local.len()
+                            );
                         }
                         return;
                     }
@@ -880,14 +940,14 @@ pub async fn ping_peer(peer: &str) -> bool {
         let my_ip = ip.to_string();
         if let Some(target_ip) = peer.split(':').next() {
             if target_ip == my_ip {
-                println!("[DEBUG] Skipping ping to self ({} == {})", peer, my_ip);
+                debug_log(&format!("Skipping ping to self ({} == {})", peer, my_ip));
                 return false;
             }
         }
     } else if let Some(my_addr) = get_my_address().await {
         // Fallback: compare full address if we have one.
         if peer == my_addr {
-            println!("[DEBUG] Skipping ping to self by address match: {}", peer);
+            debug_log(&format!("Skipping ping to self by address match: {}", peer));
             return false;
         }
     }

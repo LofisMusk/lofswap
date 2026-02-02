@@ -16,6 +16,7 @@ use crate::{
     storage::{data_path, ensure_parent_dir, read_data_file},
 };
 
+#[allow(dead_code)]
 pub fn secret_key_from_bytes(bytes: Vec<u8>) -> Option<SecretKey> {
     let arr: [u8; 32] = bytes.try_into().ok()?;
     SecretKey::from_byte_array(arr).ok()
@@ -31,14 +32,17 @@ pub fn read_mempool() -> Vec<Transaction> {
         .collect()
 }
 
+#[allow(dead_code)]
 pub fn latest_transaction(chain: &[Block]) -> Option<Transaction> {
     chain.last().and_then(|b| b.transactions.last().cloned())
 }
 
+#[allow(dead_code)]
 pub fn wallet_save_default(sk: &SecretKey) {
     let _ = fs::write(".default_wallet", hex::encode(sk.secret_bytes()));
 }
 
+#[allow(dead_code)]
 pub fn wallet_load_default() -> Option<SecretKey> {
     fs::read_to_string(".default_wallet")
         .ok()
@@ -46,10 +50,12 @@ pub fn wallet_load_default() -> Option<SecretKey> {
         .and_then(secret_key_from_bytes)
 }
 
+#[allow(dead_code)]
 pub fn wallet_remove_default() {
     let _ = fs::remove_file(".default_wallet");
 }
 
+#[allow(dead_code)]
 pub fn wallet_info_json() -> String {
     if let Some(sk) = wallet_load_default() {
         let pk = PublicKey::from_secret_key(&Secp256k1::new(), &sk);
@@ -59,6 +65,7 @@ pub fn wallet_info_json() -> String {
     }
 }
 
+#[allow(dead_code)]
 pub fn wallet_keys_json(confirmed: bool) -> String {
     if let Some(sk) = wallet_load_default() {
         let pk = PublicKey::from_secret_key(&Secp256k1::new(), &sk);
@@ -76,10 +83,12 @@ pub fn wallet_keys_json(confirmed: bool) -> String {
     }
 }
 
+#[allow(dead_code)]
 pub fn export_wallet_dat_bytes() -> Option<Vec<u8>> {
     wallet_load_default().map(|sk| sk.secret_bytes().to_vec())
 }
 
+#[allow(dead_code)]
 pub fn wallet_pending_count() -> usize {
     fs::read_to_string(data_path("wallet_mempool.json"))
         .or_else(|_| fs::read_to_string("wallet_mempool.json"))
@@ -88,6 +97,7 @@ pub fn wallet_pending_count() -> usize {
         .unwrap_or(0)
 }
 
+#[allow(dead_code)]
 pub fn build_tx(sk: &SecretKey, to: &str, amount: u64) -> Transaction {
     let secp = Secp256k1::new();
     let pk = PublicKey::from_secret_key(&secp, sk);
@@ -112,6 +122,7 @@ pub fn build_tx(sk: &SecretKey, to: &str, amount: u64) -> Transaction {
     tx
 }
 
+#[allow(dead_code)]
 pub fn broadcast_tx_payload(json: &[u8], min_peers: usize) -> (usize, usize) {
     let peers: Vec<String> = chain::load_peers().unwrap_or_default();
     let mut ok = 0usize;
@@ -140,6 +151,7 @@ pub fn broadcast_tx_payload(json: &[u8], min_peers: usize) -> (usize, usize) {
     (ok, peers.len())
 }
 
+#[allow(dead_code)]
 pub fn try_broadcast_pending(min_peers: usize) -> usize {
     let txt = fs::read_to_string(data_path("wallet_mempool.json"))
         .or_else(|_| fs::read_to_string("wallet_mempool.json"))

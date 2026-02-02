@@ -1,6 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use blockchain_core::{Block, Transaction};
+use blockchain_core::{Block, Transaction, DEFAULT_DIFFICULTY_ZEROS};
 use secp256k1::{Message, PublicKey, Secp256k1, ecdsa::Signature};
 use serde_json;
 use sha2::{Digest, Sha256};
@@ -96,6 +96,124 @@ pub fn is_tx_valid(tx: &Transaction, chain: &[Block]) -> Result<(), NodeError> {
         .or_else(|_| secp.verify_ecdsa(msg_legacy, &signature, &from_pubkey))
         .map_err(|_| NodeError::ValidationError("Signature verification failed".to_string()))?;
 
+    Ok(())
+}
+
+fn verify_tx_signature(tx: &Transaction) -> Result<(), NodeError> {
+    if tx.from.is_empty() && tx.signature == "reward" {
+        return Ok(());
+    }
+
+    let secp = Secp256k1::new();
+    let from_pubkey = tx
+        .from
+        .parse::<PublicKey>()
+        .map_err(|_| NodeError::ValidationError("Invalid public key".to_string()))?;
+
+    let msg_data_new = format!(
+        "{}|{}|{}|{}|{}",
+        tx.version, tx.from, tx.to, tx.amount, tx.timestamp
+    );
+    let hash_new = Sha256::digest(msg_data_new.as_bytes());
+    let msg_new = Message::from_digest(hash_new.into());
+
+    let msg_data_legacy = format!("{}{}{}", tx.from, tx.to, tx.amount);
+    let hash_legacy = Sha256::digest(msg_data_legacy.as_bytes());
+    let msg_legacy = Message::from_digest(hash_legacy.into());
+
+    let sig_bytes = hex::decode(&tx.signature)
+        .map_err(|_| NodeError::ValidationError("Invalid signature format".to_string()))?;
+    let signature = Signature::from_compact(&sig_bytes)
+        .map_err(|_| NodeError::ValidationError("Invalid signature".to_string()))?;
+
+    secp.verify_ecdsa(msg_new, &signature, &from_pubkey)
+        .or_else(|_| secp.verify_ecdsa(msg_legacy, &signature, &from_pubkey))
+        .map_err(|_| NodeError::ValidationError("Signature verification failed".to_string()))?;
+    Ok(())
+}
+
+pub fn validate_block(block: &Block, prev: Option<&Block>, chain: &[Block]) -> Result<(), NodeError> {
+    if let Some(prev) = prev {
+        if block.index != prev.index + 1 {
+            return Err(NodeError::ValidationError("Invalid block index".to_string()));
+        }
+        if block.previous_hash != prev.hash {
+            return Err(NodeError::ValidationError("Invalid previous hash".to_string()));
+        }
+        if block.timestamp < prev.timestamp {
+            return Err(NodeError::ValidationError("Block timestamp regressed".to_string()));
+        }
+    } else if block.index != 0 {
+        return Err(NodeError::ValidationError("Invalid genesis index".to_string()));
+    }
+
+    let calculated = block.calculate_hash();
+    if calculated != block.hash {
+        return Err(NodeError::ValidationError("Invalid block hash".to_string()));
+    }
+
+    let difficulty = block.difficulty as usize;
+    let min_diff = DEFAULT_DIFFICULTY_ZEROS as usize;
+    if difficulty == 0 || difficulty < min_diff {
+        return Err(NodeError::ValidationError("Invalid difficulty".to_string()));
+    }
+    if !block.hash.starts_with(&"0".repeat(difficulty)) {
+        return Err(NodeError::ValidationError("Proof-of-work invalid".to_string()));
+    }
+
+    let mut balances = calculate_balances(chain);
+    let mut seen = HashSet::new();
+    let mut chain_seen = HashSet::new();
+    for b in chain {
+        for tx in &b.transactions {
+            if !tx.txid.is_empty() {
+                chain_seen.insert(tx.txid.clone());
+            }
+            chain_seen.insert(tx.signature.clone());
+        }
+    }
+    for tx in &block.transactions {
+        let txid = if !tx.txid.is_empty() {
+            tx.txid.clone()
+        } else {
+            tx.compute_txid()
+        };
+
+        if !tx.txid.is_empty() && tx.txid != txid {
+            return Err(NodeError::ValidationError("Invalid txid".to_string()));
+        }
+
+        if chain_seen.contains(&txid) || chain_seen.contains(&tx.signature) {
+            return Err(NodeError::ValidationError("Duplicate transaction".to_string()));
+        }
+
+        if !seen.insert(txid.clone()) || !seen.insert(tx.signature.clone()) {
+            return Err(NodeError::ValidationError("Duplicate transaction".to_string()));
+        }
+
+        verify_tx_signature(tx)?;
+
+        if !tx.from.is_empty() {
+            let bal = balances.entry(tx.from.clone()).or_insert(0);
+            if *bal < tx.amount as i128 {
+                return Err(NodeError::ValidationError("Insufficient balance".to_string()));
+            }
+            *bal -= tx.amount as i128;
+        }
+        *balances.entry(tx.to.clone()).or_insert(0) += tx.amount as i128;
+    }
+
+    Ok(())
+}
+
+pub fn validate_chain(chain: &[Block]) -> Result<(), NodeError> {
+    if chain.is_empty() {
+        return Ok(());
+    }
+    for i in 0..chain.len() {
+        let prev = if i == 0 { None } else { Some(&chain[i - 1]) };
+        validate_block(&chain[i], prev, &chain[..i])?;
+    }
     Ok(())
 }
 

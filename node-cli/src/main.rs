@@ -33,7 +33,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut no_upnp = false;
     let mut no_peer_exchange = false;
     let mut _miner_mode = false;
-    let mut fullnode_mode = false;
+    let mut _fullnode_mode = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -41,7 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--no-upnp" => no_upnp = true,
             "--no-peer-exchange" => no_peer_exchange = true,
             "--miner" => _miner_mode = true,
-            "--fullnode" => fullnode_mode = true,
+            "--fullnode" => _fullnode_mode = true,
             _ => {}
         }
         i += 1;

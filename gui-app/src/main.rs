@@ -314,7 +314,7 @@ impl eframe::App for App {
                         if ui.button("Add").clicked() { let body = serde_json::json!({"peer": self.peer_input}); let _: Option<serde_json::Value> = http_post_json("/peers/add", &body); }
                         if ui.button("Remove").clicked() { let body = serde_json::json!({"peer": self.peer_input}); let _: Option<serde_json::Value> = http_post_json("/peers/remove", &body); }
                     });
-                    egui::ScrollArea::vertical().id_source("peers_scroll").max_height(140.0).show(ui, |ui| {
+                    egui::ScrollArea::vertical().id_salt("peers_scroll").max_height(140.0).show(ui, |ui| {
                         for (peer, online) in self.peers_status.iter() {
                             ui.label(format!("{}  {}", if *online {"[online]"} else {"[off]"}, peer));
                         }
@@ -322,7 +322,7 @@ impl eframe::App for App {
 
                     ui.separator();
                     ui.label("Mempool");
-                    egui::ScrollArea::vertical().id_source("mempool_scroll").max_height(140.0).show(ui, |ui| {
+                    egui::ScrollArea::vertical().id_salt("mempool_scroll").max_height(140.0).show(ui, |ui| {
                         for tx in &self.mempool { ui.label(format!("{} -> {}  amount: {}", if tx.from.is_empty(){"(reward)"} else {&tx.from}, tx.to, tx.amount)); }
                     });
 
@@ -363,7 +363,7 @@ impl eframe::App for App {
                     if let Some(pk) = &self.public_key { ui.label(format!("Public: {}", pk)); }
                     if ui.button("Reveal keys…").clicked() { self.show_priv = true; }
                     if self.show_priv {
-                        #[derive(Deserialize)] struct Keys { public_key: Option<String>, private_key: Option<String> }
+                        #[derive(Deserialize)] struct Keys { private_key: Option<String> }
                         if let Some(k) = http_get_json::<Keys>("/wallet/keys?confirm=true") { self.private_key = k.private_key; }
                         if let Some(sk) = &self.private_key { ui.monospace(format!("Private: {}", sk)); }
                     }
@@ -386,7 +386,7 @@ impl eframe::App for App {
 
                     ui.separator();
                     ui.label("History");
-                    egui::ScrollArea::vertical().id_source("history_scroll").max_height(160.0).show(ui, |ui| {
+                    egui::ScrollArea::vertical().id_salt("history_scroll").max_height(160.0).show(ui, |ui| {
                         if let Some(addr) = &self.address {
                             for tx in &self.history {
                                 let dir = if tx.to == *addr {"IN"} else {"OUT"};

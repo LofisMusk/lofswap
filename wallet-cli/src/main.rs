@@ -11,13 +11,15 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 static BOOTSTRAP_NODES: &[&str] = &["89.168.107.239:6000", "79.76.116.108:6000"];
 
 const MEMPOOL_FILE: &str = "wallet_mempool.json";
 const WALLET_CACHE_DIR: &str = "wallet-cache";
 const PEER_CACHE_FILE: &str = "wallet-cache/peers_cache.json";
+const CONNECT_TIMEOUT: Duration = Duration::from_millis(800);
+const OFFLINE_GRACE: Duration = Duration::from_secs(10);
 
 // ---------- Default wallet ----------
 const DEFAULT_WALLET: &str = ".default_wallet";
@@ -64,6 +66,7 @@ fn is_valid_peer(p: &str) -> bool {
 
 struct PeerStore {
     peers: Vec<String>,
+    offline_since: std::collections::HashMap<String, Instant>,
 }
 
 impl PeerStore {
@@ -79,7 +82,10 @@ impl PeerStore {
                 }
             }
         }
-        PeerStore { peers }
+        PeerStore {
+            peers,
+            offline_since: std::collections::HashMap::new(),
+        }
     }
 
     fn save(&self) {
@@ -112,7 +118,7 @@ impl PeerStore {
 
         for peer in candidates {
             if let Ok(mut stream) =
-                TcpStream::connect_timeout(&peer.parse().unwrap(), Duration::from_millis(800))
+                TcpStream::connect_timeout(&peer.parse().unwrap(), CONNECT_TIMEOUT)
             {
                 let _ = stream.write_all(b"/peers");
                 let mut buf = Vec::new();
@@ -126,15 +132,71 @@ impl PeerStore {
             }
         }
     }
+
+    fn refresh_online(&mut self) -> Vec<String> {
+        let mut online = Vec::new();
+        let mut to_remove = Vec::new();
+        let peers = self.peers.clone();
+        for peer in peers {
+            if probe_peer(&peer) {
+                online.push(peer.clone());
+                self.offline_since.remove(&peer);
+            } else {
+                let since = self.offline_since.entry(peer.clone()).or_insert_with(Instant::now);
+                if since.elapsed() >= OFFLINE_GRACE {
+                    to_remove.push(peer.clone());
+                }
+            }
+        }
+        if !to_remove.is_empty() {
+            self.peers.retain(|p| !to_remove.contains(p));
+            for p in to_remove {
+                self.offline_since.remove(&p);
+            }
+        }
+        online
+    }
+
+    fn online_peers(&mut self) -> Vec<String> {
+        self.discover();
+        self.refresh_online()
+    }
 }
 
 fn connect_and_send(addr: &str, data: &[u8]) -> io::Result<()> {
     let sock: SocketAddr = addr
         .parse()
         .map_err(|_| io::Error::new(io::ErrorKind::Other, "bad addr"))?;
-    let mut s = TcpStream::connect_timeout(&sock, Duration::from_millis(800))?;
+    let mut s = TcpStream::connect_timeout(&sock, CONNECT_TIMEOUT)?;
     s.write_all(data)?;
     Ok(())
+}
+
+fn send_tx_and_get_reply(addr: &str, data: &[u8]) -> io::Result<Option<String>> {
+    let sock: SocketAddr = addr
+        .parse()
+        .map_err(|_| io::Error::new(io::ErrorKind::Other, "bad addr"))?;
+    let mut s = TcpStream::connect_timeout(&sock, CONNECT_TIMEOUT)?;
+    let _ = s.set_read_timeout(Some(Duration::from_millis(1200)));
+    s.write_all(data)?;
+    let mut buf = Vec::new();
+    match s.read_to_end(&mut buf) {
+        Ok(_) => {
+            if buf.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(String::from_utf8_lossy(&buf).trim().to_string()))
+            }
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn probe_peer(addr: &str) -> bool {
+    let Ok(sock) = addr.parse::<SocketAddr>() else {
+        return false;
+    };
+    TcpStream::connect_timeout(&sock, CONNECT_TIMEOUT).is_ok()
 }
 
 fn append_pending(json: &[u8]) {
@@ -165,10 +227,43 @@ fn save_pending_transactions(list: &[Transaction]) {
 }
 
 fn broadcast(store: &mut PeerStore, json: &[u8], min_peers: usize) {
-    store.discover();
-    let peers = store.as_slice();
+    let peers = store.online_peers();
     if peers.is_empty() {
-        println!("No known peers");
+        println!("No reachable peers; transaction saved to local mempool");
+        append_pending(json);
+        wait_and_retry_pending(store, min_peers);
+        return;
+    }
+    if peers.len() < min_peers {
+        if peers.len() == 1 {
+            println!("Only one peer is online.");
+            if !confirm("Send anyway? (y/N)") {
+                println!("Transaction saved to local mempool");
+                append_pending(json);
+                wait_and_retry_pending(store, min_peers);
+                return;
+            }
+            let p = &peers[0];
+            match send_tx_and_get_reply(p, json) {
+                Ok(Some(reply)) => {
+                    if let Some(reason) = reply.strip_prefix("reject: ") {
+                        println!("TX rejected by {}: {}", p, reason);
+                        println!("TX rejected: {}", reason);
+                        return;
+                    }
+                    println!("Sent to {}", p);
+                }
+                Ok(None) => println!("Sent to {}", p),
+                Err(_) => println!("Failed to connect to {}", p),
+            }
+            println!("Transaction kept in local mempool until 2+ peers are online");
+            append_pending(json);
+            wait_and_retry_pending(store, min_peers);
+            return;
+        }
+        println!("Fewer than {min_peers} peers online; transaction saved to local mempool");
+        append_pending(json);
+        wait_and_retry_pending(store, min_peers);
         return;
     }
     let mut rng = rand::rng();
@@ -177,18 +272,33 @@ fn broadcast(store: &mut PeerStore, json: &[u8], min_peers: usize) {
         .cloned()
         .collect();
     let mut ok = 0;
+    let mut rejected_reason: Option<String> = None;
     for p in &selected {
-        match connect_and_send(p, json) {
-            Ok(_) => {
+        match send_tx_and_get_reply(p, json) {
+            Ok(Some(reply)) => {
+                if let Some(reason) = reply.strip_prefix("reject: ") {
+                    println!("TX rejected by {}: {}", p, reason);
+                    rejected_reason = Some(reason.to_string());
+                } else {
+                    println!("Sent to {}", p);
+                    ok += 1;
+                }
+            }
+            Ok(None) => {
                 println!("Sent to {}", p);
                 ok += 1;
             }
             Err(_) => println!("Failed to connect to {}", p),
         }
     }
+    if let Some(reason) = rejected_reason {
+        println!("TX rejected: {}", reason);
+        return;
+    }
     if ok < min_peers {
         println!("Sent to {ok}/{min_peers} peers; transaction saved to local mempool");
         append_pending(json);
+        wait_and_retry_pending(store, min_peers);
     } else {
         // If sent successfully, try to broadcast any pending transactions
         try_broadcast_pending(store, min_peers);
@@ -229,7 +339,7 @@ fn send_default(store: &mut PeerStore, to: &str, amount: u64, min_peers: usize) 
     }
 }
 fn send_priv(store: &mut PeerStore, priv_hex: &str, to: &str, amount: u64, min_peers: usize) {
-    if let Ok(sk) = SecretKey::from_slice(&hex::decode(priv_hex).unwrap_or_default()) {
+    if let Ok(sk) = SecretKey::from_byte_array(hex_to_32(priv_hex)) {
         let tx = build_tx(&sk, to, amount);
         let payload = serde_json::to_vec(&tx).unwrap();
         broadcast(store, &payload, min_peers);
@@ -243,9 +353,7 @@ fn balance(store: &mut PeerStore, addr: &str) {
     store.discover();
     let query = format!("/balance/{}", addr);
     for p in store.as_slice() {
-        if let Ok(mut s) =
-            TcpStream::connect_timeout(&p.parse().unwrap(), Duration::from_millis(800))
-        {
+        if let Ok(mut s) = TcpStream::connect_timeout(&p.parse().unwrap(), CONNECT_TIMEOUT) {
             if s.write_all(query.as_bytes()).is_ok() {
                 let mut buf = String::new();
                 if s.read_to_string(&mut buf).is_ok() {
@@ -264,7 +372,7 @@ fn fetch_chain(store: &mut PeerStore) -> Option<Vec<Block>> {
         let Ok(sock) = p.parse::<SocketAddr>() else {
             continue;
         };
-        if let Ok(mut s) = TcpStream::connect_timeout(&sock, Duration::from_millis(800)) {
+        if let Ok(mut s) = TcpStream::connect_timeout(&sock, CONNECT_TIMEOUT) {
             if s.write_all(b"/chain").is_ok() {
                 let mut buf = Vec::new();
                 if s.read_to_end(&mut buf).is_ok() {
@@ -374,7 +482,7 @@ fn import_dat(path: &str) {
         .and_then(|mut f| f.read_exact(&mut buf))
         .is_ok()
     {
-        if let Ok(sk) = SecretKey::from_slice(&buf) {
+        if let Ok(sk) = SecretKey::from_byte_array(buf) {
             let pk = PublicKey::from_secret_key(&Secp256k1::new(), &sk);
             save_default_wallet(&sk);
             println!("Imported file. Public Key: {}", pk);
@@ -424,7 +532,7 @@ fn create_wallet() {
 // Import a private key and set it as default
 fn import_priv(priv_hex: &str) {
     match hex::decode(priv_hex) {
-        Ok(bytes) => match SecretKey::from_slice(&bytes) {
+        Ok(bytes) => match SecretKey::from_byte_array(hex_to_32_bytes(bytes)) {
             Ok(sk) => {
                 let pk = PublicKey::from_secret_key(&Secp256k1::new(), &sk);
                 save_default_wallet(&sk);
@@ -440,13 +548,48 @@ fn import_priv(priv_hex: &str) {
     }
 }
 
+fn hex_to_32(priv_hex: &str) -> [u8; 32] {
+    match hex::decode(priv_hex) {
+        Ok(bytes) => hex_to_32_bytes(bytes),
+        Err(_) => [0u8; 32],
+    }
+}
+
+fn hex_to_32_bytes(bytes: Vec<u8>) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    if bytes.len() == 32 {
+        out.copy_from_slice(&bytes);
+    }
+    out
+}
+
 fn list_peers(store: &mut PeerStore) {
-    store.discover();
+    let online = store.online_peers();
     let peers = store.as_slice();
     println!("Available peers ({}):", peers.len());
     for p in peers {
-        println!("- {}", p);
+        let status = if online.contains(p) { "online" } else { "offline" };
+        println!("- {} ({})", p, status);
     }
+    if peers.is_empty() {
+        return;
+    }
+    if online.is_empty() {
+        println!("All peers are currently offline");
+    }
+}
+
+fn wait_and_retry_pending(store: &mut PeerStore, min_peers: usize) {
+    if min_peers < 2 {
+        return;
+    }
+    println!("Retrying pending transactions in {}s", OFFLINE_GRACE.as_secs());
+    std::thread::sleep(OFFLINE_GRACE);
+    try_broadcast_pending(store, min_peers);
+}
+
+fn pending_should_wait(min_peers: usize, online_count: usize) -> bool {
+    online_count < min_peers
 }
 
 fn show_mempool() {
@@ -468,24 +611,35 @@ fn try_broadcast_pending(store: &mut PeerStore, min_peers: usize) {
     if pending.is_empty() {
         return;
     }
-    store.discover();
-    let peers = store.as_slice();
-    if peers.is_empty() {
+    let peers = store.online_peers();
+    if pending_should_wait(min_peers, peers.len()) {
         return;
     }
     let mut sent = 0;
     pending.retain(|tx| {
         let payload = serde_json::to_vec(tx).unwrap();
         let mut ok = 0;
-        for p in peers {
-            if connect_and_send(p, &payload).is_ok() {
-                ok += 1;
-                if ok >= min_peers {
-                    break;
+        let mut rejected = false;
+        for p in &peers {
+            match send_tx_and_get_reply(p, &payload) {
+                Ok(Some(reply)) => {
+                    if let Some(reason) = reply.strip_prefix("reject: ") {
+                        println!("TX rejected by {}: {}", p, reason);
+                        rejected = true;
+                        break;
+                    }
+                    ok += 1;
                 }
+                Ok(None) => ok += 1,
+                Err(_) => {}
+            }
+            if ok >= min_peers {
+                break;
             }
         }
-        if ok >= min_peers {
+        if rejected {
+            false
+        } else if ok >= min_peers {
             sent += 1;
             false
         } else {
@@ -539,24 +693,34 @@ fn tx_signed_by_wallet(tx: &Transaction, sk: &SecretKey) -> bool {
         .is_ok()
 }
 
-fn broadcast_force(store: &mut PeerStore, json: &[u8]) -> usize {
+fn broadcast_force(store: &mut PeerStore, json: &[u8]) -> (usize, Option<String>) {
     store.discover();
     let peers = store.as_slice();
     if peers.is_empty() {
         println!("No known peers");
-        return 0;
+        return (0, None);
     }
     let mut ok = 0;
+    let mut rejected_reason: Option<String> = None;
     for p in peers {
-        match connect_and_send(p, json) {
-            Ok(_) => {
+        match send_tx_and_get_reply(p, json) {
+            Ok(Some(reply)) => {
+                if let Some(reason) = reply.strip_prefix("reject: ") {
+                    println!("TX rejected by {}: {}", p, reason);
+                    rejected_reason = Some(reason.to_string());
+                } else {
+                    ok += 1;
+                    println!("Sent to {}", p);
+                }
+            }
+            Ok(None) => {
                 ok += 1;
                 println!("Sent to {}", p);
             }
             Err(_) => println!("Failed to connect to {}", p),
         }
     }
-    ok
+    (ok, rejected_reason)
 }
 
 fn force_send(store: &mut PeerStore, signature: &str) {
@@ -590,7 +754,11 @@ fn force_send(store: &mut PeerStore, signature: &str) {
         return;
     }
     let payload = serde_json::to_vec(&tx).unwrap();
-    let sent = broadcast_force(store, &payload);
+    let (sent, rejected_reason) = broadcast_force(store, &payload);
+    if let Some(reason) = rejected_reason {
+        println!("TX rejected: {}", reason);
+        return;
+    }
     if sent > 0 {
         println!("Force-sent transaction to {sent} peer(s)");
         pending.remove(idx);

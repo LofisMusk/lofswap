@@ -1,8 +1,9 @@
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, IsTerminal};
 use std::sync::Arc;
 use std::time::Duration;
 
 use blockchain_core::{Block, Transaction};
+use rustyline::{DefaultEditor, error::ReadlineError};
 use serde_json;
 use tokio::sync::Mutex;
 
@@ -14,57 +15,90 @@ use crate::{
     storage::{read_data_file, remove_data_file},
 };
 
+const SELF_PEER_NOTE: &str = "Note: if peers.json contains this node's own address, it stays in the file but is hidden from the peer list while still being broadcast to other nodes.";
+
 pub async fn run_cli(blockchain: Arc<Mutex<Vec<Block>>>, peers: Arc<Mutex<Vec<String>>>) {
     let interactive = io::stdin().is_terminal();
     println!(
         "Commands: mine | sync | print-chain | list-peers | add-peer | remove-peer | remove-offline-peers | clear-chain | print-mempool | get-publicip | print-my-addr | debug-peers | exit"
     );
 
-    loop {
-        if interactive {
-            print!("> ");
-            let _ = io::stdout().flush();
+    if interactive {
+        let mut rl = DefaultEditor::new().unwrap_or_else(|_| DefaultEditor::new().unwrap());
+        loop {
+            match rl.readline("> ") {
+                Ok(line) => {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    let _ = rl.add_history_entry(trimmed);
+                    if !handle_command(trimmed, &blockchain, &peers).await {
+                        break;
+                    }
+                }
+                Err(ReadlineError::Interrupted) => {
+                    println!("^C");
+                    continue;
+                }
+                Err(ReadlineError::Eof) => break,
+                Err(_) => break,
+            }
         }
-        let mut line = String::new();
-        match io::stdin().read_line(&mut line) {
-            Ok(0) => {
-                // Stdin closed (common if container started without -i). Wait and retry so
-                // attaching later still allows commands, but don't spam prompts in non-interactive mode.
-                std::thread::sleep(Duration::from_millis(500));
+    } else {
+        loop {
+            let mut line = String::new();
+            match io::stdin().read_line(&mut line) {
+                Ok(0) => {
+                    // Stdin closed (common if container started without -i). Wait and retry so
+                    // attaching later still allows commands, but don't spam prompts in non-interactive mode.
+                    std::thread::sleep(Duration::from_millis(500));
+                    continue;
+                }
+                Ok(_) => {}
+                Err(_) => continue,
+            }
+
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
                 continue;
             }
-            Ok(_) => {}
-            Err(_) => continue,
-        }
 
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        match trimmed {
-            "print-my-addr" => {
-                if let Some(addr) = get_my_address().await {
-                    println!("My address: {}", addr);
-                } else {
-                    println!("Address not determined yet");
-                }
+            if !handle_command(trimmed, &blockchain, &peers).await {
+                break;
             }
-            "debug-peers" => debug_peers(&peers).await,
-            "mine" => mine_block(&blockchain).await,
-            "sync" => sync_chain(&blockchain, &peers, false, true).await,
-            "print-chain" => print_chain(&blockchain).await,
-            "list-peers" => list_peers(&peers).await,
-            "remove-offline-peers" => remove_offline_peers(&peers).await,
-            "clear-chain" => clear_chain(),
-            "print-mempool" => print_mempool(),
-            "get-publicip" => get_public_ip().await,
-            "exit" => break,
-            line if line.starts_with("add-peer ") => add_peer_command(line, &peers).await,
-            line if line.starts_with("remove-peer ") => remove_peer_command(line, &peers).await,
-            _ => println!("Unknown command"),
         }
     }
+}
+
+async fn handle_command(
+    trimmed: &str,
+    blockchain: &Arc<Mutex<Vec<Block>>>,
+    peers: &Arc<Mutex<Vec<String>>>,
+) -> bool {
+    match trimmed {
+        "print-my-addr" => {
+            if let Some(addr) = get_my_address().await {
+                println!("My address: {}", addr);
+            } else {
+                println!("Address not determined yet");
+            }
+        }
+        "debug-peers" => debug_peers(peers).await,
+        "mine" => mine_block(blockchain).await,
+        "sync" => sync_chain(blockchain, peers, false, true).await,
+        "print-chain" => print_chain(blockchain).await,
+        "list-peers" => list_peers(peers).await,
+        "remove-offline-peers" => remove_offline_peers(peers).await,
+        "clear-chain" => clear_chain(),
+        "print-mempool" => print_mempool(),
+        "get-publicip" => get_public_ip().await,
+        "exit" => return false,
+        line if line.starts_with("add-peer ") => add_peer_command(line, peers).await,
+        line if line.starts_with("remove-peer ") => remove_peer_command(line, peers).await,
+        _ => println!("Unknown command"),
+    }
+    true
 }
 
 async fn print_chain(blockchain: &Arc<Mutex<Vec<Block>>>) {
@@ -76,7 +110,16 @@ async fn print_chain(blockchain: &Arc<Mutex<Vec<Block>>>) {
 
 async fn list_peers(peers: &Arc<Mutex<Vec<String>>>) {
     let peer_list = peers.lock().await;
+    let my_addr = get_my_address().await;
+    if let Some(addr) = my_addr.as_ref() {
+        if peer_list.iter().any(|p| p == addr) {
+            println!("{}", SELF_PEER_NOTE);
+        }
+    }
     for peer in peer_list.iter() {
+        if Some(peer) == my_addr.as_ref() {
+            continue;
+        }
         let status = ping_peer(peer).await;
         println!("{} ({})", peer, if status { "online" } else { "offline" });
     }
@@ -133,7 +176,12 @@ async fn remove_offline_peers(peers: &Arc<Mutex<Vec<String>>>) {
     let mut p = peers.lock().await;
     let before = p.len();
     let mut online_peers = Vec::new();
+    let my_addr = get_my_address().await;
     for peer in p.iter() {
+        if Some(peer) == my_addr.as_ref() {
+            online_peers.push(peer.clone());
+            continue;
+        }
         if ping_peer(peer).await {
             online_peers.push(peer.clone());
         }

@@ -7,7 +7,11 @@ use local_ip_address::local_ip;
 pub async fn setup_upnp(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     match try_igd_upnp(port).await {
         Ok(_) => return Ok(()),
-        Err(e) => eprintln!("[DEBUG] IGD UPnP failed: {} - trying easy_upnp fallback", e),
+        Err(e) => {
+            if cfg!(debug_assertions) {
+                eprintln!("[DEBUG] IGD UPnP failed: {} - trying easy_upnp fallback", e);
+            }
+        }
     }
 
     let cfg = Arc::new(EasyConfig {
