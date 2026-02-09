@@ -7,6 +7,7 @@ use rand::seq::IndexedRandom;
 use secp256k1::{Message, PublicKey, Secp256k1, SecretKey, ecdsa::Signature};
 use serde_json;
 use sha2::{Digest, Sha256};
+use std::env;
 use chrono::Utc;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -74,6 +75,22 @@ impl PeerStore {
     fn load() -> Self {
         ensure_cache_dir();
         let mut peers: Vec<String> = BOOTSTRAP_NODES.iter().map(|s| s.to_string()).collect();
+        // Always include a local node endpoint so wallet can talk to a node on the same host/IP.
+        // Nodes themselves may skip same-IP peers; wallet should not.
+        let local_port = env::var("WALLET_LOCAL_PORT")
+            .ok()
+            .and_then(|s| s.parse::<u16>().ok())
+            .unwrap_or(6000);
+        let local_env = env::var("WALLET_LOCAL_NODE").ok();
+        let local_candidates = [
+            local_env.unwrap_or_else(|| format!("127.0.0.1:{local_port}")),
+            format!("localhost:{local_port}"),
+        ];
+        for p in local_candidates {
+            if is_valid_peer(&p) && !peers.contains(&p) {
+                peers.push(p);
+            }
+        }
         if let Ok(txt) = fs::read_to_string(peer_cache_path()) {
             if let Ok(v) = serde_json::from_str::<Vec<String>>(&txt) {
                 for p in v {
