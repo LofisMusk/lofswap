@@ -13,3 +13,4 @@ blockchain-core = { path = "../blockchain-core" }
 sha2 = "0.10.9"
 clap = { version = "4.5", features = ["derive"] }
 bs58 = "0.5.1"
+chrono = "0.4"

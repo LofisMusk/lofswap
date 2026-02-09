@@ -7,6 +7,7 @@ use rand::seq::IndexedRandom;
 use secp256k1::{Message, PublicKey, Secp256k1, SecretKey, ecdsa::Signature};
 use serde_json;
 use sha2::{Digest, Sha256};
+use chrono::Utc;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -309,10 +310,8 @@ fn broadcast(store: &mut PeerStore, json: &[u8], min_peers: usize) {
 fn build_tx(sk: &SecretKey, to: &str, amount: u64) -> Transaction {
     let secp = Secp256k1::new();
     let pk = PublicKey::from_secret_key(&secp, sk);
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64;
+    // Use UTC timestamp to avoid local timezone offsets influencing tx time
+    let ts = Utc::now().timestamp_millis();
     let preimage = format!("{}|{}|{}|{}|{}", 1, pk, to, amount, ts);
     let hash = Sha256::digest(preimage.as_bytes());
     let sig = secp.sign_ecdsa(Message::from_digest(hash.into()), sk);
@@ -450,10 +449,8 @@ fn tx_info(store: &mut PeerStore, id: &str) {
 
 // ---------- Faucet ----------
 fn faucet(store: &mut PeerStore, addr: &str) {
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
+    // Faucet uses seconds precision; use UTC to keep it timezone-agnostic
+    let ts = Utc::now().timestamp();
     let mut nonce = [0u8; 8];
     use rand::RngCore;
     rand::rng().fill_bytes(&mut nonce);
