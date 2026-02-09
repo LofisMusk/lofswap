@@ -387,7 +387,7 @@
       <div class="card subtle" style="margin-top:12px;">
         <div class="flex-between" style="margin-bottom:8px"><h2 style="margin:0">Recent Transactions</h2></div>
         <table>
-          <thead><tr><th>From</th><th>To</th><th>Amount</th><th>Block</th></tr></thead>
+          <thead><tr><th>From</th><th>To</th><th>Amount</th><th>Block</th><th>Confirming nodes</th><th></th></tr></thead>
           <tbody id="recentTx"></tbody>
         </table>
       </div>
@@ -400,6 +400,33 @@
         </table>
       </div>
     </div>
+  </div>
+
+  <div class="section" id="txDetail" style="display:none;">
+    <div class="flex-between">
+      <h2>Transaction Details</h2>
+      <div class="row">
+        <button id="txClose">Close</button>
+      </div>
+    </div>
+    <div class="card subtle" style="margin-top:10px;">
+      <div class="stat-label">Confirmation header</div>
+      <div class="stat-value"><span id="txConfirmingNodes">-</span> nodes</div>
+      <div class="stat-sub">Peers that reached the block height containing this transaction.</div>
+    </div>
+    <div class="row muted" style="margin-top:8px;">
+      <div>Confirmations: <span id="txConfirmations">-</span></div>
+      <div>Block: <span id="txBlock">-</span></div>
+      <div>Timestamp: <span id="txTime">-</span></div>
+    </div>
+    <div class="muted" style="margin-top:8px;">TXID: <span id="txId" class="mono wrap">-</span></div>
+    <div class="row muted" style="margin-top:8px;">
+      <div>From: <span id="txFrom" class="mono wrap">-</span></div>
+      <div>To: <span id="txTo" class="mono wrap">-</span></div>
+      <div>Amount: <span id="txAmount">-</span></div>
+    </div>
+    <div class="muted" style="margin-top:8px;">Signature: <span id="txSig" class="mono wrap">-</span></div>
+    <div class="muted" id="txNotFound" style="margin-top:10px; display:none;">Transaction not found.</div>
   </div>
 
   <script>
@@ -524,6 +551,19 @@
     const peerBlocksEl = document.getElementById("peerBlocks");
     const peerNotFoundEl = document.getElementById("peerNotFound");
     const peerCloseBtn = document.getElementById("peerClose");
+    const txDetail = document.getElementById("txDetail");
+    const txIdEl = document.getElementById("txId");
+    const txFromEl = document.getElementById("txFrom");
+    const txToEl = document.getElementById("txTo");
+    const txAmountEl = document.getElementById("txAmount");
+    const txBlockEl = document.getElementById("txBlock");
+    const txTimeEl = document.getElementById("txTime");
+    const txSigEl = document.getElementById("txSig");
+    const txConfirmationsEl = document.getElementById("txConfirmations");
+    const txConfirmingNodesEl = document.getElementById("txConfirmingNodes");
+    const txNotFoundEl = document.getElementById("txNotFound");
+    const txCloseBtn = document.getElementById("txClose");
+    let selectedTxId = null;
 
     const formatTs = (ts) => {
       if (!ts && ts !== 0) return "-";
@@ -550,6 +590,23 @@
       }
       if (show && blockDetail) {
         blockDetail.style.display = "none";
+      }
+      if (show && txDetail) {
+        txDetail.style.display = "none";
+      }
+    };
+
+    const showTxDetail = (show) => {
+      if (!txDetail) return;
+      txDetail.style.display = show ? "block" : "none";
+      if (!show) {
+        txNotFoundEl.style.display = "none";
+      }
+      if (show && blockDetail) {
+        blockDetail.style.display = "none";
+      }
+      if (show && peerDetail) {
+        peerDetail.style.display = "none";
       }
     };
 
@@ -680,6 +737,47 @@
       renderPeer(detail);
     };
 
+    const renderTx = (tx) => {
+      if (!txDetail) return;
+      if (!tx) {
+        txIdEl.textContent = "-";
+        txFromEl.textContent = "-";
+        txToEl.textContent = "-";
+        txAmountEl.textContent = "-";
+        txBlockEl.textContent = "-";
+        txTimeEl.textContent = "-";
+        txSigEl.textContent = "-";
+        txConfirmationsEl.textContent = "-";
+        txConfirmingNodesEl.textContent = "-";
+        txNotFoundEl.style.display = "block";
+        return;
+      }
+      txNotFoundEl.style.display = "none";
+      txIdEl.textContent = tx.txid || "-";
+      txFromEl.textContent = tx.from || "(reward)";
+      txToEl.textContent = tx.to || "-";
+      txAmountEl.textContent = tx.amount != null ? tx.amount : "-";
+      const blockStr = tx.blockHash
+        ? "#" + (tx.blockIndex ?? "-") + " · " + shorten(tx.blockHash, 22)
+        : (tx.blockIndex != null ? "#" + tx.blockIndex : "-");
+      txBlockEl.textContent = blockStr;
+      txTimeEl.textContent = tx.timestamp != null ? formatTs(tx.timestamp) : "-";
+      txSigEl.textContent = tx.signature || "-";
+      txConfirmationsEl.textContent = tx.confirmations != null ? tx.confirmations : "-";
+      txConfirmingNodesEl.textContent = tx.confirmingNodes != null ? tx.confirmingNodes : "-";
+    };
+
+    const openTx = async (txid, push) => {
+      if (!txid) return;
+      selectedTxId = txid;
+      if (push) {
+        history.pushState({ txid }, "", "/tx/" + encodeURIComponent(txid));
+      }
+      showTxDetail(true);
+      const detail = await apiGetJson("/api/tx/" + encodeURIComponent(txid), null);
+      renderTx(detail);
+    };
+
     async function refreshNode(){
       const tag = document.getElementById("networkTag");
       try {
@@ -788,16 +886,24 @@
 
         const txBody = document.getElementById("recentTx");
         txBody.innerHTML = "";
-        const recentTxs = [];
-        chain.slice(-10).forEach(b => {
-          (b.transactions || []).forEach(tx => {
-            recentTxs.push({ ...tx, block: b.index });
-          });
-        });
-        recentTxs.slice(-15).reverse().forEach(tx => {
+        const recentResp = await apiGetJson("/api/transactions/recent", { transactions: [] });
+        const txList = (recentResp && recentResp.transactions) ? recentResp.transactions : [];
+        if (!selectedTxId && txList.length) {
+          selectedTxId = txList[0].txid;
+          openTx(selectedTxId, false);
+        }
+        txList.slice(0, 15).forEach(tx => {
           const tr = document.createElement("tr");
-          tr.innerHTML = "<td class=mono>" + shorten(tx.from || "(reward)", 14) + "</td><td class=mono>" + shorten(tx.to, 14) + "</td><td>" + tx.amount + "</td><td>#" + tx.block + "</td>";
+          const link = "<a class='block-link' href='/tx/" + encodeURIComponent(tx.txid) + "' data-txid='" + tx.txid + "'>open</a>";
+          tr.innerHTML = "<td class=mono>" + shorten(tx.from || "(reward)", 14) + "</td><td class=mono>" + shorten(tx.to || "-", 14) + "</td><td>" + (tx.amount ?? "-") + "</td><td>#"+ (tx.blockIndex ?? "-") +"</td><td>" + (tx.confirmingNodes ?? 0) + "</td><td>" + link + "</td>";
           txBody.appendChild(tr);
+          const a = tr.querySelector("a[data-txid]");
+          if (a) {
+            a.onclick = (ev) => {
+              ev.preventDefault();
+              openTx(tx.txid, true);
+            };
+          }
         });
 
         tag.textContent = "Online";
@@ -825,6 +931,12 @@
         history.pushState({}, "", "/");
       };
     }
+    if (txCloseBtn) {
+      txCloseBtn.onclick = () => {
+        showTxDetail(false);
+        history.pushState({}, "", "/");
+      };
+    }
 
     window.addEventListener("popstate", () => {
       const path = window.location.pathname || "/";
@@ -838,6 +950,10 @@
           openPeer(decodeURIComponent(parts[1]), false);
           return;
         }
+        if (parts[0] === "tx" && parts[1]) {
+          openTx(decodeURIComponent(parts[1]), false);
+          return;
+        }
         if (parts[0]) {
           openBlock(parts[0], false);
           return;
@@ -845,6 +961,7 @@
       }
       showBlockDetail(false);
       showPeerDetail(false);
+      showTxDetail(false);
     });
 
     (async function(){
@@ -857,6 +974,8 @@
           openBlock(decodeURIComponent(parts[1]), false);
         } else if (parts[0] === "peer" && parts[1]) {
           openPeer(decodeURIComponent(parts[1]), false);
+        } else if (parts[0] === "tx" && parts[1]) {
+          openTx(decodeURIComponent(parts[1]), false);
         } else if (parts[0]) {
           openBlock(parts[0], false);
         }

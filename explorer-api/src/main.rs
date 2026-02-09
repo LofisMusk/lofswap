@@ -341,6 +341,53 @@ fn consensus_state(state: &AppState) -> (Vec<Value>, Telemetry) {
     (chosen, telemetry)
 }
 
+fn find_tx(chain: &[Value], txid: &str) -> Option<(Value, usize, String)> {
+    for block in chain {
+        if let Some(Value::Array(txs)) = block.get("transactions") {
+            for tx in txs {
+                if tx
+                    .get("txid")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s == txid)
+                    .unwrap_or(false)
+                {
+                    let idx = block.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                    let hash = block
+                        .get("hash")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    return Some((tx.clone(), idx, hash));
+                }
+            }
+        }
+    }
+    None
+}
+
+fn confirming_nodes(block_idx: Option<usize>, peers: &[Value], local_height: usize) -> usize {
+    let idx = match block_idx {
+        Some(v) => v,
+        None => return 0,
+    };
+    let mut count = 0usize;
+    if local_height >= idx {
+        count += 1; // local node
+    }
+    for p in peers {
+        let online = p.get("online").and_then(|v| v.as_bool()).unwrap_or(false);
+        let h = p
+            .get("height")
+            .or_else(|| p.get("peer_height"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
+        if online && h >= idx {
+            count += 1;
+        }
+    }
+    count
+}
+
 fn peer_status_list(state: &AppState, consensus_height: usize) -> Vec<Value> {
     let peers = load_peers(&state.data_dir, state.self_peer.as_deref());
     let mut list = Vec::new();
@@ -572,6 +619,93 @@ async fn api_peers(State(state): State<Arc<AppState>>) -> Response {
     json_response(StatusCode::OK, serde_json::json!({ "peers": peers }))
 }
 
+async fn api_tx_recent(State(state): State<Arc<AppState>>) -> Response {
+    let state_clone = state.clone();
+    let (chain, meta) = tokio::task::spawn_blocking(move || consensus_state(&state_clone))
+        .await
+        .unwrap_or_else(|_| (Vec::new(), Telemetry::default()));
+    let peers = peer_status_list(&state, meta.consensus_height);
+
+    // take txs from last ~20 blocks
+    let mut list: Vec<Value> = Vec::new();
+    for block in chain.iter().rev().take(20) {
+        let idx = block.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        let bhash = block
+            .get("hash")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        if let Some(Value::Array(txs)) = block.get("transactions") {
+            for tx in txs {
+                let txid = tx
+                    .get("txid")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let conf_nodes = confirming_nodes(Some(idx), &peers, meta.height_local);
+                let confirmations = meta
+                    .consensus_height
+                    .saturating_sub(idx);
+                list.push(serde_json::json!({
+                    "txid": txid,
+                    "from": tx.get("from").cloned().unwrap_or(Value::Null),
+                    "to": tx.get("to").cloned().unwrap_or(Value::Null),
+                    "amount": tx.get("amount").cloned().unwrap_or(Value::Null),
+                    "signature": tx.get("signature").cloned().unwrap_or(Value::Null),
+                    "timestamp": tx.get("timestamp").cloned().unwrap_or(Value::Null),
+                    "blockIndex": idx,
+                    "blockHash": bhash,
+                    "confirmations": confirmations,
+                    "confirmingNodes": conf_nodes,
+                    "lastChecked": now_ms(),
+                }));
+            }
+        }
+    }
+
+    list.sort_by_key(|v| v.get("timestamp").and_then(|t| t.as_i64()).unwrap_or(0));
+    list.reverse();
+
+    json_response(StatusCode::OK, serde_json::json!({ "transactions": list }))
+}
+
+async fn api_tx(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(txid): axum::extract::Path<String>,
+) -> Response {
+    let state_clone = state.clone();
+    let (chain, meta) = tokio::task::spawn_blocking(move || consensus_state(&state_clone))
+        .await
+        .unwrap_or_else(|_| (Vec::new(), Telemetry::default()));
+    let peers = peer_status_list(&state, meta.consensus_height);
+
+    if let Some((tx, idx, hash)) = find_tx(&chain, &txid) {
+        let conf_nodes = confirming_nodes(Some(idx), &peers, meta.height_local);
+        let confirmations = meta.consensus_height.saturating_sub(idx);
+        return json_response(
+            StatusCode::OK,
+            serde_json::json!({
+                "txid": txid,
+                "from": tx.get("from").cloned().unwrap_or(Value::Null),
+                "to": tx.get("to").cloned().unwrap_or(Value::Null),
+                "amount": tx.get("amount").cloned().unwrap_or(Value::Null),
+                "signature": tx.get("signature").cloned().unwrap_or(Value::Null),
+                "timestamp": tx.get("timestamp").cloned().unwrap_or(Value::Null),
+                "blockIndex": idx,
+                "blockHash": hash,
+                "confirmations": confirmations,
+                "confirmingNodes": conf_nodes,
+                "lastChecked": now_ms(),
+            }),
+        );
+    }
+
+    json_response(
+        StatusCode::NOT_FOUND,
+        serde_json::json!({ "error": "tx not found", "txid": txid }),
+    )
+}
+
 async fn peer_detail(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(peer): axum::extract::Path<String>,
@@ -732,6 +866,8 @@ async fn main() {
         .route("/api/peer/:peer", get(peer_detail))
         .route("/api/network", get(api_network))
         .route("/api/peers", get(api_peers))
+        .route("/api/transactions/recent", get(api_tx_recent))
+        .route("/api/tx/:txid", get(api_tx))
         .route("/chain", get(chain))
         .route("/chain/latest-tx", get(latest_tx))
         .route("/block/:hash", get(block_by_hash))
