@@ -135,3 +135,42 @@ jobs:
               sudo systemctl status explorer-api --no-pager || true
               echo "Deploy zakończony"
           EOF
+
+      - name: Deploy to Server 1 (prepare remote dir, SCP + extract + restart)
+        run: |
+          echo "Deploying to ${{ secrets.SSH_HOST1 }} as ${{ secrets.SSH_USER }}"
+
+          # Ensure remote directory exists and show info (helps diagnose 'Is a directory' errors)
+          ssh -v \
+            -i ~/.ssh/deploy_key \
+            -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=15 \
+            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST1 }} "mkdir -p '${{ secrets.DEPLOY_PATH }}' && echo 'Remote directory info:' && ls -ld '${{ secrets.DEPLOY_PATH }}' || true"
+
+          # Kopiowanie z explicit filename to avoid ambiguity
+          scp -v \
+            -i ~/.ssh/deploy_key \
+            -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=15 \
+            "./node-cli.zip" ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST1 }}:"${{ secrets.DEPLOY_PATH }}/node-cli.zip"
+
+          # Zdalne wykonanie komend: unzip, restart
+          ssh -v \
+            -i ~/.ssh/deploy_key \
+            -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=15 \
+            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST1 }} << 'EOF'
+              echo "Połączono z serwerem"
+              cd ${{ secrets.DEPLOY_PATH }} || { echo "Błąd: katalog nie istnieje"; exit 1; }
+              unzip -o node-cli.zip || { echo "Błąd unzip"; exit 1; }
+              rm -f node-cli.zip
+              chmod +x node-cli
+              chmod +x explorer-api/explorer-api || true
+              sudo systemctl daemon-reload
+              sudo systemctl restart node-cli || { echo "Restart nieudany"; exit 1; }
+              sudo systemctl restart explorer-api || { echo "Restart explorer-api nieudany"; exit 1; }
+              sleep 2
+              sudo systemctl status node-cli --no-pager || true
+              sudo systemctl status explorer-api --no-pager || true
+              echo "Deploy zakończony"
+          EOF
