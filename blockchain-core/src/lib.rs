@@ -11,10 +11,12 @@ pub struct Transaction {
     // spec fields (frozen v0.9)
     pub version: u8,
     pub timestamp: i64,
-    pub from: String,
+    pub from: String, // now address (LFS...), legacy: raw pubkey
     pub to: String,
     pub amount: u64,
     pub signature: String,
+    #[serde(default)]
+    pub pubkey: String, // sender pubkey for signature verification
     // Computed identifier. Optional when deserializing from older nodes.
     #[serde(default)]
     pub txid: String,
@@ -24,14 +26,25 @@ impl Transaction {
     pub fn compute_txid(&self) -> String {
         // txid is sha256 of canonical preimage; keep signature scheme compatibility
         // Note: Signing preimage stays (from||to||amount). txid adds timestamp to reduce collisions.
-        let preimage = format!(
-            "{}|{}|{}|{}|{}",
-            self.version, self.from, self.to, self.amount, self.timestamp
-        );
+        let signer = if !self.pubkey.is_empty() {
+            self.pubkey.as_str()
+        } else {
+            self.from.as_str()
+        };
+        let preimage = format!("{}|{}|{}|{}|{}", self.version, signer, self.to, self.amount, self.timestamp);
         let mut hasher = Sha256::new();
         hasher.update(preimage.as_bytes());
         format!("{:x}", hasher.finalize())
     }
+}
+
+// Helper to convert pubkey string to address used by wallets (LFS + bs58 of sha256(pubkey)[0..20])
+pub fn pubkey_to_address(pubkey: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(pubkey.as_bytes());
+    let digest = hasher.finalize();
+    let addr = bs58::encode(&digest[..20]).into_string();
+    format!("LFS{}", addr)
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

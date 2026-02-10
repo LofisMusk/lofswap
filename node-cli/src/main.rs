@@ -111,7 +111,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     use crate::storage::remove_data_file;
-    use blockchain_core::{Block, Transaction};
+    use blockchain_core::{Block, Transaction, pubkey_to_address};
     use secp256k1::{PublicKey, Secp256k1, SecretKey};
     use serde_json;
 
@@ -129,9 +129,10 @@ mod tests {
             version: 1,
             timestamp: 0,
             from: String::new(),
-            to: from_pk.clone(),
+            to: pubkey_to_address(&from_pk),
             amount: 100,
             signature: "reward".into(),
+            pubkey: String::new(),
             txid: String::new(),
         };
         let chain = vec![Block {
@@ -161,9 +162,10 @@ mod tests {
             version: 1,
             timestamp: 0,
             from: String::new(),
-            to: from_pk.clone(),
+            to: pubkey_to_address(&from_pk),
             amount: 100,
             signature: "reward".into(),
+            pubkey: String::new(),
             txid: String::new(),
         };
         let fake_block = Block {

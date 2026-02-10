@@ -707,6 +707,7 @@ dependencies = [
 name = "blockchain-core"
 version = "0.1.0"
 dependencies = [
+ "bs58",
  "chrono",
  "serde",
  "serde_json",
@@ -2793,6 +2794,7 @@ name = "node-cli"
 version = "0.1.0"
 dependencies = [
  "blockchain-core",
+ "bs58",
  "clap",
  "ctrlc",
  "easy-upnp",

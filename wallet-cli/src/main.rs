@@ -18,10 +18,12 @@ use std::time::{Duration, Instant};
 static BOOTSTRAP_NODES: &[&str] = &["89.168.107.239:6000", "79.76.116.108:6000"];
 
 const MEMPOOL_FILE: &str = "wallet_mempool.json";
+const RAW_SIGNED_FILE: &str = "wallet_raw_signed.json";
 const WALLET_CACHE_DIR: &str = "wallet-cache";
 const PEER_CACHE_FILE: &str = "wallet-cache/peers_cache.json";
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(800);
 const OFFLINE_GRACE: Duration = Duration::from_secs(10);
+const MIN_BROADCAST_PEERS: usize = 2;
 
 // ---------- Default wallet ----------
 const DEFAULT_WALLET: &str = ".default_wallet";
@@ -244,49 +246,51 @@ fn save_pending_transactions(list: &[Transaction]) {
     let _ = fs::write(MEMPOOL_FILE, body.join("\n"));
 }
 
+// ---------- Raw signed (not yet broadcast) ----------
+fn append_raw_signed(tx: &Transaction) {
+    let _ = OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(RAW_SIGNED_FILE)
+        .and_then(|mut f| writeln!(f, "{}", serde_json::to_string(tx).unwrap_or_default()));
+}
+
+fn load_raw_signed() -> Vec<Transaction> {
+    let Ok(content) = fs::read_to_string(RAW_SIGNED_FILE) else {
+        return Vec::new();
+    };
+    serde_json::Deserializer::from_str(&content)
+        .into_iter::<Transaction>()
+        .filter_map(Result::ok)
+        .collect()
+}
+
+fn save_raw_signed(list: &[Transaction]) {
+    let body: Vec<String> = list
+        .iter()
+        .filter_map(|tx| serde_json::to_string(tx).ok())
+        .collect();
+    let _ = fs::write(RAW_SIGNED_FILE, body.join("\n"));
+}
+
 fn broadcast(store: &mut PeerStore, json: &[u8], min_peers: usize) {
+    let required = min_peers.max(MIN_BROADCAST_PEERS);
     let peers = store.online_peers();
     if peers.is_empty() {
         println!("No reachable peers; transaction saved to local mempool");
         append_pending(json);
-        wait_and_retry_pending(store, min_peers);
+        wait_and_retry_pending(store, required);
         return;
     }
-    if peers.len() < min_peers {
-        if peers.len() == 1 {
-            println!("Only one peer is online.");
-            if !confirm("Send anyway? (y/N)") {
-                println!("Transaction saved to local mempool");
-                append_pending(json);
-                wait_and_retry_pending(store, min_peers);
-                return;
-            }
-            let p = &peers[0];
-            match send_tx_and_get_reply(p, json) {
-                Ok(Some(reply)) => {
-                    if let Some(reason) = reply.strip_prefix("reject: ") {
-                        println!("TX rejected by {}: {}", p, reason);
-                        println!("TX rejected: {}", reason);
-                        return;
-                    }
-                    println!("Sent to {}", p);
-                }
-                Ok(None) => println!("Sent to {}", p),
-                Err(_) => println!("Failed to connect to {}", p),
-            }
-            println!("Transaction kept in local mempool until 2+ peers are online");
-            append_pending(json);
-            wait_and_retry_pending(store, min_peers);
-            return;
-        }
-        println!("Fewer than {min_peers} peers online; transaction saved to local mempool");
+    if peers.len() < required {
+        println!("Fewer than {required} peers online; transaction saved to local mempool");
         append_pending(json);
-        wait_and_retry_pending(store, min_peers);
+        wait_and_retry_pending(store, required);
         return;
     }
     let mut rng = rand::rng();
     let selected: Vec<String> = peers
-        .choose_multiple(&mut rng, min_peers.max(1))
+        .choose_multiple(&mut rng, required)
         .cloned()
         .collect();
     let mut ok = 0;
@@ -313,13 +317,13 @@ fn broadcast(store: &mut PeerStore, json: &[u8], min_peers: usize) {
         println!("TX rejected: {}", reason);
         return;
     }
-    if ok < min_peers {
-        println!("Sent to {ok}/{min_peers} peers; transaction saved to local mempool");
+    if ok < required {
+        println!("Sent to {ok}/{required} peers; transaction saved to local mempool");
         append_pending(json);
-        wait_and_retry_pending(store, min_peers);
+        wait_and_retry_pending(store, required);
     } else {
         // If sent successfully, try to broadcast any pending transactions
-        try_broadcast_pending(store, min_peers);
+        try_broadcast_pending(store, required);
     }
 }
 
@@ -327,18 +331,23 @@ fn broadcast(store: &mut PeerStore, json: &[u8], min_peers: usize) {
 fn build_tx(sk: &SecretKey, to: &str, amount: u64) -> Transaction {
     let secp = Secp256k1::new();
     let pk = PublicKey::from_secret_key(&secp, sk);
-    // Use UTC timestamp to avoid local timezone offsets influencing tx time
-    let ts = Utc::now().timestamp_millis();
+    // Use UTC seconds (consistent with blocks and faucet)
+    let ts = Utc::now().timestamp();
+    let from_addr = format!(
+        "LFS{}",
+        bs58::encode(&Sha256::digest(&pk.serialize())[..20]).into_string()
+    );
     let preimage = format!("{}|{}|{}|{}|{}", 1, pk, to, amount, ts);
     let hash = Sha256::digest(preimage.as_bytes());
     let sig = secp.sign_ecdsa(Message::from_digest(hash.into()), sk);
     let mut tx = Transaction {
         version: 1,
         timestamp: ts,
-        from: pk.to_string(),
+        from: from_addr,
         to: to.into(),
         amount,
         signature: hex::encode(sig.serialize_compact()),
+        pubkey: pk.to_string(),
         txid: String::new(),
     };
     tx.txid = tx.compute_txid();
@@ -349,7 +358,7 @@ fn send_default(store: &mut PeerStore, to: &str, amount: u64, min_peers: usize) 
     if let Some(sk) = load_default_wallet() {
         let tx = build_tx(&sk, to, amount);
         let payload = serde_json::to_vec(&tx).unwrap();
-        broadcast(store, &payload, min_peers);
+        broadcast(store, &payload, min_peers.max(MIN_BROADCAST_PEERS));
     } else {
         println!("No default wallet");
     }
@@ -358,7 +367,41 @@ fn send_priv(store: &mut PeerStore, priv_hex: &str, to: &str, amount: u64, min_p
     if let Ok(sk) = SecretKey::from_byte_array(hex_to_32(priv_hex)) {
         let tx = build_tx(&sk, to, amount);
         let payload = serde_json::to_vec(&tx).unwrap();
-        broadcast(store, &payload, min_peers);
+        broadcast(store, &payload, min_peers.max(MIN_BROADCAST_PEERS));
+    } else {
+        println!("Invalid private key");
+    }
+}
+
+fn sign_raw_default(to: &str, amount: u64) {
+    if let Some(sk) = load_default_wallet() {
+        let tx = build_tx(&sk, to, amount);
+        println!("Signed (not sent):");
+        println!("  From : {}", tx.from);
+        println!("  To   : {}", tx.to);
+        println!("  Amt  : {}", tx.amount);
+        println!("  Time : {} (UTC)", tx.timestamp);
+        println!("  TxID : {}", tx.txid);
+        println!("  Sig  : {}", tx.signature);
+        append_raw_signed(&tx);
+        println!("Saved to raw-signed list. Use `send-raw {}` to broadcast.", tx.signature);
+    } else {
+        println!("No default wallet");
+    }
+}
+
+fn sign_raw_priv(priv_hex: &str, to: &str, amount: u64) {
+    if let Ok(sk) = SecretKey::from_byte_array(hex_to_32(priv_hex)) {
+        let tx = build_tx(&sk, to, amount);
+        println!("Signed (not sent):");
+        println!("  From : {}", tx.from);
+        println!("  To   : {}", tx.to);
+        println!("  Amt  : {}", tx.amount);
+        println!("  Time : {} (UTC)", tx.timestamp);
+        println!("  TxID : {}", tx.txid);
+        println!("  Sig  : {}", tx.signature);
+        append_raw_signed(&tx);
+        println!("Saved to raw-signed list. Use `send-raw {}` to broadcast.", tx.signature);
     } else {
         println!("Invalid private key");
     }
@@ -479,6 +522,7 @@ fn faucet(store: &mut PeerStore, addr: &str) {
         to: addr.into(),
         amount: 1000,
         signature: reward_sig,
+        pubkey: String::new(),
         txid: String::new(),
     };
     tx.txid = tx.compute_txid();
@@ -524,7 +568,7 @@ fn export_dat(path: &str) {
 // ---------- CLI ----------
 fn help() {
     println!(
-        "Commands:\n  help\n  create-wallet\n  import-priv <hex>\n  import-dat <file>\n  export-dat <file>\n  default-wallet\n  send <to?> <amount> [n=2]   (defaults to your address)\n  send-priv <priv> <to> <amount> [n=2]\n  force-send <signature>     (resend a pending tx even if only one peer is reachable)\n  balance [address]          (defaults to your address)\n  faucet [address]           (defaults to your address)\n  tx-history [address]       (defaults to your address)\n  tx-info <txid|signature>\n  list-peers\n  print-mempool\n  exit"
+        "Commands:\n  help\n  create-wallet\n  import-priv <hex>\n  import-dat <file>\n  export-dat <file>\n  default-wallet\n  send <to?> <amount> [n=2]   (defaults to your address)\n  send-priv <priv> <to> <amount> [n=2]\n  sign-raw <to> <amount>      (sign only; save locally)\n  sign-raw-priv <priv> <to> <amount>\n  send-raw <sig|txid> [n=2]   (broadcast a stored raw tx)\n  raw_tx                      (list stored raw-signed txs)\n  force-send <signature>     (resend a pending tx even if only one peer is reachable)\n  balance [address]          (defaults to your address)\n  faucet [address]           (defaults to your address)\n  tx-history [address]       (defaults to your address)\n  tx-info <txid|signature>\n  list-peers\n  print-mempool\n  exit"
     );
 }
 
@@ -624,13 +668,28 @@ fn show_mempool() {
     }
 }
 
+fn show_raw_signed() {
+    let list = load_raw_signed();
+    if list.is_empty() {
+        println!("No raw-signed transactions");
+        return;
+    }
+    for tx in list {
+        println!(
+            "RAW: {} -> {} amount: {} sig: {} txid: {} ts: {}",
+            tx.from, tx.to, tx.amount, tx.signature, tx.txid, tx.timestamp
+        );
+    }
+}
+
 fn try_broadcast_pending(store: &mut PeerStore, min_peers: usize) {
     let mut pending = load_pending_transactions();
     if pending.is_empty() {
         return;
     }
+    let required = min_peers.max(MIN_BROADCAST_PEERS);
     let peers = store.online_peers();
-    if pending_should_wait(min_peers, peers.len()) {
+    if pending_should_wait(required, peers.len()) {
         return;
     }
     let mut sent = 0;
@@ -651,13 +710,13 @@ fn try_broadcast_pending(store: &mut PeerStore, min_peers: usize) {
                 Ok(None) => ok += 1,
                 Err(_) => {}
             }
-            if ok >= min_peers {
+            if ok >= required {
                 break;
             }
         }
         if rejected {
             false
-        } else if ok >= min_peers {
+        } else if ok >= required {
             sent += 1;
             false
         } else {
@@ -739,6 +798,64 @@ fn broadcast_force(store: &mut PeerStore, json: &[u8]) -> (usize, Option<String>
         }
     }
     (ok, rejected_reason)
+}
+
+fn send_raw(store: &mut PeerStore, sig_or_txid: &str, min_peers: usize) {
+    let mut list = load_raw_signed();
+    if list.is_empty() {
+        println!("No raw-signed transactions stored");
+        return;
+    }
+    let Some(idx) = list.iter().position(|tx| {
+        tx.signature.eq_ignore_ascii_case(sig_or_txid) || tx.txid.eq_ignore_ascii_case(sig_or_txid)
+    }) else {
+        println!("No raw transaction with that signature/txid");
+        return;
+    };
+    let tx = list[idx].clone();
+    let payload = serde_json::to_vec(&tx).unwrap();
+    let peers_online = store.online_peers();
+    if peers_online.is_empty() {
+        println!("No reachable peers; raw tx kept");
+        return;
+    }
+    let mut rng = rand::rng();
+    let selected: Vec<String> = peers_online
+        .choose_multiple(&mut rng, min_peers.max(1).min(peers_online.len()))
+        .cloned()
+        .collect();
+    let mut ok = 0;
+    let mut rejected_reason: Option<String> = None;
+    for p in &selected {
+        match send_tx_and_get_reply(p, &payload) {
+            Ok(Some(reply)) => {
+                if let Some(reason) = reply.strip_prefix("reject: ") {
+                    println!("TX rejected by {}: {}", p, reason);
+                    rejected_reason = Some(reason.to_string());
+                    break;
+                } else {
+                    println!("Sent to {}", p);
+                    ok += 1;
+                }
+            }
+            Ok(None) => {
+                println!("Sent to {}", p);
+                ok += 1;
+            }
+            Err(_) => println!("Failed to connect to {}", p),
+        }
+    }
+    if let Some(reason) = rejected_reason {
+        println!("TX rejected: {}", reason);
+        return;
+    }
+    if ok > 0 {
+        println!("Broadcast raw tx to {ok} peer(s)");
+        list.remove(idx);
+        save_raw_signed(&list);
+    } else {
+        println!("Broadcast failed; raw tx kept");
+    }
 }
 
 fn force_send(store: &mut PeerStore, signature: &str) {
@@ -854,6 +971,38 @@ fn main() {
                     println!("Invalid amount");
                 }
             }
+            "sign-raw" => {
+                match (a.get(1), a.get(2)) {
+                    (Some(to), Some(amt)) => {
+                        if let Ok(amount) = amt.parse() {
+                            sign_raw_default(to, amount);
+                        } else {
+                            println!("Invalid amount");
+                        }
+                    }
+                    _ => println!("Usage: sign-raw <to> <amount>"),
+                }
+            }
+            "sign-raw-priv" if a.len() >= 4 => {
+                if let Ok(amount) = a[3].parse() {
+                    sign_raw_priv(a[1], a[2], amount);
+                } else {
+                    println!("Invalid amount");
+                }
+            }
+            "send-raw" => {
+                match a.get(1) {
+                    Some(sig) => {
+                        let n = a
+                            .get(2)
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(MIN_BROADCAST_PEERS);
+                        send_raw(&mut peers, sig, n);
+                    }
+                    None => println!("Usage: send-raw <sig|txid> [n_peers]"),
+                }
+            }
+            "raw_tx" => show_raw_signed(),
             "force-send" if a.len() == 2 => {
                 force_send(&mut peers, a[1]);
             }

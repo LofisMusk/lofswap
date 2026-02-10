@@ -105,6 +105,10 @@ pub fn build_tx(sk: &SecretKey, to: &str, amount: u64) -> Transaction {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64;
+    let from_addr = format!(
+        "LFS{}",
+        bs58::encode(&Sha256::digest(&pk.serialize())[..20]).into_string()
+    );
     let preimage = format!("{}|{}|{}|{}|{}", 1, pk, to, amount, ts);
     let hash = Sha256::digest(preimage.as_bytes());
     let msg = Message::from_digest(hash.into());
@@ -112,10 +116,11 @@ pub fn build_tx(sk: &SecretKey, to: &str, amount: u64) -> Transaction {
     let mut tx = Transaction {
         version: 1,
         timestamp: ts,
-        from: pk.to_string(),
+        from: from_addr,
         to: to.into(),
         amount,
         signature: hex::encode(sig.serialize_compact()),
+        pubkey: pk.to_string(),
         txid: String::new(),
     };
     tx.txid = tx.compute_txid();
