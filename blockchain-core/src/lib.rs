@@ -41,6 +41,7 @@ impl Transaction {
 // Helper to convert pubkey string to address used by wallets (LFS + bs58 of sha256(pubkey)[0..20])
 pub fn pubkey_to_address(pubkey: &str) -> String {
     let mut hasher = Sha256::new();
+    // hash the canonical pubkey string (compressed hex) so wallet/node agree
     hasher.update(pubkey.as_bytes());
     let digest = hasher.finalize();
     let addr = bs58::encode(&digest[..20]).into_string();

@@ -6,7 +6,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use blockchain_core::{Block, Transaction};
+use blockchain_core::{pubkey_to_address, Block, Transaction};
 use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
 use serde_json::{self, Value};
 use sha2::{Digest, Sha256};
@@ -105,10 +105,7 @@ pub fn build_tx(sk: &SecretKey, to: &str, amount: u64) -> Transaction {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64;
-    let from_addr = format!(
-        "LFS{}",
-        bs58::encode(&Sha256::digest(&pk.serialize())[..20]).into_string()
-    );
+    let from_addr = pubkey_to_address(&pk.to_string());
     let preimage = format!("{}|{}|{}|{}|{}", 1, pk, to, amount, ts);
     let hash = Sha256::digest(preimage.as_bytes());
     let msg = Message::from_digest(hash.into());

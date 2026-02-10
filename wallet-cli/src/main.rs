@@ -2,7 +2,7 @@
 //! Wallet CLI - relies only on `peers.json` + `BOOTSTRAP_NODES`.
 //! All legacy `nodes.txt` paths have been removed.
 
-use blockchain_core::{Block, Transaction};
+use blockchain_core::{pubkey_to_address, Block, Transaction};
 use rand::seq::IndexedRandom;
 use secp256k1::{Message, PublicKey, Secp256k1, SecretKey, ecdsa::Signature};
 use serde_json;
@@ -333,10 +333,7 @@ fn build_tx(sk: &SecretKey, to: &str, amount: u64) -> Transaction {
     let pk = PublicKey::from_secret_key(&secp, sk);
     // Use UTC seconds (consistent with blocks and faucet)
     let ts = Utc::now().timestamp();
-    let from_addr = format!(
-        "LFS{}",
-        bs58::encode(&Sha256::digest(&pk.serialize())[..20]).into_string()
-    );
+    let from_addr = pubkey_to_address(&pk.to_string());
     let preimage = format!("{}|{}|{}|{}|{}", 1, pk, to, amount, ts);
     let hash = Sha256::digest(preimage.as_bytes());
     let sig = secp.sign_ecdsa(Message::from_digest(hash.into()), sk);
