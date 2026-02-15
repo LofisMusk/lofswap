@@ -7,15 +7,19 @@ use tokio::{
 };
 
 use crate::{
-    chain::{load_valid_transactions, save_chain},
+    chain::{load_valid_transactions, prune_mempool, save_chain},
     p2p::{broadcast_to_known_nodes, get_my_address},
-    storage::remove_data_file,
     wallet::read_mempool,
 };
 
 pub async fn mine_block(blockchain: &Arc<Mutex<Vec<Block>>>) {
-    let mut chain = blockchain.lock().await;
-    let transactions = load_valid_transactions(&chain);
+    let (transactions, prev_hash, target_index) = {
+        let chain = blockchain.lock().await;
+        let txs = load_valid_transactions(&chain);
+        let prev_hash = chain.last().map(|b| b.hash.clone()).unwrap_or_default();
+        let target_index = chain.len() as u64;
+        (txs, prev_hash, target_index)
+    };
 
     if transactions.is_empty() {
         println!("No valid transactions to mine");
@@ -29,22 +33,37 @@ pub async fn mine_block(blockchain: &Arc<Mutex<Vec<Block>>>) {
         pending_len
     );
 
-    let _ = remove_data_file("mempool.json");
-    let prev_hash = chain.last().unwrap().hash.clone();
     let miner = get_my_address()
         .await
         .unwrap_or_else(|| "unknown".to_string());
-    let block = Block::new(chain.len() as u64, transactions, prev_hash, miner);
+    let block = Block::new(target_index, transactions, prev_hash.clone(), miner);
 
     println!("[mining] solved block: {}", block.hash);
-    chain.push(block.clone());
+    {
+        let mut chain = blockchain.lock().await;
+        let current_index = chain.len() as u64;
+        let current_prev_hash = chain.last().map(|b| b.hash.clone()).unwrap_or_default();
 
-    if let Err(e) = save_chain(&chain) {
-        eprintln!("Failed to save chain: {}", e);
-        return;
+        if current_index != target_index || current_prev_hash != prev_hash {
+            println!(
+                "[mining] stale solved block discarded (target_idx={}, current_idx={})",
+                target_index, current_index
+            );
+            return;
+        }
+
+        chain.push(block.clone());
+
+        if let Err(e) = save_chain(&chain) {
+            eprintln!("Failed to save chain: {}", e);
+            return;
+        }
+
+        if let Err(e) = prune_mempool(&chain) {
+            eprintln!("Failed to prune mempool after mining: {}", e);
+        }
     }
 
-    drop(chain);
     broadcast_to_known_nodes(&block).await;
     // brief pause to avoid immediate tight loop after broadcasting
     sleep(Duration::from_secs(1)).await;

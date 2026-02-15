@@ -18,8 +18,8 @@ use crate::{
     ACTIVE_CONNECTIONS, BOOTSTRAP_NODES, BUFFER_SIZE, LISTEN_PORT, MAX_CONNECTIONS, NODE_ID,
     NODE_VERSION, OBSERVED_IP,
     chain::{
-        calculate_balance, is_tx_valid, load_peers, next_nonce_for_address, save_chain, save_peers,
-        validate_block, validate_chain,
+        calculate_balance, is_tx_valid, load_peers, next_nonce_for_address, prune_mempool,
+        save_chain, save_peers, validate_block, validate_chain,
     },
     errors::NodeError,
     storage::{data_path, ensure_parent_dir},
@@ -407,6 +407,9 @@ async fn handle_block(
     println!("Received new block {}", block.hash);
     chain.push(block.clone());
     save_chain(&chain)?;
+    if let Err(e) = prune_mempool(&chain) {
+        eprintln!("Failed to prune mempool after accepting block: {}", e);
+    }
     drop(chain);
     broadcast_to_known_nodes(&block).await;
     stream
@@ -950,6 +953,8 @@ pub async fn sync_chain(
                         *local = peer_chain;
                         if let Err(e) = save_chain(&local) {
                             eprintln!("Failed to save chain: {}", e);
+                        } else if let Err(e) = prune_mempool(&local) {
+                            eprintln!("Failed to prune mempool after sync: {}", e);
                         } else if verbose {
                             println!("Sync completed with {} (force={})", peer, force);
                             println!("[SYNC] Reorg: {} -> {}", old_len, local.len());
