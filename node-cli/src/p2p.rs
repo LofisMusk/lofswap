@@ -330,26 +330,26 @@ async fn handle_transaction(
     let chain = blockchain.lock().await;
     match is_tx_valid(&tx, &chain) {
         Ok(()) => {
-        println!("TX added to mempool");
-        let path = data_path("mempool.json");
-        let file = ensure_parent_dir(&path)
-            .and_then(|_| OpenOptions::new().create(true).append(true).open(&path))
-            .or_else(|_| {
-                OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open("mempool.json")
-            });
+            println!("TX added to mempool");
+            let path = data_path("mempool.json");
+            let file = ensure_parent_dir(&path)
+                .and_then(|_| OpenOptions::new().create(true).append(true).open(&path))
+                .or_else(|_| {
+                    OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open("mempool.json")
+                });
 
-        if let Ok(mut f) = file {
-            let tx_json = serde_json::to_string(&tx)
-                .map_err(|e| NodeError::SerializationError(e.to_string()))?;
-            let _ = writeln!(f, "{}", tx_json);
-        }
-        stream
-            .write_all(b"ok")
-            .await
-            .map_err(|e| NodeError::NetworkError(e.to_string()))?;
+            if let Ok(mut f) = file {
+                let tx_json = serde_json::to_string(&tx)
+                    .map_err(|e| NodeError::SerializationError(e.to_string()))?;
+                let _ = writeln!(f, "{}", tx_json);
+            }
+            stream
+                .write_all(b"ok")
+                .await
+                .map_err(|e| NodeError::NetworkError(e.to_string()))?;
         }
         Err(e) => {
             let reason = e.to_string();
@@ -734,7 +734,10 @@ async fn fetch_peer_info_once(peer: &str) -> Option<PeerInfo> {
                 Ok(0) => None,
                 Ok(n) => parse_peer_info(&buf[..n]),
                 Err(e) => {
-                    debug_log(&format!("Failed to read handshake data from {}: {}", peer, e));
+                    debug_log(&format!(
+                        "Failed to read handshake data from {}: {}",
+                        peer, e
+                    ));
                     None
                 }
             };
@@ -905,7 +908,10 @@ pub async fn sync_chain(
             if let Ok(n) = stream.read(&mut buffer).await {
                 if let Ok(peer_chain) = serde_json::from_slice::<Vec<Block>>(&buffer[..n]) {
                     if let Err(e) = validate_chain(&peer_chain) {
-                        log(&format!("[SYNC] Rejecting invalid chain from {}: {}", peer, e));
+                        log(&format!(
+                            "[SYNC] Rejecting invalid chain from {}: {}",
+                            peer, e
+                        ));
                         continue;
                     }
                     let local_len = blockchain.lock().await.len();
@@ -921,7 +927,9 @@ pub async fn sync_chain(
                         } else {
                             println!(
                                 "[SYNC] Background sync updated from {} ({} -> {})",
-                                peer, old_len, local.len()
+                                peer,
+                                old_len,
+                                local.len()
                             );
                         }
                         return;

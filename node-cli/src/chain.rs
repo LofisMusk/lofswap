@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use blockchain_core::{pubkey_to_address, Block, Transaction, DEFAULT_DIFFICULTY_ZEROS};
+use blockchain_core::{Block, DEFAULT_DIFFICULTY_ZEROS, Transaction, pubkey_to_address};
 use secp256k1::{Message, PublicKey, Secp256k1, ecdsa::Signature};
 use serde_json;
 use sha2::{Digest, Sha256};
@@ -12,14 +12,15 @@ use crate::{
 };
 
 pub fn calculate_balance(address: &str, chain: &[Block]) -> i128 {
+    let address = normalize_addr(address);
     let mut balance = 0i128;
     for block in chain {
         for tx in &block.transactions {
-            let to_addr = normalize_addr(&tx.to, &tx.pubkey);
+            let to_addr = normalize_addr(&tx.to);
             if to_addr == address {
                 balance += tx.amount as i128;
             }
-            let from_addr = normalize_addr(&tx.from, &tx.pubkey);
+            let from_addr = normalize_addr(&tx.from);
             if from_addr == address && !tx.from.is_empty() {
                 balance -= tx.amount as i128;
             }
@@ -32,8 +33,8 @@ pub fn calculate_balances(chain: &[Block]) -> HashMap<String, i128> {
     let mut balances = HashMap::new();
     for block in chain {
         for tx in &block.transactions {
-            let from_addr = normalize_addr(&tx.from, &tx.pubkey);
-            let to_addr = normalize_addr(&tx.to, &tx.pubkey);
+            let from_addr = normalize_addr(&tx.from);
+            let to_addr = normalize_addr(&tx.to);
             if !from_addr.is_empty() {
                 *balances.entry(from_addr).or_insert(0) -= tx.amount as i128;
             }
@@ -47,11 +48,11 @@ pub fn is_tx_valid(tx: &Transaction, chain: &[Block]) -> Result<(), NodeError> {
     is_tx_valid_inner(tx, chain, true)
 }
 
-fn normalize_addr(addr: &str, pubkey: &str) -> String {
-    if addr.starts_with("LFS") {
+fn normalize_addr(addr: &str) -> String {
+    if addr.is_empty() {
+        String::new()
+    } else if addr.starts_with("LFS") {
         addr.to_string()
-    } else if !pubkey.is_empty() {
-        pubkey_to_address(pubkey)
     } else {
         pubkey_to_address(addr)
     }
@@ -69,41 +70,30 @@ fn derive_pubkey(tx: &Transaction) -> Result<String, NodeError> {
     }
 }
 
-fn is_tx_valid_inner(tx: &Transaction, chain: &[Block], check_mempool_duplicates: bool) -> Result<(), NodeError> {
-    if tx.from.is_empty() && tx.signature.starts_with("reward") {
-        return Ok(());
-    }
-
-    let secp = Secp256k1::new();
+fn resolve_sender(tx: &Transaction) -> Result<(String, PublicKey, String), NodeError> {
     let pubkey_str = derive_pubkey(tx)?;
     let from_pubkey = pubkey_str
         .parse::<PublicKey>()
         .map_err(|_| NodeError::ValidationError("Invalid public key".to_string()))?;
-
-    let from_addr = normalize_addr(&tx.from, &tx.pubkey);
     let derived_addr = pubkey_to_address(&pubkey_str);
-    if !from_addr.is_empty() && from_addr != derived_addr {
+    if !tx.from.is_empty() && normalize_addr(&tx.from) != derived_addr {
         return Err(NodeError::ValidationError(
             "From address does not match pubkey".to_string(),
         ));
     }
+    Ok((pubkey_str, from_pubkey, derived_addr))
+}
 
-    let balance = calculate_balance(&derived_addr, chain);
-    let pending_out: u128 = read_mempool()
-        .into_iter()
-        .filter(|m| {
-            let m_from = normalize_addr(&m.from, &m.pubkey);
-            m_from == derived_addr && !m_from.is_empty()
-        })
-        .map(|m| m.amount as u128)
-        .sum();
-    if (tx.amount as u128) + pending_out > (balance.max(0) as u128) {
-        return Err(NodeError::ValidationError(
-            "Insufficient balance (pending)".to_string(),
-        ));
-    }
-
-    let msg_data_new = format!("{}|{}|{}|{}|{}", tx.version, pubkey_str, tx.to, tx.amount, tx.timestamp);
+fn verify_tx_signature(
+    tx: &Transaction,
+    pubkey_str: &str,
+    from_pubkey: &PublicKey,
+) -> Result<(), NodeError> {
+    let secp = Secp256k1::new();
+    let msg_data_new = format!(
+        "{}|{}|{}|{}|{}",
+        tx.version, pubkey_str, tx.to, tx.amount, tx.timestamp
+    );
     let hash_new = Sha256::digest(msg_data_new.as_bytes());
     let msg_new = Message::from_digest(hash_new.into());
 
@@ -115,6 +105,43 @@ fn is_tx_valid_inner(tx: &Transaction, chain: &[Block], check_mempool_duplicates
         .map_err(|_| NodeError::ValidationError("Invalid signature format".to_string()))?;
     let signature = Signature::from_compact(&sig_bytes)
         .map_err(|_| NodeError::ValidationError("Invalid signature".to_string()))?;
+
+    secp.verify_ecdsa(msg_new, &signature, from_pubkey)
+        .or_else(|_| secp.verify_ecdsa(msg_legacy, &signature, from_pubkey))
+        .map_err(|_| NodeError::ValidationError("Signature verification failed".to_string()))?;
+    Ok(())
+}
+
+fn is_tx_valid_inner(
+    tx: &Transaction,
+    chain: &[Block],
+    check_mempool_duplicates: bool,
+) -> Result<(), NodeError> {
+    if tx.from.is_empty() {
+        if tx.signature.starts_with("reward") {
+            return Ok(());
+        }
+        return Err(NodeError::ValidationError(
+            "Missing sender for non-reward transaction".to_string(),
+        ));
+    }
+
+    let (pubkey_str, from_pubkey, derived_addr) = resolve_sender(tx)?;
+
+    let balance = calculate_balance(&derived_addr, chain);
+    let pending_out: u128 = read_mempool()
+        .into_iter()
+        .filter(|m| {
+            let m_from = normalize_addr(&m.from);
+            m_from == derived_addr && !m_from.is_empty()
+        })
+        .map(|m| m.amount as u128)
+        .sum();
+    if (tx.amount as u128) + pending_out > (balance.max(0) as u128) {
+        return Err(NodeError::ValidationError(
+            "Insufficient balance (pending)".to_string(),
+        ));
+    }
 
     let already_exists_in_chain = chain.iter().any(|block| {
         block.transactions.iter().any(|btx| {
@@ -136,60 +163,36 @@ fn is_tx_valid_inner(tx: &Transaction, chain: &[Block], check_mempool_duplicates
         ));
     }
 
-
-    secp.verify_ecdsa(msg_new, &signature, &from_pubkey)
-        .or_else(|_| secp.verify_ecdsa(msg_legacy, &signature, &from_pubkey))
-        .map_err(|_| NodeError::ValidationError("Signature verification failed".to_string()))?;
+    verify_tx_signature(tx, &pubkey_str, &from_pubkey)?;
 
     Ok(())
 }
 
-fn verify_tx_signature(tx: &Transaction) -> Result<(), NodeError> {
-    if tx.from.is_empty() && tx.signature.starts_with("reward") {
-        return Ok(());
-    }
-
-    let secp = Secp256k1::new();
-    let from_pubkey = tx
-        .from
-        .parse::<PublicKey>()
-        .map_err(|_| NodeError::ValidationError("Invalid public key".to_string()))?;
-
-    let msg_data_new = format!(
-        "{}|{}|{}|{}|{}",
-        tx.version, tx.from, tx.to, tx.amount, tx.timestamp
-    );
-    let hash_new = Sha256::digest(msg_data_new.as_bytes());
-    let msg_new = Message::from_digest(hash_new.into());
-
-    let msg_data_legacy = format!("{}{}{}", tx.from, tx.to, tx.amount);
-    let hash_legacy = Sha256::digest(msg_data_legacy.as_bytes());
-    let msg_legacy = Message::from_digest(hash_legacy.into());
-
-    let sig_bytes = hex::decode(&tx.signature)
-        .map_err(|_| NodeError::ValidationError("Invalid signature format".to_string()))?;
-    let signature = Signature::from_compact(&sig_bytes)
-        .map_err(|_| NodeError::ValidationError("Invalid signature".to_string()))?;
-
-    secp.verify_ecdsa(msg_new, &signature, &from_pubkey)
-        .or_else(|_| secp.verify_ecdsa(msg_legacy, &signature, &from_pubkey))
-        .map_err(|_| NodeError::ValidationError("Signature verification failed".to_string()))?;
-    Ok(())
-}
-
-pub fn validate_block(block: &Block, prev: Option<&Block>, chain: &[Block]) -> Result<(), NodeError> {
+pub fn validate_block(
+    block: &Block,
+    prev: Option<&Block>,
+    chain: &[Block],
+) -> Result<(), NodeError> {
     if let Some(prev) = prev {
         if block.index != prev.index + 1 {
-            return Err(NodeError::ValidationError("Invalid block index".to_string()));
+            return Err(NodeError::ValidationError(
+                "Invalid block index".to_string(),
+            ));
         }
         if block.previous_hash != prev.hash {
-            return Err(NodeError::ValidationError("Invalid previous hash".to_string()));
+            return Err(NodeError::ValidationError(
+                "Invalid previous hash".to_string(),
+            ));
         }
         if block.timestamp < prev.timestamp {
-            return Err(NodeError::ValidationError("Block timestamp regressed".to_string()));
+            return Err(NodeError::ValidationError(
+                "Block timestamp regressed".to_string(),
+            ));
         }
     } else if block.index != 0 {
-        return Err(NodeError::ValidationError("Invalid genesis index".to_string()));
+        return Err(NodeError::ValidationError(
+            "Invalid genesis index".to_string(),
+        ));
     }
 
     let calculated = block.calculate_hash();
@@ -203,7 +206,9 @@ pub fn validate_block(block: &Block, prev: Option<&Block>, chain: &[Block]) -> R
         return Err(NodeError::ValidationError("Invalid difficulty".to_string()));
     }
     if !block.hash.starts_with(&"0".repeat(difficulty)) {
-        return Err(NodeError::ValidationError("Proof-of-work invalid".to_string()));
+        return Err(NodeError::ValidationError(
+            "Proof-of-work invalid".to_string(),
+        ));
     }
 
     let mut balances = calculate_balances(chain);
@@ -229,24 +234,35 @@ pub fn validate_block(block: &Block, prev: Option<&Block>, chain: &[Block]) -> R
         }
 
         if chain_seen.contains(&txid) || chain_seen.contains(&tx.signature) {
-            return Err(NodeError::ValidationError("Duplicate transaction".to_string()));
+            return Err(NodeError::ValidationError(
+                "Duplicate transaction".to_string(),
+            ));
         }
 
         if !seen.insert(txid.clone()) || !seen.insert(tx.signature.clone()) {
-            return Err(NodeError::ValidationError("Duplicate transaction".to_string()));
+            return Err(NodeError::ValidationError(
+                "Duplicate transaction".to_string(),
+            ));
         }
 
-        verify_tx_signature(tx)?;
-
-        if !tx.from.is_empty() {
-            let from_addr = normalize_addr(&tx.from, &tx.pubkey);
+        if tx.from.is_empty() {
+            if !tx.signature.starts_with("reward") {
+                return Err(NodeError::ValidationError(
+                    "Invalid reward transaction".to_string(),
+                ));
+            }
+        } else {
+            let (pubkey_str, from_pubkey, from_addr) = resolve_sender(tx)?;
+            verify_tx_signature(tx, &pubkey_str, &from_pubkey)?;
             let bal = balances.entry(from_addr.clone()).or_insert(0);
             if *bal < tx.amount as i128 {
-                return Err(NodeError::ValidationError("Insufficient balance".to_string()));
+                return Err(NodeError::ValidationError(
+                    "Insufficient balance".to_string(),
+                ));
             }
             *bal -= tx.amount as i128;
         }
-        let to_addr = normalize_addr(&tx.to, &tx.pubkey);
+        let to_addr = normalize_addr(&tx.to);
         *balances.entry(to_addr).or_insert(0) += tx.amount as i128;
     }
 
@@ -313,15 +329,19 @@ pub fn load_valid_transactions(chain: &[Block]) -> Vec<Transaction> {
 
     for tx in parsed {
         if tx.from.is_empty() {
-            valid_txs.push(tx);
+            if tx.signature.starts_with("reward") {
+                valid_txs.push(tx);
+            }
             continue;
         }
 
         if is_tx_valid_inner(&tx, chain, false).is_ok() {
-            let balance = balances.entry(tx.from.clone()).or_insert(0);
+            let from_addr = normalize_addr(&tx.from);
+            let to_addr = normalize_addr(&tx.to);
+            let balance = balances.entry(from_addr).or_insert(0);
             if *balance >= tx.amount as i128 {
                 *balance -= tx.amount as i128;
-                *balances.entry(tx.to.clone()).or_insert(0) += tx.amount as i128;
+                *balances.entry(to_addr).or_insert(0) += tx.amount as i128;
                 valid_txs.push(tx);
             }
         }

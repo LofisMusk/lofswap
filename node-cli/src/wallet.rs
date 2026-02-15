@@ -6,7 +6,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use blockchain_core::{pubkey_to_address, Block, Transaction};
+use blockchain_core::{Block, Transaction, pubkey_to_address};
 use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
 use serde_json::{self, Value};
 use sha2::{Digest, Sha256};

@@ -195,6 +195,73 @@ mod tests {
             _ => panic!("unexpected error"),
         }
     }
+
+    #[test]
+    fn block_with_lfs_sender_and_pubkey_validates() {
+        tmp_clean_files();
+        let from_sk = SecretKey::from_byte_array([3u8; 32]).unwrap();
+        let from_pk = PublicKey::from_secret_key(&Secp256k1::new(), &from_sk).to_string();
+        let reward = Transaction {
+            version: 1,
+            timestamp: 0,
+            from: String::new(),
+            to: pubkey_to_address(&from_pk),
+            amount: 100,
+            signature: "reward".into(),
+            pubkey: String::new(),
+            txid: String::new(),
+        };
+        let genesis = Block {
+            version: 1,
+            index: 0,
+            timestamp: 0,
+            transactions: vec![reward],
+            previous_hash: "0".into(),
+            nonce: 0,
+            hash: "0000genesis".into(),
+            miner: "test".into(),
+            difficulty: 4,
+        };
+        let chain = vec![genesis.clone()];
+
+        let tx = wallet::build_tx(&from_sk, "LFS11111111111111111111", 10);
+        let block = Block::new(1, vec![tx], genesis.hash.clone(), "miner".into());
+        assert!(chain::validate_block(&block, Some(&genesis), &chain).is_ok());
+    }
+
+    #[test]
+    fn raw_pubkey_recipient_is_credited_to_recipient_address() {
+        tmp_clean_files();
+        let from_sk = SecretKey::from_byte_array([4u8; 32]).unwrap();
+        let to_sk = SecretKey::from_byte_array([5u8; 32]).unwrap();
+        let from_pk = PublicKey::from_secret_key(&Secp256k1::new(), &from_sk).to_string();
+        let to_pk = PublicKey::from_secret_key(&Secp256k1::new(), &to_sk).to_string();
+        let to_addr = pubkey_to_address(&to_pk);
+        let reward = Transaction {
+            version: 1,
+            timestamp: 0,
+            from: String::new(),
+            to: pubkey_to_address(&from_pk),
+            amount: 100,
+            signature: "reward".into(),
+            pubkey: String::new(),
+            txid: String::new(),
+        };
+        let tx = wallet::build_tx(&from_sk, &to_pk, 25);
+        let chain = vec![Block {
+            version: 1,
+            index: 0,
+            timestamp: 0,
+            transactions: vec![reward, tx],
+            previous_hash: "0".into(),
+            nonce: 0,
+            hash: "0000".into(),
+            miner: "test".into(),
+            difficulty: 4,
+        }];
+
+        assert_eq!(chain::calculate_balance(&to_addr, &chain), 25);
+    }
 }
 
 fn load_or_create_node_id() -> String {

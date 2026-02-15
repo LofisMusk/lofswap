@@ -2,13 +2,13 @@
 //! Wallet CLI - relies only on `peers.json` + `BOOTSTRAP_NODES`.
 //! All legacy `nodes.txt` paths have been removed.
 
-use blockchain_core::{pubkey_to_address, Block, Transaction};
+use blockchain_core::{Block, Transaction, pubkey_to_address};
+use chrono::Utc;
 use rand::seq::IndexedRandom;
 use secp256k1::{Message, PublicKey, Secp256k1, SecretKey, ecdsa::Signature};
 use serde_json;
 use sha2::{Digest, Sha256};
 use std::env;
-use chrono::Utc;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -48,10 +48,7 @@ fn load_default_wallet() -> Option<SecretKey> {
 fn default_address() -> Option<String> {
     load_default_wallet().map(|sk| {
         let pk = PublicKey::from_secret_key(&Secp256k1::new(), &sk);
-        format!(
-            "LFS{}",
-            bs58::encode(&Sha256::digest(&pk.serialize())[..20]).into_string()
-        )
+        pubkey_to_address(&pk.to_string())
     })
 }
 
@@ -162,7 +159,10 @@ impl PeerStore {
                 online.push(peer.clone());
                 self.offline_since.remove(&peer);
             } else {
-                let since = self.offline_since.entry(peer.clone()).or_insert_with(Instant::now);
+                let since = self
+                    .offline_since
+                    .entry(peer.clone())
+                    .or_insert_with(Instant::now);
                 if since.elapsed() >= OFFLINE_GRACE {
                     to_remove.push(peer.clone());
                 }
@@ -289,10 +289,7 @@ fn broadcast(store: &mut PeerStore, json: &[u8], min_peers: usize) {
         return;
     }
     let mut rng = rand::rng();
-    let selected: Vec<String> = peers
-        .choose_multiple(&mut rng, required)
-        .cloned()
-        .collect();
+    let selected: Vec<String> = peers.choose_multiple(&mut rng, required).cloned().collect();
     let mut ok = 0;
     let mut rejected_reason: Option<String> = None;
     for p in &selected {
@@ -381,7 +378,10 @@ fn sign_raw_default(to: &str, amount: u64) {
         println!("  TxID : {}", tx.txid);
         println!("  Sig  : {}", tx.signature);
         append_raw_signed(&tx);
-        println!("Saved to raw-signed list. Use `send-raw {}` to broadcast.", tx.signature);
+        println!(
+            "Saved to raw-signed list. Use `send-raw {}` to broadcast.",
+            tx.signature
+        );
     } else {
         println!("No default wallet");
     }
@@ -398,7 +398,10 @@ fn sign_raw_priv(priv_hex: &str, to: &str, amount: u64) {
         println!("  TxID : {}", tx.txid);
         println!("  Sig  : {}", tx.signature);
         append_raw_signed(&tx);
-        println!("Saved to raw-signed list. Use `send-raw {}` to broadcast.", tx.signature);
+        println!(
+            "Saved to raw-signed list. Use `send-raw {}` to broadcast.",
+            tx.signature
+        );
     } else {
         println!("Invalid private key");
     }
@@ -582,10 +585,7 @@ fn create_wallet() {
     println!("Created new wallet.");
     println!("Private: {}", hex::encode(sk.secret_bytes()));
     println!("Public : {}", pk);
-    println!(
-        "Address: LFS{}",
-        bs58::encode(&Sha256::digest(&pk.serialize())[..20]).into_string()
-    );
+    println!("Address: {}", pubkey_to_address(&pk.to_string()));
 }
 
 // Import a private key and set it as default
@@ -596,10 +596,7 @@ fn import_priv(priv_hex: &str) {
                 let pk = PublicKey::from_secret_key(&Secp256k1::new(), &sk);
                 save_default_wallet(&sk);
                 println!("Imported private key. Public Key: {}", pk);
-                println!(
-                    "Address: LFS{}",
-                    bs58::encode(&Sha256::digest(&pk.serialize())[..20]).into_string()
-                );
+                println!("Address: {}", pubkey_to_address(&pk.to_string()));
             }
             Err(_) => println!("Invalid private key"),
         },
@@ -627,7 +624,11 @@ fn list_peers(store: &mut PeerStore) {
     let peers = store.as_slice();
     println!("Available peers ({}):", peers.len());
     for p in peers {
-        let status = if online.contains(p) { "online" } else { "offline" };
+        let status = if online.contains(p) {
+            "online"
+        } else {
+            "offline"
+        };
         println!("- {} ({})", p, status);
     }
     if peers.is_empty() {
@@ -642,7 +643,10 @@ fn wait_and_retry_pending(store: &mut PeerStore, min_peers: usize) {
     if min_peers < 2 {
         return;
     }
-    println!("Retrying pending transactions in {}s", OFFLINE_GRACE.as_secs());
+    println!(
+        "Retrying pending transactions in {}s",
+        OFFLINE_GRACE.as_secs()
+    );
     std::thread::sleep(OFFLINE_GRACE);
     try_broadcast_pending(store, min_peers);
 }
@@ -926,10 +930,7 @@ fn main() {
                     let pk = PublicKey::from_secret_key(&Secp256k1::new(), &sk);
                     println!("Private: {}", hex::encode(sk.secret_bytes()));
                     println!("Public : {}", pk);
-                    println!(
-                        "Address: LFS{}",
-                        bs58::encode(&Sha256::digest(&pk.serialize())[..20]).into_string()
-                    );
+                    println!("Address: {}", pubkey_to_address(&pk.to_string()));
                 } else {
                     println!("No default wallet");
                 }
@@ -968,18 +969,16 @@ fn main() {
                     println!("Invalid amount");
                 }
             }
-            "sign-raw" => {
-                match (a.get(1), a.get(2)) {
-                    (Some(to), Some(amt)) => {
-                        if let Ok(amount) = amt.parse() {
-                            sign_raw_default(to, amount);
-                        } else {
-                            println!("Invalid amount");
-                        }
+            "sign-raw" => match (a.get(1), a.get(2)) {
+                (Some(to), Some(amt)) => {
+                    if let Ok(amount) = amt.parse() {
+                        sign_raw_default(to, amount);
+                    } else {
+                        println!("Invalid amount");
                     }
-                    _ => println!("Usage: sign-raw <to> <amount>"),
                 }
-            }
+                _ => println!("Usage: sign-raw <to> <amount>"),
+            },
             "sign-raw-priv" if a.len() >= 4 => {
                 if let Ok(amount) = a[3].parse() {
                     sign_raw_priv(a[1], a[2], amount);
@@ -987,18 +986,16 @@ fn main() {
                     println!("Invalid amount");
                 }
             }
-            "send-raw" => {
-                match a.get(1) {
-                    Some(sig) => {
-                        let n = a
-                            .get(2)
-                            .and_then(|s| s.parse().ok())
-                            .unwrap_or(MIN_BROADCAST_PEERS);
-                        send_raw(&mut peers, sig, n);
-                    }
-                    None => println!("Usage: send-raw <sig|txid> [n_peers]"),
+            "send-raw" => match a.get(1) {
+                Some(sig) => {
+                    let n = a
+                        .get(2)
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(MIN_BROADCAST_PEERS);
+                    send_raw(&mut peers, sig, n);
                 }
-            }
+                None => println!("Usage: send-raw <sig|txid> [n_peers]"),
+            },
             "raw_tx" => show_raw_signed(),
             "force-send" if a.len() == 2 => {
                 force_send(&mut peers, a[1]);

@@ -31,7 +31,10 @@ impl Transaction {
         } else {
             self.from.as_str()
         };
-        let preimage = format!("{}|{}|{}|{}|{}", self.version, signer, self.to, self.amount, self.timestamp);
+        let preimage = format!(
+            "{}|{}|{}|{}|{}",
+            self.version, signer, self.to, self.amount, self.timestamp
+        );
         let mut hasher = Sha256::new();
         hasher.update(preimage.as_bytes());
         format!("{:x}", hasher.finalize())

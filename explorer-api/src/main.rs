@@ -9,8 +9,7 @@ use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
-    env,
-    fs,
+    env, fs,
     io::{Read, Write},
     net::{SocketAddr, TcpStream, UdpSocket},
     path::{Path, PathBuf},
@@ -158,8 +157,13 @@ fn ping_peer(peer: &str, timeout: Duration) -> bool {
 }
 
 fn ping_peer_timed(peer: &str, timeout: Duration) -> Option<Duration> {
-    tcp_request_timed(peer, "/ping", timeout)
-        .and_then(|(s, dur)| if s.trim() == "pong" { Some(dur) } else { None })
+    tcp_request_timed(peer, "/ping", timeout).and_then(|(s, dur)| {
+        if s.trim() == "pong" {
+            Some(dur)
+        } else {
+            None
+        }
+    })
 }
 
 fn chain_from_peer(peer: &str, timeout: Duration) -> Option<Vec<Value>> {
@@ -254,14 +258,21 @@ fn consensus_state(state: &AppState) -> (Vec<Value>, Telemetry) {
         }
     }
 
-    let local_chain_val = read_json_file(&data_path(&state.data_dir, "blockchain.json"), Value::Array(vec![]));
+    let local_chain_val = read_json_file(
+        &data_path(&state.data_dir, "blockchain.json"),
+        Value::Array(vec![]),
+    );
     let local_chain = match local_chain_val {
         Value::Array(list) => list,
         _ => vec![],
     };
 
     let peers_all = load_peers(&state.data_dir, state.self_peer.as_deref());
-    let peers = peers_all.iter().take(state.max_peers).cloned().collect::<Vec<_>>();
+    let peers = peers_all
+        .iter()
+        .take(state.max_peers)
+        .cloned()
+        .collect::<Vec<_>>();
 
     let mut chains = vec![("local".to_string(), local_chain.clone())];
     let mut chain_ok = 0;
@@ -523,7 +534,10 @@ async fn node_ip() -> Response {
     )
 }
 
-async fn address_balance(State(state): State<Arc<AppState>>, axum::extract::Path(addr): axum::extract::Path<String>) -> Response {
+async fn address_balance(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(addr): axum::extract::Path<String>,
+) -> Response {
     let (chain, _) = tokio::task::spawn_blocking(move || consensus_state(&state))
         .await
         .unwrap_or_else(|_| (Vec::new(), Telemetry::default()));
@@ -534,7 +548,10 @@ async fn address_balance(State(state): State<Arc<AppState>>, axum::extract::Path
     )
 }
 
-async fn address_txs(State(state): State<Arc<AppState>>, axum::extract::Path(addr): axum::extract::Path<String>) -> Response {
+async fn address_txs(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(addr): axum::extract::Path<String>,
+) -> Response {
     let (chain, _) = tokio::task::spawn_blocking(move || consensus_state(&state))
         .await
         .unwrap_or_else(|_| (Vec::new(), Telemetry::default()));
@@ -583,7 +600,10 @@ async fn api_network(State(state): State<Arc<AppState>>) -> Response {
     let hash_rate = estimate_hashrate(difficulty, avg_block_time_sec);
 
     let peers_list = peer_status_list(&state, consensus_height);
-    let active_peers = peers_list.iter().filter(|p| p.get("online").and_then(|v| v.as_bool()) == Some(true)).count();
+    let active_peers = peers_list
+        .iter()
+        .filter(|p| p.get("online").and_then(|v| v.as_bool()) == Some(true))
+        .count();
 
     json_response(
         StatusCode::OK,
@@ -643,9 +663,7 @@ async fn api_tx_recent(State(state): State<Arc<AppState>>) -> Response {
                     .unwrap_or_default()
                     .to_string();
                 let conf_nodes = confirming_nodes(Some(idx), &peers, meta.height_local);
-                let confirmations = meta
-                    .consensus_height
-                    .saturating_sub(idx);
+                let confirmations = meta.consensus_height.saturating_sub(idx);
                 list.push(serde_json::json!({
                     "txid": txid,
                     "from": tx.get("from").cloned().unwrap_or(Value::Null),
@@ -854,7 +872,9 @@ async fn main() {
         max_peers,
         cache_ttl,
         cache: Arc::new(Mutex::new(Cache::default())),
-        self_peer: env::var("EXPLORER_SELF_PEER").ok().filter(|v| !v.trim().is_empty()),
+        self_peer: env::var("EXPLORER_SELF_PEER")
+            .ok()
+            .filter(|v| !v.trim().is_empty()),
     });
 
     let app = Router::new()
