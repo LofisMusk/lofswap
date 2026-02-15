@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use blockchain_core::{Block, DEFAULT_DIFFICULTY_ZEROS, Transaction, pubkey_to_address};
+use blockchain_core::{Block, CHAIN_ID, DEFAULT_DIFFICULTY_ZEROS, Transaction, pubkey_to_address};
 use secp256k1::{Message, PublicKey, Secp256k1, ecdsa::Signature};
 use serde_json;
 use sha2::{Digest, Sha256};
@@ -96,6 +96,16 @@ fn validate_tx_common(tx: &Transaction) -> Result<(), NodeError> {
             "Invalid recipient address".to_string(),
         ));
     }
+    if tx.version >= 3 {
+        let chain_id = if tx.chain_id.is_empty() {
+            CHAIN_ID
+        } else {
+            tx.chain_id.as_str()
+        };
+        if chain_id != CHAIN_ID {
+            return Err(NodeError::ValidationError("Wrong chain id".to_string()));
+        }
+    }
     Ok(())
 }
 
@@ -173,6 +183,18 @@ fn verify_tx_signature(
     from_pubkey: &PublicKey,
 ) -> Result<(), NodeError> {
     let secp = Secp256k1::new();
+    let chain_id = if tx.chain_id.is_empty() {
+        CHAIN_ID
+    } else {
+        tx.chain_id.as_str()
+    };
+    let msg_data_v3 = format!(
+        "{}|{}|{}|{}|{}|{}|{}",
+        tx.version, chain_id, pubkey_str, tx.to, tx.amount, tx.timestamp, tx.nonce
+    );
+    let hash_v3 = Sha256::digest(msg_data_v3.as_bytes());
+    let msg_v3 = Message::from_digest(hash_v3.into());
+
     let msg_data_v2 = format!(
         "{}|{}|{}|{}|{}|{}",
         tx.version, pubkey_str, tx.to, tx.amount, tx.timestamp, tx.nonce
@@ -196,7 +218,9 @@ fn verify_tx_signature(
     let signature = Signature::from_compact(&sig_bytes)
         .map_err(|_| NodeError::ValidationError("Invalid signature".to_string()))?;
 
-    let verified = if tx.version >= 2 {
+    let verified = if tx.version >= 3 {
+        secp.verify_ecdsa(msg_v3, &signature, from_pubkey)
+    } else if tx.version >= 2 {
         secp.verify_ecdsa(msg_v2, &signature, from_pubkey)
     } else {
         secp.verify_ecdsa(msg_v1, &signature, from_pubkey)
@@ -406,14 +430,24 @@ pub fn save_chain(chain: &[Block]) -> Result<(), NodeError> {
 pub fn load_chain() -> Result<Vec<Block>, NodeError> {
     match read_data_file("blockchain.json").map_err(|e| NodeError::NetworkError(e.to_string()))? {
         Some(json) => {
-            serde_json::from_str(&json).map_err(|e| NodeError::SerializationError(e.to_string()))
+            let mut chain: Vec<Block> = serde_json::from_str(&json)
+                .map_err(|e| NodeError::SerializationError(e.to_string()))?;
+            if chain.is_empty() {
+                return Ok(vec![Block::genesis()]);
+            }
+            // One-time normalization for old local stores that had time-based genesis.
+            if chain.len() == 1 {
+                let candidate = &chain[0];
+                if candidate.index == 0
+                    && candidate.previous_hash == "0"
+                    && candidate.transactions.is_empty()
+                {
+                    chain[0] = Block::genesis();
+                }
+            }
+            Ok(chain)
         }
-        None => Ok(vec![Block::new(
-            0,
-            vec![],
-            "0".to_string(),
-            "genesis".to_string(),
-        )]),
+        None => Ok(vec![Block::genesis()]),
     }
 }
 

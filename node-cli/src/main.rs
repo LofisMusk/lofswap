@@ -122,7 +122,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     use crate::storage::{remove_data_file, write_data_file};
-    use blockchain_core::{Block, Transaction, pubkey_to_address};
+    use blockchain_core::{Block, CHAIN_ID, Transaction, pubkey_to_address};
     use once_cell::sync::Lazy;
     use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
     use serde_json;
@@ -144,11 +144,15 @@ mod tests {
         let secp = Secp256k1::new();
         let pk = PublicKey::from_secret_key(&secp, sk);
         let from = pubkey_to_address(&pk.to_string());
-        let preimage = format!("{}|{}|{}|{}|{}|{}", 2, pk, to, amount, ts, nonce);
+        let preimage = format!(
+            "{}|{}|{}|{}|{}|{}|{}",
+            3, CHAIN_ID, pk, to, amount, ts, nonce
+        );
         let hash = Sha256::digest(preimage.as_bytes());
         let sig = secp.sign_ecdsa(Message::from_digest(hash.into()), sk);
         let mut tx = Transaction {
-            version: 2,
+            version: 3,
+            chain_id: CHAIN_ID.to_string(),
             timestamp: ts,
             from,
             to: to.into(),
@@ -170,6 +174,7 @@ mod tests {
         let from_pk = PublicKey::from_secret_key(&Secp256k1::new(), &sk).to_string();
         let reward = Transaction {
             version: 1,
+            chain_id: CHAIN_ID.to_string(),
             timestamp: 0,
             from: String::new(),
             to: pubkey_to_address(&from_pk),
@@ -205,6 +210,7 @@ mod tests {
         let from_pk = PublicKey::from_secret_key(&Secp256k1::new(), &from_sk).to_string();
         let reward = Transaction {
             version: 1,
+            chain_id: CHAIN_ID.to_string(),
             timestamp: 0,
             from: String::new(),
             to: pubkey_to_address(&from_pk),
@@ -254,6 +260,7 @@ mod tests {
         let from_pk = PublicKey::from_secret_key(&Secp256k1::new(), &from_sk).to_string();
         let reward = Transaction {
             version: 1,
+            chain_id: CHAIN_ID.to_string(),
             timestamp: 0,
             from: String::new(),
             to: pubkey_to_address(&from_pk),
@@ -292,6 +299,7 @@ mod tests {
         let to_addr = pubkey_to_address(&to_pk);
         let reward = Transaction {
             version: 1,
+            chain_id: CHAIN_ID.to_string(),
             timestamp: 0,
             from: String::new(),
             to: pubkey_to_address(&from_pk),
@@ -325,6 +333,7 @@ mod tests {
         let from_pk = PublicKey::from_secret_key(&Secp256k1::new(), &from_sk).to_string();
         let reward = Transaction {
             version: 1,
+            chain_id: CHAIN_ID.to_string(),
             timestamp: 0,
             from: String::new(),
             to: pubkey_to_address(&from_pk),
@@ -364,6 +373,7 @@ mod tests {
         let from_pk = PublicKey::from_secret_key(&Secp256k1::new(), &from_sk).to_string();
         let reward = Transaction {
             version: 1,
+            chain_id: CHAIN_ID.to_string(),
             timestamp: 0,
             from: String::new(),
             to: pubkey_to_address(&from_pk),
@@ -400,6 +410,7 @@ mod tests {
         let from_pk = PublicKey::from_secret_key(&Secp256k1::new(), &from_sk).to_string();
         let reward = Transaction {
             version: 1,
+            chain_id: CHAIN_ID.to_string(),
             timestamp: 0,
             from: String::new(),
             to: pubkey_to_address(&from_pk),
@@ -437,6 +448,7 @@ mod tests {
         let from_pk = PublicKey::from_secret_key(&Secp256k1::new(), &from_sk).to_string();
         let reward = Transaction {
             version: 1,
+            chain_id: CHAIN_ID.to_string(),
             timestamp: 0,
             from: String::new(),
             to: pubkey_to_address(&from_pk),
@@ -473,6 +485,7 @@ mod tests {
         let from_pk = PublicKey::from_secret_key(&Secp256k1::new(), &from_sk).to_string();
         let reward = Transaction {
             version: 1,
+            chain_id: CHAIN_ID.to_string(),
             timestamp: 0,
             from: String::new(),
             to: pubkey_to_address(&from_pk),
@@ -495,7 +508,8 @@ mod tests {
         }];
         let valid = signed_tx(&from_sk, "LFS11111111111111111111", 10, 0, 2);
         let invalid = Transaction {
-            version: 2,
+            version: 3,
+            chain_id: CHAIN_ID.to_string(),
             timestamp: 3,
             from: pubkey_to_address(&from_pk),
             to: "bad-address".into(),
@@ -527,6 +541,7 @@ mod tests {
         let from_pk = PublicKey::from_secret_key(&Secp256k1::new(), &from_sk).to_string();
         let reward = Transaction {
             version: 1,
+            chain_id: CHAIN_ID.to_string(),
             timestamp: 0,
             from: String::new(),
             to: pubkey_to_address(&from_pk),

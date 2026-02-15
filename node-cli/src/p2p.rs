@@ -1,6 +1,6 @@
 use std::{fs::OpenOptions, io::Write, sync::Arc, time::Duration};
 
-use blockchain_core::{Block, Transaction};
+use blockchain_core::{Block, CHAIN_ID, Transaction};
 use local_ip_address::local_ip;
 use public_ip;
 use rand::seq::SliceRandom;
@@ -46,6 +46,8 @@ pub(crate) struct PeerInfo {
     pub port: u16,
     pub node_id: String,
     pub version: String,
+    #[serde(default)]
+    pub chain_id: String,
     #[serde(default)]
     pub peers: Vec<String>,
     #[serde(default)]
@@ -242,6 +244,7 @@ async fn respond_with_peer_info(
         port: LISTEN_PORT,
         node_id: NODE_ID.clone(),
         version: NODE_VERSION.to_string(),
+        chain_id: CHAIN_ID.to_string(),
         peers: peer_snapshot,
         observed_ip,
     };
@@ -786,6 +789,7 @@ fn parse_peer_info(bytes: &[u8]) -> Option<PeerInfo> {
         port,
         node_id: String::new(),
         version: String::new(),
+        chain_id: String::new(),
         peers: Vec::new(),
         observed_ip: None,
     })
@@ -796,6 +800,14 @@ async fn integrate_peer_info_from_handshake(
     info: &PeerInfo,
     peers: &Arc<Mutex<Vec<String>>>,
 ) {
+    if info.chain_id != CHAIN_ID {
+        debug_log(&format!(
+            "Ignoring peer {} with mismatched chain_id '{}'",
+            original_addr, info.chain_id
+        ));
+        return;
+    }
+
     if let Some(observed) = info.observed_ip.as_ref() {
         if !observed.is_empty() && is_public_ip(observed) {
             let mut lock = OBSERVED_IP.write().await;
@@ -906,7 +918,16 @@ pub async fn sync_chain(
             continue;
         }
         log(&format!("[SYNC] Connecting to {}", peer));
-        let _ = handshake_with_peer(&peer, peers).await;
+        let Some(info) = handshake_with_peer(&peer, peers).await else {
+            continue;
+        };
+        if info.chain_id != CHAIN_ID {
+            log(&format!(
+                "[SYNC] Skipping {} due to chain id mismatch ({})",
+                peer, info.chain_id
+            ));
+            continue;
+        }
         if let Ok(mut stream) = TcpStream::connect(&peer).await {
             log("[SYNC] Requesting chain");
             if stream.write_all(b"/chain").await.is_err() {

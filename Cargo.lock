@@ -1949,9 +1949,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "blockchain-core",
+ "chrono",
  "eframe",
  "egui",
+ "hex",
+ "rand 0.9.1",
  "rfd",
+ "secp256k1",
  "serde",
  "serde_json",
  "sha2",

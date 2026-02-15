@@ -5,11 +5,19 @@ use sha2::{Digest, Sha256};
 // spec_v0.9 constants
 pub const SPEC_VERSION: &str = "0.9";
 pub const DEFAULT_DIFFICULTY_ZEROS: u32 = 4;
+pub const CHAIN_ID: &str = "lofswap-testnet";
+pub const GENESIS_TIMESTAMP: i64 = 1_735_689_600; // 2025-01-01 00:00:00 UTC
+
+pub fn default_chain_id() -> String {
+    CHAIN_ID.to_string()
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Transaction {
     // spec fields (frozen v0.9)
     pub version: u8,
+    #[serde(default = "default_chain_id")]
+    pub chain_id: String,
     pub timestamp: i64,
     pub from: String, // now address (LFS...), legacy: raw pubkey
     pub to: String,
@@ -33,11 +41,23 @@ impl Transaction {
         } else {
             self.from.as_str()
         };
+        let chain_id = if self.chain_id.is_empty() {
+            CHAIN_ID
+        } else {
+            self.chain_id.as_str()
+        };
         // Include nonce so txids remain unique and sender-ordered.
-        let preimage = format!(
-            "{}|{}|{}|{}|{}|{}",
-            self.version, signer, self.to, self.amount, self.timestamp, self.nonce
-        );
+        let preimage = if self.version >= 3 {
+            format!(
+                "{}|{}|{}|{}|{}|{}|{}",
+                self.version, chain_id, signer, self.to, self.amount, self.timestamp, self.nonce
+            )
+        } else {
+            format!(
+                "{}|{}|{}|{}|{}|{}",
+                self.version, signer, self.to, self.amount, self.timestamp, self.nonce
+            )
+        };
         let mut hasher = Sha256::new();
         hasher.update(preimage.as_bytes());
         format!("{:x}", hasher.finalize())
@@ -68,6 +88,23 @@ pub struct Block {
 }
 
 impl Block {
+    pub fn genesis() -> Self {
+        // Canonical deterministic genesis shared by all nodes.
+        let mut block = Block {
+            version: 1,
+            index: 0,
+            timestamp: GENESIS_TIMESTAMP,
+            transactions: Vec::new(),
+            previous_hash: "0".to_string(),
+            nonce: 0,
+            hash: String::new(),
+            miner: "genesis".to_string(),
+            difficulty: DEFAULT_DIFFICULTY_ZEROS,
+        };
+        block.mine(DEFAULT_DIFFICULTY_ZEROS as usize);
+        block
+    }
+
     pub fn new(
         index: u64,
         mut transactions: Vec<Transaction>,
@@ -142,5 +179,19 @@ impl Block {
                 last_report = now;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Block;
+
+    #[test]
+    fn genesis_is_deterministic() {
+        let a = Block::genesis();
+        let b = Block::genesis();
+        assert_eq!(a.hash, b.hash);
+        assert_eq!(a.nonce, b.nonce);
+        assert_eq!(a.timestamp, b.timestamp);
     }
 }

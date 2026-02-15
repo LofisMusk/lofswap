@@ -2,7 +2,7 @@
 //! Wallet CLI - relies only on `peers.json` + `BOOTSTRAP_NODES`.
 //! All legacy `nodes.txt` paths have been removed.
 
-use blockchain_core::{Block, Transaction, pubkey_to_address};
+use blockchain_core::{Block, CHAIN_ID, Transaction, pubkey_to_address};
 use chrono::Utc;
 use rand::seq::IndexedRandom;
 use secp256k1::{Message, PublicKey, Secp256k1, SecretKey, ecdsa::Signature};
@@ -226,17 +226,40 @@ fn peer_is_loopback(addr: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn peer_node_id(addr: &str) -> Option<String> {
-    let sock: SocketAddr = addr.parse().ok()?;
-    let mut s = TcpStream::connect_timeout(&sock, WHOAMI_TIMEOUT).ok()?;
+enum PeerIdentity {
+    SameChain(String),
+    DifferentChain,
+    Unknown,
+}
+
+fn peer_identity(addr: &str) -> PeerIdentity {
+    let Ok(sock) = addr.parse::<SocketAddr>() else {
+        return PeerIdentity::Unknown;
+    };
+    let Ok(mut s) = TcpStream::connect_timeout(&sock, WHOAMI_TIMEOUT) else {
+        return PeerIdentity::Unknown;
+    };
     let _ = s.set_read_timeout(Some(WHOAMI_TIMEOUT));
-    s.write_all(b"/whoami").ok()?;
+    if s.write_all(b"/whoami").is_err() {
+        return PeerIdentity::Unknown;
+    }
     let mut buf = Vec::new();
-    s.read_to_end(&mut buf).ok()?;
-    let v: serde_json::Value = serde_json::from_slice(&buf).ok()?;
-    v.get("node_id")
-        .and_then(|id| id.as_str())
-        .map(|id| id.to_string())
+    if s.read_to_end(&mut buf).is_err() {
+        return PeerIdentity::Unknown;
+    }
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&buf) else {
+        return PeerIdentity::Unknown;
+    };
+    let Some(chain_id) = v.get("chain_id").and_then(|id| id.as_str()) else {
+        return PeerIdentity::Unknown;
+    };
+    if chain_id != CHAIN_ID {
+        return PeerIdentity::DifferentChain;
+    }
+    let Some(node_id) = v.get("node_id").and_then(|id| id.as_str()) else {
+        return PeerIdentity::Unknown;
+    };
+    PeerIdentity::SameChain(node_id.to_string())
 }
 
 fn dedupe_peers_by_node_identity(peers: Vec<String>) -> Vec<String> {
@@ -245,18 +268,26 @@ fn dedupe_peers_by_node_identity(peers: Vec<String>) -> Vec<String> {
         std::collections::HashMap::new();
 
     for peer in peers {
-        if let Some(node_id) = peer_node_id(&peer) {
-            if let Some(&existing_idx) = node_to_index.get(&node_id) {
-                let existing = &deduped[existing_idx];
-                if peer_is_loopback(&peer) && !peer_is_loopback(existing) {
-                    deduped[existing_idx] = peer;
+        match peer_identity(&peer) {
+            PeerIdentity::SameChain(node_id) => {
+                if let Some(&existing_idx) = node_to_index.get(&node_id) {
+                    let existing = &deduped[existing_idx];
+                    if peer_is_loopback(&peer) && !peer_is_loopback(existing) {
+                        deduped[existing_idx] = peer;
+                    }
+                    continue;
                 }
+                node_to_index.insert(node_id, deduped.len());
+                deduped.push(peer);
+            }
+            PeerIdentity::DifferentChain => {
                 continue;
             }
-            node_to_index.insert(node_id, deduped.len());
-            deduped.push(peer);
-        } else if !deduped.contains(&peer) {
-            deduped.push(peer);
+            PeerIdentity::Unknown => {
+                if !deduped.contains(&peer) {
+                    deduped.push(peer);
+                }
+            }
         }
     }
 
@@ -437,11 +468,15 @@ fn build_tx(store: &mut PeerStore, sk: &SecretKey, to: &str, amount: u64) -> Tra
     let from_addr = pubkey_to_address(&pk.to_string());
     let nonce = fetch_next_nonce_from_peers(store, &from_addr)
         .unwrap_or_else(|| next_nonce_fallback_from_local(&from_addr));
-    let preimage = format!("{}|{}|{}|{}|{}|{}", 2, pk, to, amount, ts, nonce);
+    let preimage = format!(
+        "{}|{}|{}|{}|{}|{}|{}",
+        3, CHAIN_ID, pk, to, amount, ts, nonce
+    );
     let hash = Sha256::digest(preimage.as_bytes());
     let sig = secp.sign_ecdsa(Message::from_digest(hash.into()), sk);
     let mut tx = Transaction {
-        version: 2,
+        version: 3,
+        chain_id: CHAIN_ID.to_string(),
         timestamp: ts,
         from: from_addr,
         to: to.into(),
@@ -634,6 +669,7 @@ fn faucet(store: &mut PeerStore, addr: &str) {
     let reward_sig = format!("reward:{}:{}", ts, hex::encode(nonce));
     let mut tx = Transaction {
         version: 1,
+        chain_id: CHAIN_ID.to_string(),
         timestamp: ts,
         from: String::new(),
         to: addr.into(),
@@ -889,14 +925,32 @@ fn tx_signed_by_wallet(tx: &Transaction, sk: &SecretKey) -> bool {
     let Ok(sig) = Signature::from_compact(&sig_bytes) else {
         return false;
     };
+    let chain_id = if tx.chain_id.is_empty() {
+        CHAIN_ID
+    } else {
+        tx.chain_id.as_str()
+    };
     let new_preimage = format!(
-        "{}|{}|{}|{}|{}|{}",
-        tx.version, signer, tx.to, tx.amount, tx.timestamp, tx.nonce
+        "{}|{}|{}|{}|{}|{}|{}",
+        tx.version, chain_id, signer, tx.to, tx.amount, tx.timestamp, tx.nonce
     );
     let new_hash = Sha256::digest(new_preimage.as_bytes());
-    if tx.version >= 2 {
+    if tx.version >= 3 {
+        if chain_id != CHAIN_ID {
+            return false;
+        }
         return secp
             .verify_ecdsa(Message::from_digest(new_hash.into()), &sig, &pk)
+            .is_ok();
+    }
+    if tx.version >= 2 {
+        let v2_preimage = format!(
+            "{}|{}|{}|{}|{}|{}",
+            tx.version, signer, tx.to, tx.amount, tx.timestamp, tx.nonce
+        );
+        let v2_hash = Sha256::digest(v2_preimage.as_bytes());
+        return secp
+            .verify_ecdsa(Message::from_digest(v2_hash.into()), &sig, &pk)
             .is_ok();
     }
     let v1_preimage = format!(

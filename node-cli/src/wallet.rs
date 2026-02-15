@@ -6,7 +6,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use blockchain_core::{Block, Transaction, pubkey_to_address};
+use blockchain_core::{Block, CHAIN_ID, Transaction, pubkey_to_address};
 use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
 use serde_json::{self, Value};
 use sha2::{Digest, Sha256};
@@ -112,12 +112,16 @@ pub fn build_tx(sk: &SecretKey, to: &str, amount: u64) -> Transaction {
         let chain = chain::load_chain().unwrap_or_default();
         chain::next_nonce_for_address(&from_addr, &chain)
     };
-    let preimage = format!("{}|{}|{}|{}|{}|{}", 2, pk, to, amount, ts, nonce);
+    let preimage = format!(
+        "{}|{}|{}|{}|{}|{}|{}",
+        3, CHAIN_ID, pk, to, amount, ts, nonce
+    );
     let hash = Sha256::digest(preimage.as_bytes());
     let msg = Message::from_digest(hash.into());
     let sig = secp.sign_ecdsa(msg, sk);
     let mut tx = Transaction {
-        version: 2,
+        version: 3,
+        chain_id: CHAIN_ID.to_string(),
         timestamp: ts,
         from: from_addr,
         to: to.into(),
