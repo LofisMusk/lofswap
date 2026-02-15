@@ -7,7 +7,7 @@ use tokio::{
 };
 
 use crate::{
-    chain::{is_tx_valid, load_valid_transactions, save_chain},
+    chain::{load_valid_transactions, save_chain},
     p2p::{broadcast_to_known_nodes, get_my_address},
     storage::remove_data_file,
     wallet::read_mempool,
@@ -54,8 +54,7 @@ pub async fn miner_loop(blockchain: Arc<Mutex<Vec<Block>>>) {
     loop {
         {
             let chain = blockchain.lock().await;
-            let parsed = read_mempool();
-            let has_any_valid = parsed.iter().any(|tx| is_tx_valid(tx, &chain).is_ok());
+            let has_any_valid = !load_valid_transactions(&chain).is_empty();
             drop(chain);
             if has_any_valid {
                 mine_block(&blockchain).await;
