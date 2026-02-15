@@ -211,7 +211,7 @@ async fn handle_request(
     } else if let Ok(tx) = serde_json::from_slice::<Transaction>(request.as_bytes()) {
         handle_transaction(tx, stream, blockchain).await?;
     } else if let Ok(block) = serde_json::from_slice::<Block>(request.as_bytes()) {
-        handle_block(block, stream, blockchain).await?;
+        handle_block(block, stream, blockchain, peers).await?;
         return Ok(());
     }
 
@@ -379,6 +379,7 @@ async fn handle_block(
     block: Block,
     stream: &mut TcpStream,
     blockchain: Arc<Mutex<Vec<Block>>>,
+    peers: Arc<Mutex<Vec<String>>>,
 ) -> Result<(), NodeError> {
     let mut chain = blockchain.lock().await;
     let expected_index = chain.len() as u64;
@@ -391,6 +392,12 @@ async fn handle_block(
             .write_all(b"invalid index")
             .await
             .map_err(|e| NodeError::NetworkError(e.to_string()))?;
+        drop(chain);
+        let bc = blockchain.clone();
+        let peers_for_sync = peers.clone();
+        tokio::spawn(async move {
+            sync_chain(&bc, &peers_for_sync, false, false).await;
+        });
         return Ok(());
     }
 
@@ -798,6 +805,38 @@ fn parse_peer_info(bytes: &[u8]) -> Option<PeerInfo> {
     })
 }
 
+fn chain_total_work(chain: &[Block]) -> u128 {
+    chain.iter().fold(0u128, |acc, block| {
+        let shift = (block.difficulty as u32).min(63);
+        acc.saturating_add(1u128 << shift)
+    })
+}
+
+fn chain_tip_hash(chain: &[Block]) -> &str {
+    chain.last().map(|b| b.hash.as_str()).unwrap_or("")
+}
+
+fn prefer_chain(candidate: &[Block], current: &[Block]) -> bool {
+    if candidate.is_empty() {
+        return false;
+    }
+    let candidate_work = chain_total_work(candidate);
+    let current_work = chain_total_work(current);
+    if candidate_work != current_work {
+        return candidate_work > current_work;
+    }
+    if candidate.len() != current.len() {
+        return candidate.len() > current.len();
+    }
+    let cand_tip = chain_tip_hash(candidate);
+    let curr_tip = chain_tip_hash(current);
+    if curr_tip.is_empty() {
+        return !cand_tip.is_empty();
+    }
+    // Deterministic equal-work tie-break: lower tip hash wins.
+    cand_tip < curr_tip
+}
+
 async fn integrate_peer_info_from_handshake(
     original_addr: &str,
     info: &PeerInfo,
@@ -898,12 +937,16 @@ pub async fn sync_chain(
         }
     };
 
-    {
+    let (local_snapshot, local_valid) = {
         let local = blockchain.lock().await;
-        if let Err(e) = validate_chain(&local) {
-            log(&format!("[SYNC] Local chain failed validation: {}", e));
+        match validate_chain(&local) {
+            Ok(_) => (local.clone(), true),
+            Err(e) => {
+                log(&format!("[SYNC] Local chain failed validation: {}", e));
+                (local.clone(), false)
+            }
         }
-    }
+    };
 
     let peer_list = peers.lock().await.clone();
     if peer_list.is_empty() {
@@ -916,6 +959,9 @@ pub async fn sync_chain(
         "[SYNC] Attempting to sync with {} peers...",
         peer_list.len()
     ));
+    let mut best_peer_chain: Option<Vec<Block>> = None;
+    let mut best_peer_addr: Option<String> = None;
+
     for peer in peer_list {
         if Some(peer.as_str()) == my_addr.as_deref() {
             continue;
@@ -946,33 +992,60 @@ pub async fn sync_chain(
                         ));
                         continue;
                     }
-                    let local_len = blockchain.lock().await.len();
-                    if peer_chain.len() > local_len || force {
-                        let mut local = blockchain.lock().await;
-                        let old_len = local.len();
-                        *local = peer_chain;
-                        if let Err(e) = save_chain(&local) {
-                            eprintln!("Failed to save chain: {}", e);
-                        } else if let Err(e) = prune_mempool(&local) {
-                            eprintln!("Failed to prune mempool after sync: {}", e);
-                        } else if verbose {
-                            println!("Sync completed with {} (force={})", peer, force);
-                            println!("[SYNC] Reorg: {} -> {}", old_len, local.len());
-                        } else {
-                            println!(
-                                "[SYNC] Background sync updated from {} ({} -> {})",
-                                peer,
-                                old_len,
-                                local.len()
-                            );
+                    let better = if force || !local_valid {
+                        match &best_peer_chain {
+                            Some(current_best) => prefer_chain(&peer_chain, current_best),
+                            None => true,
                         }
-                        return;
+                    } else {
+                        let baseline: &[Block] = best_peer_chain
+                            .as_deref()
+                            .unwrap_or(local_snapshot.as_slice());
+                        prefer_chain(&peer_chain, baseline)
+                    };
+                    if better {
+                        best_peer_addr = Some(peer.clone());
+                        best_peer_chain = Some(peer_chain);
                     }
                 }
             }
         }
     }
-    log("Sync failed - no suitable peers");
+
+    let Some(candidate) = best_peer_chain else {
+        log("Sync failed - no suitable peers");
+        return;
+    };
+
+    let source_peer = best_peer_addr.unwrap_or_else(|| "unknown".to_string());
+    let mut local = blockchain.lock().await;
+    let replace = if force {
+        true
+    } else {
+        !validate_chain(&local).is_ok() || prefer_chain(&candidate, &local)
+    };
+    if !replace {
+        log("Sync finished - local chain already preferred");
+        return;
+    }
+
+    let old_len = local.len();
+    *local = candidate;
+    if let Err(e) = save_chain(&local) {
+        eprintln!("Failed to save chain: {}", e);
+    } else if let Err(e) = prune_mempool(&local) {
+        eprintln!("Failed to prune mempool after sync: {}", e);
+    } else if verbose {
+        println!("Sync completed with {} (force={})", source_peer, force);
+        println!("[SYNC] Reorg: {} -> {}", old_len, local.len());
+    } else {
+        println!(
+            "[SYNC] Background sync updated from {} ({} -> {})",
+            source_peer,
+            old_len,
+            local.len()
+        );
+    }
 }
 
 pub async fn ping_peer(peer: &str) -> bool {
