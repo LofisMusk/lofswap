@@ -106,18 +106,25 @@ pub fn build_tx(sk: &SecretKey, to: &str, amount: u64) -> Transaction {
         .unwrap_or_default()
         .as_millis() as i64;
     let from_addr = pubkey_to_address(&pk.to_string());
-    let preimage = format!("{}|{}|{}|{}|{}", 1, pk, to, amount, ts);
+    let nonce = if cfg!(test) {
+        0
+    } else {
+        let chain = chain::load_chain().unwrap_or_default();
+        chain::next_nonce_for_address(&from_addr, &chain)
+    };
+    let preimage = format!("{}|{}|{}|{}|{}|{}", 2, pk, to, amount, ts, nonce);
     let hash = Sha256::digest(preimage.as_bytes());
     let msg = Message::from_digest(hash.into());
     let sig = secp.sign_ecdsa(msg, sk);
     let mut tx = Transaction {
-        version: 1,
+        version: 2,
         timestamp: ts,
         from: from_addr,
         to: to.into(),
         amount,
         signature: hex::encode(sig.serialize_compact()),
         pubkey: pk.to_string(),
+        nonce,
         txid: String::new(),
     };
     tx.txid = tx.compute_txid();

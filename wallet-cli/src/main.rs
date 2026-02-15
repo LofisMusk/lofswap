@@ -269,6 +269,16 @@ fn is_already_known_reject(reason: &str) -> bool {
         || normalized.contains("duplicate transaction")
 }
 
+fn normalize_tx_addr(addr: &str) -> String {
+    if addr.is_empty() {
+        String::new()
+    } else if addr.starts_with("LFS") {
+        addr.to_string()
+    } else {
+        pubkey_to_address(addr)
+    }
+}
+
 fn append_pending(json: &[u8]) {
     let line = String::from_utf8_lossy(json);
     let _ = OpenOptions::new()
@@ -380,23 +390,65 @@ fn broadcast(store: &mut PeerStore, json: &[u8], min_peers: usize) {
 }
 
 // ---------- Transakcje ----------
-fn build_tx(sk: &SecretKey, to: &str, amount: u64) -> Transaction {
+fn fetch_next_nonce_from_peers(store: &mut PeerStore, from_addr: &str) -> Option<u64> {
+    if cfg!(test) {
+        return None;
+    }
+    store.discover();
+    let query = format!("/nonce/{}", from_addr);
+    let mut best: Option<u64> = None;
+    for p in store.as_slice() {
+        let Ok(sock) = p.parse::<SocketAddr>() else {
+            continue;
+        };
+        if let Ok(mut s) = TcpStream::connect_timeout(&sock, CONNECT_TIMEOUT) {
+            if s.write_all(query.as_bytes()).is_ok() {
+                let mut buf = String::new();
+                if s.read_to_string(&mut buf).is_ok() {
+                    if let Ok(nonce) = buf.trim().parse::<u64>() {
+                        best = Some(best.map_or(nonce, |b| b.max(nonce)));
+                    }
+                }
+            }
+        }
+    }
+    best
+}
+
+fn next_nonce_fallback_from_local(from_addr: &str) -> u64 {
+    let mut next = 0u64;
+    let mut nonces = std::collections::HashSet::new();
+    for tx in load_pending_transactions() {
+        if normalize_tx_addr(&tx.from) == from_addr {
+            nonces.insert(tx.nonce);
+        }
+    }
+    while nonces.contains(&next) {
+        next = next.saturating_add(1);
+    }
+    next
+}
+
+fn build_tx(store: &mut PeerStore, sk: &SecretKey, to: &str, amount: u64) -> Transaction {
     let secp = Secp256k1::new();
     let pk = PublicKey::from_secret_key(&secp, sk);
     // Use UTC seconds (consistent with blocks and faucet)
     let ts = Utc::now().timestamp();
     let from_addr = pubkey_to_address(&pk.to_string());
-    let preimage = format!("{}|{}|{}|{}|{}", 1, pk, to, amount, ts);
+    let nonce = fetch_next_nonce_from_peers(store, &from_addr)
+        .unwrap_or_else(|| next_nonce_fallback_from_local(&from_addr));
+    let preimage = format!("{}|{}|{}|{}|{}|{}", 2, pk, to, amount, ts, nonce);
     let hash = Sha256::digest(preimage.as_bytes());
     let sig = secp.sign_ecdsa(Message::from_digest(hash.into()), sk);
     let mut tx = Transaction {
-        version: 1,
+        version: 2,
         timestamp: ts,
         from: from_addr,
         to: to.into(),
         amount,
         signature: hex::encode(sig.serialize_compact()),
         pubkey: pk.to_string(),
+        nonce,
         txid: String::new(),
     };
     tx.txid = tx.compute_txid();
@@ -405,7 +457,7 @@ fn build_tx(sk: &SecretKey, to: &str, amount: u64) -> Transaction {
 
 fn send_default(store: &mut PeerStore, to: &str, amount: u64, min_peers: usize) {
     if let Some(sk) = load_default_wallet() {
-        let tx = build_tx(&sk, to, amount);
+        let tx = build_tx(store, &sk, to, amount);
         let payload = serde_json::to_vec(&tx).unwrap();
         broadcast(store, &payload, min_peers.max(MIN_BROADCAST_PEERS));
     } else {
@@ -414,7 +466,7 @@ fn send_default(store: &mut PeerStore, to: &str, amount: u64, min_peers: usize) 
 }
 fn send_priv(store: &mut PeerStore, priv_hex: &str, to: &str, amount: u64, min_peers: usize) {
     if let Ok(sk) = SecretKey::from_byte_array(hex_to_32(priv_hex)) {
-        let tx = build_tx(&sk, to, amount);
+        let tx = build_tx(store, &sk, to, amount);
         let payload = serde_json::to_vec(&tx).unwrap();
         broadcast(store, &payload, min_peers.max(MIN_BROADCAST_PEERS));
     } else {
@@ -422,14 +474,15 @@ fn send_priv(store: &mut PeerStore, priv_hex: &str, to: &str, amount: u64, min_p
     }
 }
 
-fn sign_raw_default(to: &str, amount: u64) {
+fn sign_raw_default(store: &mut PeerStore, to: &str, amount: u64) {
     if let Some(sk) = load_default_wallet() {
-        let tx = build_tx(&sk, to, amount);
+        let tx = build_tx(store, &sk, to, amount);
         println!("Signed (not sent):");
         println!("  From : {}", tx.from);
         println!("  To   : {}", tx.to);
         println!("  Amt  : {}", tx.amount);
         println!("  Time : {} (UTC)", tx.timestamp);
+        println!("  Nonce: {}", tx.nonce);
         println!("  TxID : {}", tx.txid);
         println!("  Sig  : {}", tx.signature);
         append_raw_signed(&tx);
@@ -442,14 +495,15 @@ fn sign_raw_default(to: &str, amount: u64) {
     }
 }
 
-fn sign_raw_priv(priv_hex: &str, to: &str, amount: u64) {
+fn sign_raw_priv(store: &mut PeerStore, priv_hex: &str, to: &str, amount: u64) {
     if let Ok(sk) = SecretKey::from_byte_array(hex_to_32(priv_hex)) {
-        let tx = build_tx(&sk, to, amount);
+        let tx = build_tx(store, &sk, to, amount);
         println!("Signed (not sent):");
         println!("  From : {}", tx.from);
         println!("  To   : {}", tx.to);
         println!("  Amt  : {}", tx.amount);
         println!("  Time : {} (UTC)", tx.timestamp);
+        println!("  Nonce: {}", tx.nonce);
         println!("  TxID : {}", tx.txid);
         println!("  Sig  : {}", tx.signature);
         append_raw_signed(&tx);
@@ -505,10 +559,13 @@ fn print_history(store: &mut PeerStore, addr: &str) {
         println!("Could not load chain from peers");
         return;
     };
+    let target = normalize_tx_addr(addr);
     let mut txs = Vec::new();
     for block in &chain {
         for tx in &block.transactions {
-            if tx.from == addr || tx.to == addr {
+            let from_addr = normalize_tx_addr(&tx.from);
+            let to_addr = normalize_tx_addr(&tx.to);
+            if from_addr == target || to_addr == target {
                 txs.push((block.index, tx.clone()));
             }
         }
@@ -518,7 +575,11 @@ fn print_history(store: &mut PeerStore, addr: &str) {
         return;
     }
     for (index, tx) in txs {
-        let direction = if tx.from == addr { "OUT" } else { "IN " };
+        let direction = if normalize_tx_addr(&tx.from) == target {
+            "OUT"
+        } else {
+            "IN "
+        };
         println!(
             "[{}] #{index} {} -> {} amount: {} txid: {}",
             direction, tx.from, tx.to, tx.amount, tx.txid
@@ -534,6 +595,7 @@ fn print_tx_details(tx: &Transaction, location: Option<String>) {
     println!("  From     : {}", tx.from);
     println!("  To       : {}", tx.to);
     println!("  Amount   : {}", tx.amount);
+    println!("  Nonce    : {}", tx.nonce);
     println!("  Timestamp: {}", tx.timestamp);
     println!("  TXID     : {}", tx.txid);
     println!("  Signature: {}", tx.signature);
@@ -578,6 +640,7 @@ fn faucet(store: &mut PeerStore, addr: &str) {
         amount: 1000,
         signature: reward_sig,
         pubkey: String::new(),
+        nonce: 0,
         txid: String::new(),
     };
     tx.txid = tx.compute_txid();
@@ -804,9 +867,22 @@ fn confirm(prompt: &str) -> bool {
 fn tx_signed_by_wallet(tx: &Transaction, sk: &SecretKey) -> bool {
     let secp = Secp256k1::new();
     let pk = PublicKey::from_secret_key(&secp, sk);
-    if tx.from != pk.to_string() {
+    let pk_str = pk.to_string();
+    let expected_addr = pubkey_to_address(&pk_str);
+    if tx.from != expected_addr && tx.from != pk_str {
         return false;
     }
+    if !tx.pubkey.is_empty() && tx.pubkey != pk_str {
+        return false;
+    }
+    if tx.pubkey.is_empty() && tx.from.starts_with("LFS") {
+        return false;
+    }
+    let signer = if !tx.pubkey.is_empty() {
+        tx.pubkey.as_str()
+    } else {
+        tx.from.as_str()
+    };
     let Ok(sig_bytes) = hex::decode(&tx.signature) else {
         return false;
     };
@@ -814,18 +890,28 @@ fn tx_signed_by_wallet(tx: &Transaction, sk: &SecretKey) -> bool {
         return false;
     };
     let new_preimage = format!(
-        "{}|{}|{}|{}|{}",
-        tx.version, tx.from, tx.to, tx.amount, tx.timestamp
+        "{}|{}|{}|{}|{}|{}",
+        tx.version, signer, tx.to, tx.amount, tx.timestamp, tx.nonce
     );
     let new_hash = Sha256::digest(new_preimage.as_bytes());
+    if tx.version >= 2 {
+        return secp
+            .verify_ecdsa(Message::from_digest(new_hash.into()), &sig, &pk)
+            .is_ok();
+    }
+    let v1_preimage = format!(
+        "{}|{}|{}|{}|{}",
+        tx.version, signer, tx.to, tx.amount, tx.timestamp
+    );
+    let v1_hash = Sha256::digest(v1_preimage.as_bytes());
     if secp
-        .verify_ecdsa(Message::from_digest(new_hash.into()), &sig, &pk)
+        .verify_ecdsa(Message::from_digest(v1_hash.into()), &sig, &pk)
         .is_ok()
     {
         return true;
     }
     // Legacy compatibility: older txs signed only (from|to|amount)
-    let legacy_preimage = format!("{}{}{}", tx.from, tx.to, tx.amount);
+    let legacy_preimage = format!("{}{}{}", signer, tx.to, tx.amount);
     let legacy_hash = Sha256::digest(legacy_preimage.as_bytes());
     secp.verify_ecdsa(Message::from_digest(legacy_hash.into()), &sig, &pk)
         .is_ok()
@@ -1041,7 +1127,7 @@ fn main() {
             "sign-raw" => match (a.get(1), a.get(2)) {
                 (Some(to), Some(amt)) => {
                     if let Ok(amount) = amt.parse() {
-                        sign_raw_default(to, amount);
+                        sign_raw_default(&mut peers, to, amount);
                     } else {
                         println!("Invalid amount");
                     }
@@ -1050,7 +1136,7 @@ fn main() {
             },
             "sign-raw-priv" if a.len() >= 4 => {
                 if let Ok(amount) = a[3].parse() {
-                    sign_raw_priv(a[1], a[2], amount);
+                    sign_raw_priv(&mut peers, a[1], a[2], amount);
                 } else {
                     println!("Invalid amount");
                 }
@@ -1109,4 +1195,20 @@ fn main() {
         }
     }
     peers.save();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tx_signed_by_wallet_accepts_address_based_sender() {
+        let sk = SecretKey::from_byte_array([9u8; 32]).unwrap();
+        let mut store = PeerStore {
+            peers: Vec::new(),
+            offline_since: std::collections::HashMap::new(),
+        };
+        let tx = build_tx(&mut store, &sk, "LFS11111111111111111111", 5);
+        assert!(tx_signed_by_wallet(&tx, &sk));
+    }
 }

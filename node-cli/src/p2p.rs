@@ -18,8 +18,8 @@ use crate::{
     ACTIVE_CONNECTIONS, BOOTSTRAP_NODES, BUFFER_SIZE, LISTEN_PORT, MAX_CONNECTIONS, NODE_ID,
     NODE_VERSION, OBSERVED_IP,
     chain::{
-        calculate_balance, is_tx_valid, load_peers, save_chain, save_peers, validate_block,
-        validate_chain,
+        calculate_balance, is_tx_valid, load_peers, next_nonce_for_address, save_chain, save_peers,
+        validate_block, validate_chain,
     },
     errors::NodeError,
     storage::{data_path, ensure_parent_dir},
@@ -163,6 +163,14 @@ async fn handle_request(
         let balance = calculate_balance(addr, &chain);
         stream
             .write_all(balance.to_string().as_bytes())
+            .await
+            .map_err(|e| NodeError::NetworkError(e.to_string()))?;
+    } else if let Some(addr) = request.strip_prefix("/nonce/") {
+        let addr = addr.trim();
+        let chain = blockchain.lock().await;
+        let nonce = next_nonce_for_address(addr, &chain);
+        stream
+            .write_all(nonce.to_string().as_bytes())
             .await
             .map_err(|e| NodeError::NetworkError(e.to_string()))?;
     } else if request.trim() == "/peers" {

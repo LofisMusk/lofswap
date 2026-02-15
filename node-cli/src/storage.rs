@@ -46,9 +46,27 @@ pub fn read_data_file(file: &str) -> io::Result<Option<String>> {
 
 pub fn remove_data_file(file: &str) -> io::Result<()> {
     let path = data_path(file);
+    let mut first_err: Option<io::Error> = None;
+
     match fs::remove_file(&path) {
-        Ok(_) => Ok(()),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => fs::remove_file(file),
-        Err(e) => Err(e),
+        Ok(_) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => first_err = Some(e),
+    }
+
+    match fs::remove_file(file) {
+        Ok(_) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => {
+            if first_err.is_none() {
+                first_err = Some(e);
+            }
+        }
+    }
+
+    if let Some(e) = first_err {
+        Err(e)
+    } else {
+        Ok(())
     }
 }

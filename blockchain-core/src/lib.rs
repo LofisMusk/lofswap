@@ -17,6 +17,8 @@ pub struct Transaction {
     pub signature: String,
     #[serde(default)]
     pub pubkey: String, // sender pubkey for signature verification
+    #[serde(default)]
+    pub nonce: u64, // sender sequence for anti-replay/double-spend ordering
     // Computed identifier. Optional when deserializing from older nodes.
     #[serde(default)]
     pub txid: String,
@@ -31,9 +33,10 @@ impl Transaction {
         } else {
             self.from.as_str()
         };
+        // Include nonce so txids remain unique and sender-ordered.
         let preimage = format!(
-            "{}|{}|{}|{}|{}",
-            self.version, signer, self.to, self.amount, self.timestamp
+            "{}|{}|{}|{}|{}|{}",
+            self.version, signer, self.to, self.amount, self.timestamp, self.nonce
         );
         let mut hasher = Sha256::new();
         hasher.update(preimage.as_bytes());

@@ -58,6 +58,89 @@ fn normalize_addr(addr: &str) -> String {
     }
 }
 
+fn same_tx(a: &Transaction, b: &Transaction) -> bool {
+    a.signature == b.signature || (!a.txid.is_empty() && !b.txid.is_empty() && a.txid == b.txid)
+}
+
+fn is_valid_lfs_address(addr: &str) -> bool {
+    if !addr.starts_with("LFS") {
+        return false;
+    }
+    let payload = &addr[3..];
+    if payload.is_empty() {
+        return false;
+    }
+    bs58::decode(payload)
+        .into_vec()
+        .map(|v| v.len() == 20)
+        .unwrap_or(false)
+}
+
+fn is_valid_recipient(recipient: &str) -> bool {
+    if recipient.starts_with("LFS") {
+        is_valid_lfs_address(recipient)
+    } else {
+        recipient.parse::<PublicKey>().is_ok()
+    }
+}
+
+fn validate_tx_common(tx: &Transaction) -> Result<(), NodeError> {
+    if tx.amount == 0 {
+        return Err(NodeError::ValidationError("Invalid amount".to_string()));
+    }
+    if tx.to.is_empty() {
+        return Err(NodeError::ValidationError("Missing recipient".to_string()));
+    }
+    if !is_valid_recipient(&tx.to) {
+        return Err(NodeError::ValidationError(
+            "Invalid recipient address".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn confirmed_next_nonce(sender_addr: &str, chain: &[Block]) -> u64 {
+    chain
+        .iter()
+        .flat_map(|b| b.transactions.iter())
+        .filter(|tx| !tx.from.is_empty() && normalize_addr(&tx.from) == sender_addr)
+        .map(|tx| tx.nonce)
+        .max()
+        .map(|n| n.saturating_add(1))
+        .unwrap_or(0)
+}
+
+fn expected_nonce(
+    sender_addr: &str,
+    chain: &[Block],
+    mempool: &[Transaction],
+    exclude: Option<&Transaction>,
+) -> u64 {
+    let mut next = confirmed_next_nonce(sender_addr, chain);
+    let mut pending_nonces = HashSet::new();
+    for tx in mempool {
+        if exclude.is_some_and(|x| same_tx(tx, x)) {
+            continue;
+        }
+        if !tx.from.is_empty() && normalize_addr(&tx.from) == sender_addr {
+            pending_nonces.insert(tx.nonce);
+        }
+    }
+    while pending_nonces.contains(&next) {
+        next = next.saturating_add(1);
+    }
+    next
+}
+
+pub fn next_nonce_for_address(address: &str, chain: &[Block]) -> u64 {
+    let addr = normalize_addr(address);
+    if addr.is_empty() {
+        return 0;
+    }
+    let mempool = read_mempool();
+    expected_nonce(&addr, chain, &mempool, None)
+}
+
 fn derive_pubkey(tx: &Transaction) -> Result<String, NodeError> {
     if !tx.pubkey.is_empty() {
         Ok(tx.pubkey.clone())
@@ -90,12 +173,19 @@ fn verify_tx_signature(
     from_pubkey: &PublicKey,
 ) -> Result<(), NodeError> {
     let secp = Secp256k1::new();
-    let msg_data_new = format!(
+    let msg_data_v2 = format!(
+        "{}|{}|{}|{}|{}|{}",
+        tx.version, pubkey_str, tx.to, tx.amount, tx.timestamp, tx.nonce
+    );
+    let hash_v2 = Sha256::digest(msg_data_v2.as_bytes());
+    let msg_v2 = Message::from_digest(hash_v2.into());
+
+    let msg_data_v1 = format!(
         "{}|{}|{}|{}|{}",
         tx.version, pubkey_str, tx.to, tx.amount, tx.timestamp
     );
-    let hash_new = Sha256::digest(msg_data_new.as_bytes());
-    let msg_new = Message::from_digest(hash_new.into());
+    let hash_v1 = Sha256::digest(msg_data_v1.as_bytes());
+    let msg_v1 = Message::from_digest(hash_v1.into());
 
     let msg_data_legacy = format!("{}{}{}", pubkey_str, tx.to, tx.amount);
     let hash_legacy = Sha256::digest(msg_data_legacy.as_bytes());
@@ -106,8 +196,13 @@ fn verify_tx_signature(
     let signature = Signature::from_compact(&sig_bytes)
         .map_err(|_| NodeError::ValidationError("Invalid signature".to_string()))?;
 
-    secp.verify_ecdsa(msg_new, &signature, from_pubkey)
-        .or_else(|_| secp.verify_ecdsa(msg_legacy, &signature, from_pubkey))
+    let verified = if tx.version >= 2 {
+        secp.verify_ecdsa(msg_v2, &signature, from_pubkey)
+    } else {
+        secp.verify_ecdsa(msg_v1, &signature, from_pubkey)
+            .or_else(|_| secp.verify_ecdsa(msg_legacy, &signature, from_pubkey))
+    };
+    verified
         .map_err(|_| NodeError::ValidationError("Signature verification failed".to_string()))?;
     Ok(())
 }
@@ -117,6 +212,7 @@ fn is_tx_valid_inner(
     chain: &[Block],
     check_mempool_duplicates: bool,
 ) -> Result<(), NodeError> {
+    validate_tx_common(tx)?;
     if tx.from.is_empty() {
         if tx.signature.starts_with("reward") {
             return Ok(());
@@ -128,20 +224,22 @@ fn is_tx_valid_inner(
 
     let (pubkey_str, from_pubkey, derived_addr) = resolve_sender(tx)?;
 
+    let mempool = read_mempool();
+    let expected = expected_nonce(&derived_addr, chain, &mempool, Some(tx));
+    if tx.nonce != expected {
+        return Err(NodeError::ValidationError(format!(
+            "Invalid nonce (expected {}, got {})",
+            expected, tx.nonce
+        )));
+    }
+
     let balance = calculate_balance(&derived_addr, chain);
-    let pending_out: u128 = read_mempool()
-        .into_iter()
+    let pending_out: u128 = mempool
+        .iter()
+        .filter(|m| !same_tx(m, tx))
         .filter(|m| {
             let m_from = normalize_addr(&m.from);
             if m_from != derived_addr || m_from.is_empty() {
-                return false;
-            }
-            // When validating a tx that is already in mempool (e.g. miner selection),
-            // exclude that same tx from the pending sum.
-            if m.signature == tx.signature {
-                return false;
-            }
-            if !tx.txid.is_empty() && !m.txid.is_empty() && m.txid == tx.txid {
                 return false;
             }
             true
@@ -154,16 +252,12 @@ fn is_tx_valid_inner(
         ));
     }
 
-    let already_exists_in_chain = chain.iter().any(|block| {
-        block.transactions.iter().any(|btx| {
-            btx.signature == tx.signature || (!tx.txid.is_empty() && btx.txid == tx.txid)
-        })
-    });
+    let already_exists_in_chain = chain
+        .iter()
+        .any(|block| block.transactions.iter().any(|btx| same_tx(btx, tx)));
 
     let already_exists_in_mempool = if check_mempool_duplicates {
-        read_mempool()
-            .iter()
-            .any(|m| m.signature == tx.signature || (!tx.txid.is_empty() && m.txid == tx.txid))
+        mempool.iter().any(|m| same_tx(m, tx))
     } else {
         false
     };
@@ -225,6 +319,7 @@ pub fn validate_block(
     let mut balances = calculate_balances(chain);
     let mut seen = HashSet::new();
     let mut chain_seen = HashSet::new();
+    let mut next_nonces = HashMap::new();
     for b in chain {
         for tx in &b.transactions {
             if !tx.txid.is_empty() {
@@ -234,6 +329,7 @@ pub fn validate_block(
         }
     }
     for tx in &block.transactions {
+        validate_tx_common(tx)?;
         let txid = if !tx.txid.is_empty() {
             tx.txid.clone()
         } else {
@@ -265,6 +361,16 @@ pub fn validate_block(
         } else {
             let (pubkey_str, from_pubkey, from_addr) = resolve_sender(tx)?;
             verify_tx_signature(tx, &pubkey_str, &from_pubkey)?;
+            let expected = *next_nonces
+                .entry(from_addr.clone())
+                .or_insert_with(|| confirmed_next_nonce(&from_addr, chain));
+            if tx.nonce != expected {
+                return Err(NodeError::ValidationError(format!(
+                    "Invalid nonce (expected {}, got {})",
+                    expected, tx.nonce
+                )));
+            }
+            next_nonces.insert(from_addr.clone(), expected.saturating_add(1));
             let bal = balances.entry(from_addr.clone()).or_insert(0);
             if *bal < tx.amount as i128 {
                 return Err(NodeError::ValidationError(
@@ -326,19 +432,33 @@ pub fn save_peers(peers: &[String]) -> Result<(), NodeError> {
     write_data_file("peers.json", &json).map_err(|e| NodeError::NetworkError(e.to_string()))
 }
 
-pub fn load_valid_transactions(chain: &[Block]) -> Vec<Transaction> {
-    let parsed: Vec<Transaction> = read_data_file("mempool.json")
+fn parse_mempool_transactions() -> Vec<Transaction> {
+    read_data_file("mempool.json")
         .ok()
         .flatten()
         .unwrap_or_default()
         .lines()
         .filter_map(|l| serde_json::from_str(l).ok())
-        .collect();
+        .collect()
+}
 
+fn filter_valid_transactions(parsed: Vec<Transaction>, chain: &[Block]) -> Vec<Transaction> {
     let mut balances = calculate_balances(chain);
+    let mut next_nonces: HashMap<String, u64> = HashMap::new();
+    let mut seen_sigs = HashSet::new();
+    let mut seen_txids = HashSet::new();
     let mut valid_txs = Vec::new();
 
     for tx in parsed {
+        if validate_tx_common(&tx).is_err() {
+            continue;
+        }
+        if !seen_sigs.insert(tx.signature.clone()) {
+            continue;
+        }
+        if !tx.txid.is_empty() && !seen_txids.insert(tx.txid.clone()) {
+            continue;
+        }
         if tx.from.is_empty() {
             if tx.signature.starts_with("reward") {
                 valid_txs.push(tx);
@@ -349,8 +469,15 @@ pub fn load_valid_transactions(chain: &[Block]) -> Vec<Transaction> {
         if is_tx_valid_inner(&tx, chain, false).is_ok() {
             let from_addr = normalize_addr(&tx.from);
             let to_addr = normalize_addr(&tx.to);
-            let balance = balances.entry(from_addr).or_insert(0);
+            let expected = *next_nonces
+                .entry(from_addr.clone())
+                .or_insert_with(|| confirmed_next_nonce(&from_addr, chain));
+            if tx.nonce != expected {
+                continue;
+            }
+            let balance = balances.entry(from_addr.clone()).or_insert(0);
             if *balance >= tx.amount as i128 {
+                next_nonces.insert(from_addr, expected.saturating_add(1));
                 *balance -= tx.amount as i128;
                 *balances.entry(to_addr).or_insert(0) += tx.amount as i128;
                 valid_txs.push(tx);
@@ -359,4 +486,22 @@ pub fn load_valid_transactions(chain: &[Block]) -> Vec<Transaction> {
     }
 
     valid_txs
+}
+
+pub fn load_valid_transactions(chain: &[Block]) -> Vec<Transaction> {
+    filter_valid_transactions(parse_mempool_transactions(), chain)
+}
+
+pub fn prune_mempool(chain: &[Block]) -> Result<(usize, usize), NodeError> {
+    let parsed = parse_mempool_transactions();
+    let before = parsed.len();
+    let valid = filter_valid_transactions(parsed, chain);
+    let after = valid.len();
+    let json = valid
+        .iter()
+        .filter_map(|tx| serde_json::to_string(tx).ok())
+        .collect::<Vec<_>>()
+        .join("\n");
+    write_data_file("mempool.json", &json).map_err(|e| NodeError::NetworkError(e.to_string()))?;
+    Ok((before, after))
 }
