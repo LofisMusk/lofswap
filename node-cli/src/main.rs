@@ -262,6 +262,43 @@ mod tests {
 
         assert_eq!(chain::calculate_balance(&to_addr, &chain), 25);
     }
+
+    #[test]
+    fn full_balance_tx_in_mempool_is_mineable() {
+        tmp_clean_files();
+        let from_sk = SecretKey::from_byte_array([6u8; 32]).unwrap();
+        let from_pk = PublicKey::from_secret_key(&Secp256k1::new(), &from_sk).to_string();
+        let reward = Transaction {
+            version: 1,
+            timestamp: 0,
+            from: String::new(),
+            to: pubkey_to_address(&from_pk),
+            amount: 500,
+            signature: "reward".into(),
+            pubkey: String::new(),
+            txid: String::new(),
+        };
+        let chain = vec![Block {
+            version: 1,
+            index: 0,
+            timestamp: 0,
+            transactions: vec![reward],
+            previous_hash: "0".into(),
+            nonce: 0,
+            hash: "0000".into(),
+            miner: "test".into(),
+            difficulty: 4,
+        }];
+
+        let tx = wallet::build_tx(&from_sk, "LFS11111111111111111111", 500);
+        let _ = std::fs::write(
+            "mempool.json",
+            format!("{}\n", serde_json::to_string(&tx).unwrap()),
+        );
+
+        let valid = chain::load_valid_transactions(&chain);
+        assert_eq!(valid.len(), 1, "expected tx to be mineable from mempool");
+    }
 }
 
 fn load_or_create_node_id() -> String {

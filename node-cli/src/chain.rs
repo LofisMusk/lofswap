@@ -133,7 +133,18 @@ fn is_tx_valid_inner(
         .into_iter()
         .filter(|m| {
             let m_from = normalize_addr(&m.from);
-            m_from == derived_addr && !m_from.is_empty()
+            if m_from != derived_addr || m_from.is_empty() {
+                return false;
+            }
+            // When validating a tx that is already in mempool (e.g. miner selection),
+            // exclude that same tx from the pending sum.
+            if m.signature == tx.signature {
+                return false;
+            }
+            if !tx.txid.is_empty() && !m.txid.is_empty() && m.txid == tx.txid {
+                return false;
+            }
+            true
         })
         .map(|m| m.amount as u128)
         .sum();
