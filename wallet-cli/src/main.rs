@@ -24,6 +24,7 @@ const PEER_CACHE_FILE: &str = "wallet-cache/peers_cache.json";
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(800);
 const OFFLINE_GRACE: Duration = Duration::from_secs(10);
 const MIN_BROADCAST_PEERS: usize = 2;
+const WHOAMI_TIMEOUT: Duration = Duration::from_millis(800);
 
 // ---------- Default wallet ----------
 const DEFAULT_WALLET: &str = ".default_wallet";
@@ -179,7 +180,7 @@ impl PeerStore {
 
     fn online_peers(&mut self) -> Vec<String> {
         self.discover();
-        self.refresh_online()
+        dedupe_peers_by_node_identity(self.refresh_online())
     }
 }
 
@@ -217,6 +218,55 @@ fn probe_peer(addr: &str) -> bool {
         return false;
     };
     TcpStream::connect_timeout(&sock, CONNECT_TIMEOUT).is_ok()
+}
+
+fn peer_is_loopback(addr: &str) -> bool {
+    addr.parse::<SocketAddr>()
+        .map(|sock| sock.ip().is_loopback())
+        .unwrap_or(false)
+}
+
+fn peer_node_id(addr: &str) -> Option<String> {
+    let sock: SocketAddr = addr.parse().ok()?;
+    let mut s = TcpStream::connect_timeout(&sock, WHOAMI_TIMEOUT).ok()?;
+    let _ = s.set_read_timeout(Some(WHOAMI_TIMEOUT));
+    s.write_all(b"/whoami").ok()?;
+    let mut buf = Vec::new();
+    s.read_to_end(&mut buf).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&buf).ok()?;
+    v.get("node_id")
+        .and_then(|id| id.as_str())
+        .map(|id| id.to_string())
+}
+
+fn dedupe_peers_by_node_identity(peers: Vec<String>) -> Vec<String> {
+    let mut deduped: Vec<String> = Vec::new();
+    let mut node_to_index: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+
+    for peer in peers {
+        if let Some(node_id) = peer_node_id(&peer) {
+            if let Some(&existing_idx) = node_to_index.get(&node_id) {
+                let existing = &deduped[existing_idx];
+                if peer_is_loopback(&peer) && !peer_is_loopback(existing) {
+                    deduped[existing_idx] = peer;
+                }
+                continue;
+            }
+            node_to_index.insert(node_id, deduped.len());
+            deduped.push(peer);
+        } else if !deduped.contains(&peer) {
+            deduped.push(peer);
+        }
+    }
+
+    deduped
+}
+
+fn is_already_known_reject(reason: &str) -> bool {
+    let normalized = reason.to_ascii_lowercase();
+    normalized.contains("transaction already exists")
+        || normalized.contains("duplicate transaction")
 }
 
 fn append_pending(json: &[u8]) {
@@ -296,8 +346,13 @@ fn broadcast(store: &mut PeerStore, json: &[u8], min_peers: usize) {
         match send_tx_and_get_reply(p, json) {
             Ok(Some(reply)) => {
                 if let Some(reason) = reply.strip_prefix("reject: ") {
-                    println!("TX rejected by {}: {}", p, reason);
-                    rejected_reason = Some(reason.to_string());
+                    if is_already_known_reject(reason) {
+                        println!("Sent to {}", p);
+                        ok += 1;
+                    } else {
+                        println!("TX rejected by {}: {}", p, reason);
+                        rejected_reason = Some(reason.to_string());
+                    }
                 } else {
                     println!("Sent to {}", p);
                     ok += 1;
@@ -702,11 +757,16 @@ fn try_broadcast_pending(store: &mut PeerStore, min_peers: usize) {
             match send_tx_and_get_reply(p, &payload) {
                 Ok(Some(reply)) => {
                     if let Some(reason) = reply.strip_prefix("reject: ") {
-                        println!("TX rejected by {}: {}", p, reason);
-                        rejected = true;
-                        break;
+                        if is_already_known_reject(reason) {
+                            ok += 1;
+                        } else {
+                            println!("TX rejected by {}: {}", p, reason);
+                            rejected = true;
+                            break;
+                        }
+                    } else {
+                        ok += 1;
                     }
-                    ok += 1;
                 }
                 Ok(None) => ok += 1,
                 Err(_) => {}
@@ -772,20 +832,24 @@ fn tx_signed_by_wallet(tx: &Transaction, sk: &SecretKey) -> bool {
 }
 
 fn broadcast_force(store: &mut PeerStore, json: &[u8]) -> (usize, Option<String>) {
-    store.discover();
-    let peers = store.as_slice();
+    let peers = store.online_peers();
     if peers.is_empty() {
         println!("No known peers");
         return (0, None);
     }
     let mut ok = 0;
     let mut rejected_reason: Option<String> = None;
-    for p in peers {
+    for p in &peers {
         match send_tx_and_get_reply(p, json) {
             Ok(Some(reply)) => {
                 if let Some(reason) = reply.strip_prefix("reject: ") {
-                    println!("TX rejected by {}: {}", p, reason);
-                    rejected_reason = Some(reason.to_string());
+                    if is_already_known_reject(reason) {
+                        println!("Sent to {}", p);
+                        ok += 1;
+                    } else {
+                        println!("TX rejected by {}: {}", p, reason);
+                        rejected_reason = Some(reason.to_string());
+                    }
                 } else {
                     ok += 1;
                     println!("Sent to {}", p);
@@ -831,9 +895,14 @@ fn send_raw(store: &mut PeerStore, sig_or_txid: &str, min_peers: usize) {
         match send_tx_and_get_reply(p, &payload) {
             Ok(Some(reply)) => {
                 if let Some(reason) = reply.strip_prefix("reject: ") {
-                    println!("TX rejected by {}: {}", p, reason);
-                    rejected_reason = Some(reason.to_string());
-                    break;
+                    if is_already_known_reject(reason) {
+                        println!("Sent to {}", p);
+                        ok += 1;
+                    } else {
+                        println!("TX rejected by {}: {}", p, reason);
+                        rejected_reason = Some(reason.to_string());
+                        break;
+                    }
                 } else {
                     println!("Sent to {}", p);
                     ok += 1;
