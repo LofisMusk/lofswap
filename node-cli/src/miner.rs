@@ -1,15 +1,17 @@
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use blockchain_core::Block;
+use blockchain_core::{Block, CHAIN_ID, Transaction, TxKind, pubkey_to_address};
+use secp256k1::{PublicKey, Secp256k1};
 use tokio::{
     sync::Mutex,
     time::{Duration, sleep},
 };
 
 use crate::{
-    chain::{load_valid_transactions, prune_mempool, save_chain},
+    chain::{block_subsidy, load_valid_transactions, prune_mempool, save_chain},
     p2p::{broadcast_to_known_nodes, get_my_address},
-    wallet::read_mempool,
+    wallet::{read_mempool, wallet_load_default},
 };
 
 pub async fn mine_block(blockchain: &Arc<Mutex<Vec<Block>>>) {
@@ -36,7 +38,41 @@ pub async fn mine_block(blockchain: &Arc<Mutex<Vec<Block>>>) {
     let miner = get_my_address()
         .await
         .unwrap_or_else(|| "unknown".to_string());
-    let block = Block::new(target_index, transactions, prev_hash.clone(), miner);
+    let miner_reward_addr = std::env::var("MINER_REWARD_ADDRESS")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            wallet_load_default().map(|sk| {
+                let pk = PublicKey::from_secret_key(&Secp256k1::new(), &sk);
+                pubkey_to_address(&pk.to_string())
+            })
+        })
+        .unwrap_or_else(|| miner.clone());
+    let mut block_txs = Vec::with_capacity(transactions.len() + 1);
+    let fees_sum: u64 = transactions.iter().map(|tx| tx.fee).sum();
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let mut coinbase = Transaction {
+        version: 3,
+        chain_id: CHAIN_ID.to_string(),
+        kind: TxKind::Coinbase,
+        timestamp: ts,
+        from: String::new(),
+        to: miner_reward_addr,
+        amount: block_subsidy(target_index).saturating_add(fees_sum),
+        fee: 0,
+        signature: format!("coinbase:{}:{}", target_index, miner),
+        pubkey: String::new(),
+        nonce: 0,
+        txid: String::new(),
+    };
+    coinbase.txid = coinbase.compute_txid();
+    block_txs.push(coinbase);
+    block_txs.extend(transactions);
+
+    let block = Block::new(target_index, block_txs, prev_hash.clone(), miner);
 
     println!("[mining] solved block: {}", block.hash);
     {

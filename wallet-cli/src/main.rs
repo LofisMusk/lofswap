@@ -2,7 +2,7 @@
 //! Wallet CLI - relies only on `peers.json` + `BOOTSTRAP_NODES`.
 //! All legacy `nodes.txt` paths have been removed.
 
-use blockchain_core::{Block, CHAIN_ID, Transaction, pubkey_to_address};
+use blockchain_core::{Block, CHAIN_ID, Transaction, TxKind, pubkey_to_address};
 use chrono::Utc;
 use rand::seq::IndexedRandom;
 use secp256k1::{Message, PublicKey, Secp256k1, SecretKey, ecdsa::Signature};
@@ -25,6 +25,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_millis(800);
 const OFFLINE_GRACE: Duration = Duration::from_secs(10);
 const MIN_BROADCAST_PEERS: usize = 2;
 const WHOAMI_TIMEOUT: Duration = Duration::from_millis(800);
+const DEFAULT_TX_FEE: u64 = 1;
 
 // ---------- Default wallet ----------
 const DEFAULT_WALLET: &str = ".default_wallet";
@@ -469,18 +470,28 @@ fn build_tx(store: &mut PeerStore, sk: &SecretKey, to: &str, amount: u64) -> Tra
     let nonce = fetch_next_nonce_from_peers(store, &from_addr)
         .unwrap_or_else(|| next_nonce_fallback_from_local(&from_addr));
     let preimage = format!(
-        "{}|{}|{}|{}|{}|{}|{}",
-        3, CHAIN_ID, pk, to, amount, ts, nonce
+        "{}|{}|{:?}|{}|{}|{}|{}|{}|{}",
+        3,
+        CHAIN_ID,
+        TxKind::Transfer,
+        pk,
+        to,
+        amount,
+        DEFAULT_TX_FEE,
+        ts,
+        nonce
     );
     let hash = Sha256::digest(preimage.as_bytes());
     let sig = secp.sign_ecdsa(Message::from_digest(hash.into()), sk);
     let mut tx = Transaction {
         version: 3,
         chain_id: CHAIN_ID.to_string(),
+        kind: TxKind::Transfer,
         timestamp: ts,
         from: from_addr,
         to: to.into(),
         amount,
+        fee: DEFAULT_TX_FEE,
         signature: hex::encode(sig.serialize_compact()),
         pubkey: pk.to_string(),
         nonce,
@@ -661,34 +672,10 @@ fn tx_info(store: &mut PeerStore, id: &str) {
 
 // ---------- Faucet ----------
 fn faucet(store: &mut PeerStore, addr: &str) {
-    // Faucet uses seconds precision; use UTC to keep it timezone-agnostic
-    let ts = Utc::now().timestamp();
-    let mut nonce = [0u8; 8];
-    use rand::RngCore;
-    rand::rng().fill_bytes(&mut nonce);
-    let reward_sig = format!("reward:{}:{}", ts, hex::encode(nonce));
-    let mut tx = Transaction {
-        version: 1,
-        chain_id: CHAIN_ID.to_string(),
-        timestamp: ts,
-        from: String::new(),
-        to: addr.into(),
-        amount: 1000,
-        signature: reward_sig,
-        pubkey: String::new(),
-        nonce: 0,
-        txid: String::new(),
-    };
-    tx.txid = tx.compute_txid();
-    let data = serde_json::to_vec(&tx).unwrap();
-    store.discover();
-    for p in store.as_slice() {
-        if connect_and_send(&p, &data).is_ok() {
-            println!("Faucet to {} via {}", addr, p);
-            return;
-        }
-    }
-    println!("Faucet failed; no reachable peers");
+    let _ = store;
+    let _ = addr;
+    println!("Faucet is disabled in hard-fork v2.");
+    println!("Emission exists only via coinbase in mined blocks.");
 }
 
 // ---------- Import / export ----------
@@ -722,7 +709,7 @@ fn export_dat(path: &str) {
 // ---------- CLI ----------
 fn help() {
     println!(
-        "Commands:\n  help\n  create-wallet\n  import-priv <hex>\n  import-dat <file>\n  export-dat <file>\n  default-wallet\n  send <to?> <amount> [n=2]   (defaults to your address)\n  send-priv <priv> <to> <amount> [n=2]\n  sign-raw <to> <amount>      (sign only; save locally)\n  sign-raw-priv <priv> <to> <amount>\n  send-raw <sig|txid> [n=2]   (broadcast a stored raw tx)\n  raw_tx                      (list stored raw-signed txs)\n  force-send <signature>     (resend a pending tx even if only one peer is reachable)\n  balance [address]          (defaults to your address)\n  faucet [address]           (defaults to your address)\n  tx-history [address]       (defaults to your address)\n  tx-info <txid|signature>\n  list-peers\n  print-mempool\n  exit"
+        "Commands:\n  help\n  create-wallet\n  import-priv <hex>\n  import-dat <file>\n  export-dat <file>\n  default-wallet\n  send <to?> <amount> [n=2]   (defaults to your address)\n  send-priv <priv> <to> <amount> [n=2]\n  sign-raw <to> <amount>      (sign only; save locally)\n  sign-raw-priv <priv> <to> <amount>\n  send-raw <sig|txid> [n=2]   (broadcast a stored raw tx)\n  raw_tx                      (list stored raw-signed txs)\n  force-send <signature>     (resend a pending tx even if only one peer is reachable)\n  balance [address]          (defaults to your address)\n  faucet [address]           (disabled in v2; coinbase-only emission)\n  tx-history [address]       (defaults to your address)\n  tx-info <txid|signature>\n  list-peers\n  print-mempool\n  exit"
     );
 }
 

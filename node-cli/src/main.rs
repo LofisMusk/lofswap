@@ -122,7 +122,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     use crate::storage::{remove_data_file, write_data_file};
-    use blockchain_core::{Block, CHAIN_ID, Transaction, pubkey_to_address};
+    use blockchain_core::{Block, CHAIN_ID, Transaction, TxKind, pubkey_to_address};
     use once_cell::sync::Lazy;
     use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
     use serde_json;
@@ -141,22 +141,33 @@ mod tests {
     }
 
     fn signed_tx(sk: &SecretKey, to: &str, amount: u64, nonce: u64, ts: i64) -> Transaction {
+        const TEST_TX_FEE: u64 = 1;
         let secp = Secp256k1::new();
         let pk = PublicKey::from_secret_key(&secp, sk);
         let from = pubkey_to_address(&pk.to_string());
         let preimage = format!(
-            "{}|{}|{}|{}|{}|{}|{}",
-            3, CHAIN_ID, pk, to, amount, ts, nonce
+            "{}|{}|{:?}|{}|{}|{}|{}|{}|{}",
+            3,
+            CHAIN_ID,
+            TxKind::Transfer,
+            pk,
+            to,
+            amount,
+            TEST_TX_FEE,
+            ts,
+            nonce
         );
         let hash = Sha256::digest(preimage.as_bytes());
         let sig = secp.sign_ecdsa(Message::from_digest(hash.into()), sk);
         let mut tx = Transaction {
             version: 3,
             chain_id: CHAIN_ID.to_string(),
+            kind: TxKind::Transfer,
             timestamp: ts,
             from,
             to: to.into(),
             amount,
+            fee: TEST_TX_FEE,
             signature: hex::encode(sig.serialize_compact()),
             pubkey: pk.to_string(),
             nonce,
@@ -175,11 +186,13 @@ mod tests {
         let reward = Transaction {
             version: 1,
             chain_id: CHAIN_ID.to_string(),
+            kind: TxKind::Coinbase,
             timestamp: 0,
             from: String::new(),
             to: pubkey_to_address(&from_pk),
             amount: 100,
-            signature: "reward".into(),
+            fee: 0,
+            signature: "coinbase:0".into(),
             pubkey: String::new(),
             nonce: 0,
             txid: String::new(),
@@ -211,11 +224,13 @@ mod tests {
         let reward = Transaction {
             version: 1,
             chain_id: CHAIN_ID.to_string(),
+            kind: TxKind::Coinbase,
             timestamp: 0,
             from: String::new(),
             to: pubkey_to_address(&from_pk),
             amount: 100,
-            signature: "reward".into(),
+            fee: 0,
+            signature: "coinbase:0".into(),
             pubkey: String::new(),
             nonce: 0,
             txid: String::new(),
@@ -261,11 +276,13 @@ mod tests {
         let reward = Transaction {
             version: 1,
             chain_id: CHAIN_ID.to_string(),
+            kind: TxKind::Coinbase,
             timestamp: 0,
             from: String::new(),
             to: pubkey_to_address(&from_pk),
             amount: 100,
-            signature: "reward".into(),
+            fee: 0,
+            signature: "coinbase:0".into(),
             pubkey: String::new(),
             nonce: 0,
             txid: String::new(),
@@ -284,7 +301,22 @@ mod tests {
         let chain = vec![genesis.clone()];
 
         let tx = signed_tx(&from_sk, "LFS11111111111111111111", 10, 0, 1);
-        let block = Block::new(1, vec![tx], genesis.hash.clone(), "miner".into());
+        let mut coinbase = Transaction {
+            version: 3,
+            chain_id: CHAIN_ID.to_string(),
+            kind: TxKind::Coinbase,
+            timestamp: 1,
+            from: String::new(),
+            to: "miner".into(),
+            amount: chain::block_subsidy(1).saturating_add(tx.fee),
+            fee: 0,
+            signature: "coinbase:1".into(),
+            pubkey: String::new(),
+            nonce: 0,
+            txid: String::new(),
+        };
+        coinbase.txid = coinbase.compute_txid();
+        let block = Block::new(1, vec![coinbase, tx], genesis.hash.clone(), "miner".into());
         assert!(chain::validate_block(&block, Some(&genesis), &chain).is_ok());
     }
 
@@ -300,11 +332,13 @@ mod tests {
         let reward = Transaction {
             version: 1,
             chain_id: CHAIN_ID.to_string(),
+            kind: TxKind::Coinbase,
             timestamp: 0,
             from: String::new(),
             to: pubkey_to_address(&from_pk),
             amount: 100,
-            signature: "reward".into(),
+            fee: 0,
+            signature: "coinbase:0".into(),
             pubkey: String::new(),
             nonce: 0,
             txid: String::new(),
@@ -334,11 +368,13 @@ mod tests {
         let reward = Transaction {
             version: 1,
             chain_id: CHAIN_ID.to_string(),
+            kind: TxKind::Coinbase,
             timestamp: 0,
             from: String::new(),
             to: pubkey_to_address(&from_pk),
             amount: 500,
-            signature: "reward".into(),
+            fee: 0,
+            signature: "coinbase:0".into(),
             pubkey: String::new(),
             nonce: 0,
             txid: String::new(),
@@ -355,7 +391,7 @@ mod tests {
             difficulty: 4,
         }];
 
-        let tx = signed_tx(&from_sk, "LFS11111111111111111111", 500, 0, 1);
+        let tx = signed_tx(&from_sk, "LFS11111111111111111111", 499, 0, 1);
         let _ = write_data_file(
             "mempool.json",
             &format!("{}\n", serde_json::to_string(&tx).unwrap()),
@@ -374,11 +410,13 @@ mod tests {
         let reward = Transaction {
             version: 1,
             chain_id: CHAIN_ID.to_string(),
+            kind: TxKind::Coinbase,
             timestamp: 0,
             from: String::new(),
             to: pubkey_to_address(&from_pk),
             amount: 100,
-            signature: "reward".into(),
+            fee: 0,
+            signature: "coinbase:0".into(),
             pubkey: String::new(),
             nonce: 0,
             txid: String::new(),
@@ -411,11 +449,13 @@ mod tests {
         let reward = Transaction {
             version: 1,
             chain_id: CHAIN_ID.to_string(),
+            kind: TxKind::Coinbase,
             timestamp: 0,
             from: String::new(),
             to: pubkey_to_address(&from_pk),
             amount: 100,
-            signature: "reward".into(),
+            fee: 0,
+            signature: "coinbase:0".into(),
             pubkey: String::new(),
             nonce: 0,
             txid: String::new(),
@@ -449,11 +489,13 @@ mod tests {
         let reward = Transaction {
             version: 1,
             chain_id: CHAIN_ID.to_string(),
+            kind: TxKind::Coinbase,
             timestamp: 0,
             from: String::new(),
             to: pubkey_to_address(&from_pk),
             amount: 100,
-            signature: "reward".into(),
+            fee: 0,
+            signature: "coinbase:0".into(),
             pubkey: String::new(),
             nonce: 0,
             txid: String::new(),
@@ -486,11 +528,13 @@ mod tests {
         let reward = Transaction {
             version: 1,
             chain_id: CHAIN_ID.to_string(),
+            kind: TxKind::Coinbase,
             timestamp: 0,
             from: String::new(),
             to: pubkey_to_address(&from_pk),
             amount: 100,
-            signature: "reward".into(),
+            fee: 0,
+            signature: "coinbase:0".into(),
             pubkey: String::new(),
             nonce: 0,
             txid: String::new(),
@@ -510,10 +554,12 @@ mod tests {
         let invalid = Transaction {
             version: 3,
             chain_id: CHAIN_ID.to_string(),
+            kind: TxKind::Transfer,
             timestamp: 3,
             from: pubkey_to_address(&from_pk),
             to: "bad-address".into(),
             amount: 0,
+            fee: 1,
             signature: "00".into(),
             pubkey: from_pk.clone(),
             nonce: 99,
@@ -542,11 +588,13 @@ mod tests {
         let reward = Transaction {
             version: 1,
             chain_id: CHAIN_ID.to_string(),
+            kind: TxKind::Coinbase,
             timestamp: 0,
             from: String::new(),
             to: pubkey_to_address(&from_pk),
             amount: 100,
-            signature: "reward".into(),
+            fee: 0,
+            signature: "coinbase:0".into(),
             pubkey: String::new(),
             nonce: 0,
             txid: String::new(),
@@ -567,7 +615,22 @@ mod tests {
 
         let tx = signed_tx(&from_sk, "LFS11111111111111111111", 30, 0, 4);
         assert!(chain::is_tx_valid(&tx, &node_a).is_ok());
-        let block = Block::new(1, vec![tx], genesis.hash.clone(), "miner-a".into());
+        let mut coinbase = Transaction {
+            version: 3,
+            chain_id: CHAIN_ID.to_string(),
+            kind: TxKind::Coinbase,
+            timestamp: 4,
+            from: String::new(),
+            to: "miner-a".into(),
+            amount: chain::block_subsidy(1).saturating_add(tx.fee),
+            fee: 0,
+            signature: "coinbase:1".into(),
+            pubkey: String::new(),
+            nonce: 0,
+            txid: String::new(),
+        };
+        coinbase.txid = coinbase.compute_txid();
+        let block = Block::new(1, vec![coinbase, tx], genesis.hash.clone(), "miner-a".into());
         assert!(chain::validate_block(&block, Some(&genesis), &node_b).is_ok());
 
         node_a.push(block.clone());

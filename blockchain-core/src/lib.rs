@@ -12,16 +12,31 @@ pub fn default_chain_id() -> String {
     CHAIN_ID.to_string()
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TxKind {
+    Coinbase,
+    Transfer,
+}
+
+fn default_tx_kind() -> TxKind {
+    TxKind::Transfer
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Transaction {
     // spec fields (frozen v0.9)
     pub version: u8,
     #[serde(default = "default_chain_id")]
     pub chain_id: String,
+    #[serde(default = "default_tx_kind")]
+    pub kind: TxKind,
     pub timestamp: i64,
     pub from: String, // now address (LFS...), legacy: raw pubkey
     pub to: String,
     pub amount: u64,
+    #[serde(default)]
+    pub fee: u64,
     pub signature: String,
     #[serde(default)]
     pub pubkey: String, // sender pubkey for signature verification
@@ -34,8 +49,7 @@ pub struct Transaction {
 
 impl Transaction {
     pub fn compute_txid(&self) -> String {
-        // txid is sha256 of canonical preimage; keep signature scheme compatibility
-        // Note: Signing preimage stays (from||to||amount). txid adds timestamp to reduce collisions.
+        // txid is sha256 over canonical v3 fields, including kind/fee/nonce for replay safety.
         let signer = if !self.pubkey.is_empty() {
             self.pubkey.as_str()
         } else {
@@ -49,15 +63,23 @@ impl Transaction {
         // Include nonce so txids remain unique and sender-ordered.
         let preimage = if self.version >= 3 {
             format!(
-                "{}|{}|{}|{}|{}|{}|{}",
-                self.version, chain_id, signer, self.to, self.amount, self.timestamp, self.nonce
+                "{}|{}|{:?}|{}|{}|{}|{}|{}",
+                self.version,
+                chain_id,
+                self.kind,
+                signer,
+                self.to,
+                self.amount,
+                self.fee,
+                self.timestamp
             )
         } else {
             format!(
-                "{}|{}|{}|{}|{}|{}",
-                self.version, signer, self.to, self.amount, self.timestamp, self.nonce
+                "{}|{:?}|{}|{}|{}|{}|{}",
+                self.version, self.kind, signer, self.to, self.amount, self.fee, self.timestamp
             )
         };
+        let preimage = format!("{}|{}", preimage, self.nonce);
         let mut hasher = Sha256::new();
         hasher.update(preimage.as_bytes());
         format!("{:x}", hasher.finalize())

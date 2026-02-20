@@ -6,7 +6,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use blockchain_core::{Block, CHAIN_ID, Transaction, pubkey_to_address};
+use blockchain_core::{Block, CHAIN_ID, Transaction, TxKind, pubkey_to_address};
 use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
 use serde_json::{self, Value};
 use sha2::{Digest, Sha256};
@@ -99,12 +99,13 @@ pub fn wallet_pending_count() -> usize {
 
 #[allow(dead_code)]
 pub fn build_tx(sk: &SecretKey, to: &str, amount: u64) -> Transaction {
+    const DEFAULT_TX_FEE: u64 = 1;
     let secp = Secp256k1::new();
     let pk = PublicKey::from_secret_key(&secp, sk);
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis() as i64;
+        .as_secs() as i64;
     let from_addr = pubkey_to_address(&pk.to_string());
     let nonce = if cfg!(test) {
         0
@@ -113,8 +114,16 @@ pub fn build_tx(sk: &SecretKey, to: &str, amount: u64) -> Transaction {
         chain::next_nonce_for_address(&from_addr, &chain)
     };
     let preimage = format!(
-        "{}|{}|{}|{}|{}|{}|{}",
-        3, CHAIN_ID, pk, to, amount, ts, nonce
+        "{}|{}|{:?}|{}|{}|{}|{}|{}|{}",
+        3,
+        CHAIN_ID,
+        TxKind::Transfer,
+        pk,
+        to,
+        amount,
+        DEFAULT_TX_FEE,
+        ts,
+        nonce
     );
     let hash = Sha256::digest(preimage.as_bytes());
     let msg = Message::from_digest(hash.into());
@@ -122,10 +131,12 @@ pub fn build_tx(sk: &SecretKey, to: &str, amount: u64) -> Transaction {
     let mut tx = Transaction {
         version: 3,
         chain_id: CHAIN_ID.to_string(),
+        kind: TxKind::Transfer,
         timestamp: ts,
         from: from_addr,
         to: to.into(),
         amount,
+        fee: DEFAULT_TX_FEE,
         signature: hex::encode(sig.serialize_compact()),
         pubkey: pk.to_string(),
         nonce,

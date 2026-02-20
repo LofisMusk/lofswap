@@ -1,4 +1,4 @@
-use blockchain_core::{pubkey_to_address, Block, Transaction, CHAIN_ID};
+use blockchain_core::{pubkey_to_address, Block, Transaction, TxKind, CHAIN_ID};
 use chrono::Utc;
 use eframe::{egui, CreationContext, NativeOptions};
 use rand::{seq::IndexedRandom, RngCore};
@@ -28,6 +28,7 @@ const OFFLINE_GRACE: Duration = Duration::from_secs(10);
 const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const MIN_BROADCAST_PEERS: usize = 2;
 const MAX_EVENT_LOG: usize = 8;
+const DEFAULT_TX_FEE: u64 = 1;
 
 #[derive(Clone)]
 struct HistoryRow {
@@ -447,40 +448,7 @@ impl WalletApp {
     }
 
     fn faucet_me(&mut self) {
-        let Some(addr) = self.wallet.address.clone() else {
-            self.push_event("No default wallet loaded");
-            return;
-        };
-        let mut nonce = [0u8; 8];
-        rand::rng().fill_bytes(&mut nonce);
-        let ts = Utc::now().timestamp();
-        let mut tx = Transaction {
-            version: 1,
-            chain_id: CHAIN_ID.to_string(),
-            timestamp: ts,
-            from: String::new(),
-            to: addr,
-            amount: 1000,
-            signature: format!("reward:{}:{}", ts, hex::encode(nonce)),
-            pubkey: String::new(),
-            nonce: 0,
-            txid: String::new(),
-        };
-        tx.txid = tx.compute_txid();
-
-        let payload = serde_json::to_vec(&tx).unwrap_or_default();
-        let mut sent = 0usize;
-        for peer in self.peers.online_peers() {
-            if send_tx_and_get_reply(&peer, &payload).is_ok() {
-                sent += 1;
-            }
-        }
-
-        if sent > 0 {
-            self.push_event(format!("Faucet sent to {sent} peer(s)"));
-        } else {
-            self.push_event("Faucet failed: no reachable peers");
-        }
+        self.push_event("Faucet is disabled in hard-fork v2 (coinbase-only emission).");
         self.refresh_all(true);
     }
 
@@ -1166,8 +1134,16 @@ fn build_tx(peers: &mut PeerStore, sk: &SecretKey, to: &str, amount: u64) -> Tra
         .unwrap_or_else(|| next_nonce_fallback_from_local(&from_addr));
 
     let preimage = format!(
-        "{}|{}|{}|{}|{}|{}|{}",
-        3, CHAIN_ID, pk, to, amount, ts, nonce
+        "{}|{}|{:?}|{}|{}|{}|{}|{}|{}",
+        3,
+        CHAIN_ID,
+        TxKind::Transfer,
+        pk,
+        to,
+        amount,
+        DEFAULT_TX_FEE,
+        ts,
+        nonce
     );
     let hash = Sha256::digest(preimage.as_bytes());
     let sig = secp.sign_ecdsa(Message::from_digest(hash.into()), sk);
@@ -1175,10 +1151,12 @@ fn build_tx(peers: &mut PeerStore, sk: &SecretKey, to: &str, amount: u64) -> Tra
     let mut tx = Transaction {
         version: 3,
         chain_id: CHAIN_ID.to_string(),
+        kind: TxKind::Transfer,
         timestamp: ts,
         from: from_addr,
         to: to.to_string(),
         amount,
+        fee: DEFAULT_TX_FEE,
         signature: hex::encode(sig.serialize_compact()),
         pubkey: pk.to_string(),
         nonce,

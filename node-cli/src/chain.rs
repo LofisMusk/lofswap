@@ -1,6 +1,9 @@
 use std::collections::{HashMap, HashSet};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use blockchain_core::{Block, CHAIN_ID, DEFAULT_DIFFICULTY_ZEROS, Transaction, pubkey_to_address};
+use blockchain_core::{
+    Block, CHAIN_ID, DEFAULT_DIFFICULTY_ZEROS, Transaction, TxKind, pubkey_to_address,
+};
 use secp256k1::{Message, PublicKey, Secp256k1, ecdsa::Signature};
 use serde_json;
 use sha2::{Digest, Sha256};
@@ -10,6 +13,49 @@ use crate::{
     storage::{read_data_file, write_data_file},
     wallet::read_mempool,
 };
+
+const INITIAL_SUBSIDY: u64 = 1000;
+const HALVING_INTERVAL: u64 = 100_000;
+const MAX_FUTURE_DRIFT_SECS: i64 = 2 * 60 * 60;
+const MIN_TX_FEE: u64 = 1;
+
+pub fn block_subsidy(height: u64) -> u64 {
+    let halvings = height / HALVING_INTERVAL;
+    if halvings >= 63 {
+        0
+    } else {
+        INITIAL_SUBSIDY >> halvings
+    }
+}
+
+fn is_coinbase_tx(tx: &Transaction) -> bool {
+    tx.kind == TxKind::Coinbase
+        && tx.from.is_empty()
+        && tx.pubkey.is_empty()
+        && tx.nonce == 0
+        && tx.signature.starts_with("coinbase:")
+}
+
+fn now_unix_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+fn median_time_past(chain: &[Block], window: usize) -> i64 {
+    if chain.is_empty() {
+        return 0;
+    }
+    let mut times: Vec<i64> = chain
+        .iter()
+        .rev()
+        .take(window)
+        .map(|b| b.timestamp)
+        .collect();
+    times.sort_unstable();
+    times[times.len() / 2]
+}
 
 pub fn calculate_balance(address: &str, chain: &[Block]) -> i128 {
     let address = normalize_addr(address);
@@ -22,7 +68,7 @@ pub fn calculate_balance(address: &str, chain: &[Block]) -> i128 {
             }
             let from_addr = normalize_addr(&tx.from);
             if from_addr == address && !tx.from.is_empty() {
-                balance -= tx.amount as i128;
+                balance -= (tx.amount as i128) + (tx.fee as i128);
             }
         }
     }
@@ -36,7 +82,8 @@ pub fn calculate_balances(chain: &[Block]) -> HashMap<String, i128> {
             let from_addr = normalize_addr(&tx.from);
             let to_addr = normalize_addr(&tx.to);
             if !from_addr.is_empty() {
-                *balances.entry(from_addr).or_insert(0) -= tx.amount as i128;
+                *balances.entry(from_addr).or_insert(0) -=
+                    (tx.amount as i128) + (tx.fee as i128);
             }
             *balances.entry(to_addr).or_insert(0) += tx.amount as i128;
         }
@@ -91,7 +138,8 @@ fn validate_tx_common(tx: &Transaction) -> Result<(), NodeError> {
     if tx.to.is_empty() {
         return Err(NodeError::ValidationError("Missing recipient".to_string()));
     }
-    if !is_valid_recipient(&tx.to) {
+    // Coinbase output can use miner identifier if reward address is not configured yet.
+    if !tx.from.is_empty() && !is_valid_recipient(&tx.to) {
         return Err(NodeError::ValidationError(
             "Invalid recipient address".to_string(),
         ));
@@ -104,6 +152,23 @@ fn validate_tx_common(tx: &Transaction) -> Result<(), NodeError> {
         };
         if chain_id != CHAIN_ID {
             return Err(NodeError::ValidationError("Wrong chain id".to_string()));
+        }
+    }
+    match tx.kind {
+        TxKind::Coinbase => {
+            if tx.fee != 0 {
+                return Err(NodeError::ValidationError(
+                    "Coinbase fee must be zero".to_string(),
+                ));
+            }
+        }
+        TxKind::Transfer => {
+            if tx.fee < MIN_TX_FEE {
+                return Err(NodeError::ValidationError(format!(
+                    "Fee too low (min {})",
+                    MIN_TX_FEE
+                )));
+            }
         }
     }
     Ok(())
@@ -189,9 +254,17 @@ fn verify_tx_signature(
         tx.chain_id.as_str()
     };
     let msg_data_v3 = format!(
-        "{}|{}|{}|{}|{}|{}|{}",
-        tx.version, chain_id, pubkey_str, tx.to, tx.amount, tx.timestamp, tx.nonce
+        "{}|{}|{:?}|{}|{}|{}|{}|{}",
+        tx.version,
+        chain_id,
+        tx.kind,
+        pubkey_str,
+        tx.to,
+        tx.amount,
+        tx.fee,
+        tx.timestamp
     );
+    let msg_data_v3 = format!("{}|{}", msg_data_v3, tx.nonce);
     let hash_v3 = Sha256::digest(msg_data_v3.as_bytes());
     let msg_v3 = Message::from_digest(hash_v3.into());
 
@@ -237,12 +310,9 @@ fn is_tx_valid_inner(
     check_mempool_duplicates: bool,
 ) -> Result<(), NodeError> {
     validate_tx_common(tx)?;
-    if tx.from.is_empty() {
-        if tx.signature.starts_with("reward") {
-            return Ok(());
-        }
+    if tx.kind == TxKind::Coinbase || tx.from.is_empty() {
         return Err(NodeError::ValidationError(
-            "Missing sender for non-reward transaction".to_string(),
+            "Coinbase transaction is block-only".to_string(),
         ));
     }
 
@@ -268,9 +338,13 @@ fn is_tx_valid_inner(
             }
             true
         })
-        .map(|m| m.amount as u128)
+        .map(|m| (m.amount as u128).saturating_add(m.fee as u128))
         .sum();
-    if (tx.amount as u128) + pending_out > (balance.max(0) as u128) {
+    if (tx.amount as u128)
+        .saturating_add(tx.fee as u128)
+        .saturating_add(pending_out)
+        > (balance.max(0) as u128)
+    {
         return Err(NodeError::ValidationError(
             "Insufficient balance (pending)".to_string(),
         ));
@@ -318,9 +392,20 @@ pub fn validate_block(
                 "Block timestamp regressed".to_string(),
             ));
         }
+        let mtp = median_time_past(chain, 11);
+        if block.timestamp < mtp {
+            return Err(NodeError::ValidationError(
+                "Block timestamp below median time past".to_string(),
+            ));
+        }
     } else if block.index != 0 {
         return Err(NodeError::ValidationError(
             "Invalid genesis index".to_string(),
+        ));
+    }
+    if block.timestamp > now_unix_secs().saturating_add(MAX_FUTURE_DRIFT_SECS) {
+        return Err(NodeError::ValidationError(
+            "Block timestamp too far in future".to_string(),
         ));
     }
 
@@ -340,6 +425,19 @@ pub fn validate_block(
         ));
     }
 
+    if block.transactions.is_empty() {
+        return Err(NodeError::ValidationError(
+            "Block must contain coinbase at index 0".to_string(),
+        ));
+    }
+
+    let coinbase = &block.transactions[0];
+    if !is_coinbase_tx(coinbase) {
+        return Err(NodeError::ValidationError(
+            "Invalid coinbase transaction".to_string(),
+        ));
+    }
+
     let mut balances = calculate_balances(chain);
     let mut seen = HashSet::new();
     let mut chain_seen = HashSet::new();
@@ -352,7 +450,8 @@ pub fn validate_block(
             chain_seen.insert(tx.signature.clone());
         }
     }
-    for tx in &block.transactions {
+    let mut fees_sum: u64 = 0;
+    for (idx, tx) in block.transactions.iter().enumerate() {
         validate_tx_common(tx)?;
         let txid = if !tx.txid.is_empty() {
             tx.txid.clone()
@@ -376,12 +475,12 @@ pub fn validate_block(
             ));
         }
 
-        if tx.from.is_empty() {
-            if !tx.signature.starts_with("reward") {
-                return Err(NodeError::ValidationError(
-                    "Invalid reward transaction".to_string(),
-                ));
-            }
+        if idx == 0 {
+            continue;
+        } else if tx.kind != TxKind::Transfer || tx.from.is_empty() {
+            return Err(NodeError::ValidationError(
+                "Only transfer transactions are allowed after coinbase".to_string(),
+            ));
         } else {
             let (pubkey_str, from_pubkey, from_addr) = resolve_sender(tx)?;
             verify_tx_signature(tx, &pubkey_str, &from_pubkey)?;
@@ -396,15 +495,25 @@ pub fn validate_block(
             }
             next_nonces.insert(from_addr.clone(), expected.saturating_add(1));
             let bal = balances.entry(from_addr.clone()).or_insert(0);
-            if *bal < tx.amount as i128 {
+            let spend = (tx.amount as i128) + (tx.fee as i128);
+            if *bal < spend {
                 return Err(NodeError::ValidationError(
                     "Insufficient balance".to_string(),
                 ));
             }
-            *bal -= tx.amount as i128;
+            *bal -= spend;
+            fees_sum = fees_sum.saturating_add(tx.fee);
         }
         let to_addr = normalize_addr(&tx.to);
         *balances.entry(to_addr).or_insert(0) += tx.amount as i128;
+    }
+
+    let expected_reward = block_subsidy(block.index).saturating_add(fees_sum);
+    if coinbase.amount != expected_reward {
+        return Err(NodeError::ValidationError(format!(
+            "Invalid coinbase amount (expected {}, got {})",
+            expected_reward, coinbase.amount
+        )));
     }
 
     Ok(())
@@ -484,6 +593,10 @@ fn filter_valid_transactions(parsed: Vec<Transaction>, chain: &[Block]) -> Vec<T
     let mut valid_txs = Vec::new();
 
     for tx in parsed {
+        if tx.kind == TxKind::Coinbase || tx.from.is_empty() {
+            // Never mine coinbase/reward from mempool.
+            continue;
+        }
         if validate_tx_common(&tx).is_err() {
             continue;
         }
@@ -493,13 +606,6 @@ fn filter_valid_transactions(parsed: Vec<Transaction>, chain: &[Block]) -> Vec<T
         if !tx.txid.is_empty() && !seen_txids.insert(tx.txid.clone()) {
             continue;
         }
-        if tx.from.is_empty() {
-            if tx.signature.starts_with("reward") {
-                valid_txs.push(tx);
-            }
-            continue;
-        }
-
         if is_tx_valid_inner(&tx, chain, false).is_ok() {
             let from_addr = normalize_addr(&tx.from);
             let to_addr = normalize_addr(&tx.to);
@@ -510,9 +616,10 @@ fn filter_valid_transactions(parsed: Vec<Transaction>, chain: &[Block]) -> Vec<T
                 continue;
             }
             let balance = balances.entry(from_addr.clone()).or_insert(0);
-            if *balance >= tx.amount as i128 {
+            let spend = (tx.amount as i128) + (tx.fee as i128);
+            if *balance >= spend {
                 next_nonces.insert(from_addr, expected.saturating_add(1));
-                *balance -= tx.amount as i128;
+                *balance -= spend;
                 *balances.entry(to_addr).or_insert(0) += tx.amount as i128;
                 valid_txs.push(tx);
             }
