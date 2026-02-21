@@ -10,8 +10,9 @@ use tokio::{
 
 use crate::{
     chain::{block_subsidy, load_valid_transactions, prune_mempool, save_chain},
+    mempool::mempool_len,
     p2p::{broadcast_to_known_nodes, get_my_address},
-    wallet::{read_mempool, wallet_load_default},
+    wallet::wallet_load_default,
 };
 
 pub async fn mine_block(blockchain: &Arc<Mutex<Vec<Block>>>) {
@@ -28,7 +29,7 @@ pub async fn mine_block(blockchain: &Arc<Mutex<Vec<Block>>>) {
         return;
     }
 
-    let pending_len = read_mempool().len();
+    let pending_len = mempool_len();
     println!(
         "[mining] starting... txs_in_block={} mempool_pending={}",
         transactions.len(),

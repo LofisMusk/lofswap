@@ -1,25 +1,27 @@
 use std::sync::{Arc, atomic::AtomicUsize};
 
 use once_cell::sync::Lazy;
-use rand::RngCore;
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::Duration;
 
 mod chain;
 mod cli;
 mod errors;
+mod identity;
+mod mempool;
 mod miner;
 mod p2p;
 mod storage;
 mod upnp;
 mod wallet;
 
-use storage::{ensure_data_dir, read_data_file, write_data_file};
+use storage::ensure_data_dir;
 
 pub use errors::NodeError;
 
 pub static OBSERVED_IP: Lazy<RwLock<Option<String>>> = Lazy::new(|| RwLock::new(None));
-pub static NODE_ID: Lazy<String> = Lazy::new(|| load_or_create_node_id());
+pub static NODE_ID: Lazy<String> = Lazy::new(identity::node_id);
+pub static NODE_PUBKEY: Lazy<String> = Lazy::new(identity::public_key_hex);
 pub const NODE_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub static ACTIVE_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
 
@@ -121,11 +123,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::{remove_data_file, write_data_file};
+    use crate::{
+        chain::clear_chain_storage,
+        mempool::{clear_mempool, replace_mempool},
+        storage::remove_data_file,
+    };
     use blockchain_core::{Block, CHAIN_ID, Transaction, TxKind, pubkey_to_address};
     use once_cell::sync::Lazy;
     use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
-    use serde_json;
     use sha2::{Digest, Sha256};
     use std::sync::{Mutex as StdMutex, MutexGuard};
 
@@ -136,7 +141,10 @@ mod tests {
     }
 
     fn tmp_clean_files() {
+        let _ = clear_mempool();
+        let _ = clear_chain_storage();
         let _ = remove_data_file("mempool.json");
+        let _ = remove_data_file("mempool_snapshot.json");
         let _ = remove_data_file("wallet_mempool.json");
     }
 
@@ -250,10 +258,7 @@ mod tests {
 
         let tx1 = signed_tx(&from_sk, "LFS11111111111111111111", 60, 0, 1);
         assert!(chain::is_tx_valid(&tx1, &chain).is_ok());
-        let _ = write_data_file(
-            "mempool.json",
-            &format!("{}\n", serde_json::to_string(&tx1).unwrap()),
-        );
+        let _ = replace_mempool(vec![tx1.clone()]);
 
         let tx2 = signed_tx(&from_sk, "LFS11111111111111111111", 50, 1, 2);
         let err = chain::is_tx_valid(&tx2, &chain).unwrap_err();
@@ -392,10 +397,7 @@ mod tests {
         }];
 
         let tx = signed_tx(&from_sk, "LFS11111111111111111111", 499, 0, 1);
-        let _ = write_data_file(
-            "mempool.json",
-            &format!("{}\n", serde_json::to_string(&tx).unwrap()),
-        );
+        let _ = replace_mempool(vec![tx.clone()]);
 
         let valid = chain::load_valid_transactions(&chain);
         assert_eq!(valid.len(), 1, "expected tx to be mineable from mempool");
@@ -565,14 +567,7 @@ mod tests {
             nonce: 99,
             txid: String::new(),
         };
-        let _ = write_data_file(
-            "mempool.json",
-            &format!(
-                "{}\n{}\n",
-                serde_json::to_string(&valid).unwrap(),
-                serde_json::to_string(&invalid).unwrap()
-            ),
-        );
+        let _ = replace_mempool(vec![valid.clone(), invalid.clone()]);
         let (before, after) = chain::prune_mempool(&chain).unwrap();
         assert_eq!(before, 2);
         assert_eq!(after, 1);
@@ -630,7 +625,12 @@ mod tests {
             txid: String::new(),
         };
         coinbase.txid = coinbase.compute_txid();
-        let block = Block::new(1, vec![coinbase, tx], genesis.hash.clone(), "miner-a".into());
+        let block = Block::new(
+            1,
+            vec![coinbase, tx],
+            genesis.hash.clone(),
+            "miner-a".into(),
+        );
         assert!(chain::validate_block(&block, Some(&genesis), &node_b).is_ok());
 
         node_a.push(block.clone());
@@ -640,21 +640,4 @@ mod tests {
             chain::calculate_balances(&node_b)
         );
     }
-}
-
-fn load_or_create_node_id() -> String {
-    if let Ok(Some(contents)) = read_data_file("node_id.txt") {
-        let trimmed = contents.trim();
-        if !trimmed.is_empty() {
-            return trimmed.to_string();
-        }
-    }
-
-    let mut bytes = [0u8; 32];
-    rand::rng().fill_bytes(&mut bytes);
-    let generated = hex::encode(bytes);
-    if let Err(e) = write_data_file("node_id.txt", &generated) {
-        eprintln!("[STARTUP] Failed to persist node id: {}", e);
-    }
-    generated
 }

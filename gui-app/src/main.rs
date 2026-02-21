@@ -1,7 +1,15 @@
-use blockchain_core::{pubkey_to_address, Block, Transaction, TxKind, CHAIN_ID};
+use blockchain_core::{
+    pubkey_to_address,
+    wallet_keystore::{
+        decrypt_secret_key, derive_secret_key_from_mnemonic, encrypt_secret_key,
+        generate_mnemonic_12, load_keystore_file, payload_secret_key_bytes, save_keystore_file,
+        DEFAULT_DERIVATION_PATH,
+    },
+    Block, Transaction, TxKind, CHAIN_ID,
+};
 use chrono::Utc;
 use eframe::{egui, CreationContext, NativeOptions};
-use rand::{seq::IndexedRandom, RngCore};
+use rand::seq::IndexedRandom;
 use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
 use sha2::{Digest, Sha256};
 use std::{
@@ -9,14 +17,15 @@ use std::{
     fs::{self, OpenOptions},
     io::{Read, Write},
     net::{SocketAddr, TcpStream},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, Sender},
     thread,
     time::{Duration, Instant},
 };
 
 const BOOTSTRAP_NODES: &[&str] = &["89.168.107.239:6000", "79.76.116.108:6000"];
-const DEFAULT_WALLET: &str = ".default_wallet";
+const LEGACY_WALLET_FILE: &str = ".default_wallet";
+const ENCRYPTED_WALLET_FILE: &str = ".default_wallet.keystore.json";
 const MEMPOOL_FILE: &str = "wallet_mempool.json";
 const WALLET_CACHE_DIR: &str = "wallet-cache";
 const PEER_CACHE_FILE: &str = "wallet-cache/peers_cache.json";
@@ -29,6 +38,10 @@ const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const MIN_BROADCAST_PEERS: usize = 2;
 const MAX_EVENT_LOG: usize = 8;
 const DEFAULT_TX_FEE: u64 = 1;
+const WALLET_PASSPHRASE_ENV: &str = "LOFSWAP_WALLET_PASSPHRASE";
+const WALLET_MNEMONIC_ENV: &str = "LOFSWAP_WALLET_MNEMONIC_PASSPHRASE";
+const DEFAULT_VANITY_MAX_ATTEMPTS: u64 = 500_000;
+const BASE58_ALPHABET: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
 #[derive(Clone)]
 struct HistoryRow {
@@ -42,7 +55,6 @@ struct HistoryRow {
 #[derive(Default)]
 struct WalletSnapshot {
     pubkey: Option<String>,
-    privkey: Option<String>,
     address: Option<String>,
     balance: Option<i128>,
 }
@@ -205,7 +217,11 @@ struct WalletApp {
     amount_input: String,
     min_peers_input: String,
     import_priv_input: String,
-    show_private: bool,
+    wallet_passphrase_input: String,
+    recovery_phrase_input: String,
+    vanity_starts_with_input: String,
+    vanity_ends_with_input: String,
+    last_generated_mnemonic: Option<String>,
 
     refresh_tx: Sender<RefreshRequest>,
     refresh_rx: Receiver<RefreshResult>,
@@ -234,7 +250,11 @@ impl WalletApp {
             amount_input: String::new(),
             min_peers_input: MIN_BROADCAST_PEERS.to_string(),
             import_priv_input: String::new(),
-            show_private: false,
+            wallet_passphrase_input: std::env::var(WALLET_PASSPHRASE_ENV).unwrap_or_default(),
+            recovery_phrase_input: String::new(),
+            vanity_starts_with_input: String::new(),
+            vanity_ends_with_input: String::new(),
+            last_generated_mnemonic: None,
             refresh_tx,
             refresh_rx,
             refresh_in_flight: false,
@@ -252,15 +272,40 @@ impl WalletApp {
         self.events.truncate(MAX_EVENT_LOG);
     }
 
+    fn current_wallet_passphrase(&self) -> Option<String> {
+        if let Ok(value) = std::env::var(WALLET_PASSPHRASE_ENV) {
+            let value = value.trim().to_string();
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
+        let local = self.wallet_passphrase_input.trim().to_string();
+        if local.is_empty() {
+            None
+        } else {
+            Some(local)
+        }
+    }
+
+    fn mnemonic_passphrase(&self) -> String {
+        std::env::var(WALLET_MNEMONIC_ENV)
+            .ok()
+            .map(|v| v.trim().to_string())
+            .unwrap_or_default()
+    }
+
     fn reload_wallet(&mut self) {
-        self.wallet.privkey = None;
-        if let Some(sk) = load_default_wallet() {
+        let Some(passphrase) = self.current_wallet_passphrase() else {
+            self.wallet.pubkey = None;
+            self.wallet.address = None;
+            self.wallet.balance = None;
+            self.history.clear();
+            return;
+        };
+        if let Some(sk) = load_default_wallet(&passphrase) {
             let pk = PublicKey::from_secret_key(&Secp256k1::new(), &sk);
             self.wallet.pubkey = Some(pk.to_string());
             self.wallet.address = Some(pubkey_to_address(&pk.to_string()));
-            if self.show_private {
-                self.wallet.privkey = Some(hex::encode(sk.secret_bytes()));
-            }
         } else {
             self.wallet.pubkey = None;
             self.wallet.address = None;
@@ -321,23 +366,116 @@ impl WalletApp {
         }
     }
 
-    fn create_wallet(&mut self) {
-        let mut bytes = [0u8; 32];
-        rand::rng().fill_bytes(&mut bytes);
-        match SecretKey::from_byte_array(bytes) {
-            Ok(sk) => {
-                save_default_wallet(&sk);
-                self.show_private = false;
-                self.reload_wallet();
-                self.push_event("Created new wallet and set it as default");
+    fn create_wallet_with_vanity(
+        &mut self,
+        starts_with: Option<String>,
+        ends_with: Option<String>,
+    ) {
+        let Some(passphrase) = self.current_wallet_passphrase() else {
+            self.push_event("Wallet passphrase is required");
+            return;
+        };
+        let vanity_enabled = starts_with.is_some() || ends_with.is_some();
+        let attempts_limit = vanity_max_attempts();
+        let mnemonic_pwd = self.mnemonic_passphrase();
+
+        for attempt in 1..=attempts_limit {
+            let mnemonic = match generate_mnemonic_12() {
+                Ok(v) => v,
+                Err(_) => {
+                    self.push_event("Failed to generate recovery phrase");
+                    return;
+                }
+            };
+            let derived = match derive_secret_key_from_mnemonic(
+                &mnemonic,
+                &mnemonic_pwd,
+                DEFAULT_DERIVATION_PATH,
+            ) {
+                Ok(v) => v,
+                Err(_) => {
+                    self.push_event("Failed to derive key from recovery phrase");
+                    return;
+                }
+            };
+            let Ok(sk) = SecretKey::from_byte_array(derived) else {
+                continue;
+            };
+            let pk = PublicKey::from_secret_key(&Secp256k1::new(), &sk);
+            let address = pubkey_to_address(&pk.to_string());
+            if !address_matches_vanity(&address, starts_with.as_deref(), ends_with.as_deref()) {
+                continue;
             }
-            Err(_) => self.push_event("Failed to create wallet"),
+            match save_default_wallet(&sk, Some(&mnemonic), &passphrase) {
+                Ok(()) => {
+                    self.last_generated_mnemonic = Some(mnemonic);
+                    self.reload_wallet();
+                    if vanity_enabled {
+                        self.push_event(format!(
+                            "Created vanity wallet after {} attempts",
+                            attempt
+                        ));
+                    } else {
+                        self.push_event("Created new encrypted wallet");
+                    }
+                }
+                Err(_) => self.push_event("Failed to save encrypted wallet"),
+            }
+            return;
+        }
+
+        if vanity_enabled {
+            self.push_event(format!(
+                "Vanity not found in {} attempts (adjust pattern or LOFSWAP_VANITY_MAX_ATTEMPTS)",
+                attempts_limit
+            ));
+        } else {
+            self.push_event("Failed to create wallet");
         }
     }
 
+    fn create_wallet(&mut self) {
+        self.create_wallet_with_vanity(None, None);
+    }
+
+    fn create_vanity_wallet(&mut self) {
+        let starts_with = self.vanity_starts_with_input.trim().to_string();
+        let ends_with = self.vanity_ends_with_input.trim().to_string();
+        let starts_with = if starts_with.is_empty() {
+            None
+        } else {
+            Some(starts_with)
+        };
+        let ends_with = if ends_with.is_empty() {
+            None
+        } else {
+            Some(ends_with)
+        };
+
+        if starts_with.is_none() && ends_with.is_none() {
+            self.push_event("Set startswith and/or endswith for vanity wallet");
+            return;
+        }
+        if let Some(prefix) = starts_with.as_ref() {
+            if !valid_vanity_pattern(prefix) {
+                self.push_event("Invalid startswith pattern (Base58 only)");
+                return;
+            }
+        }
+        if let Some(suffix) = ends_with.as_ref() {
+            if !valid_vanity_pattern(suffix) {
+                self.push_event("Invalid endswith pattern (Base58 only)");
+                return;
+            }
+        }
+
+        self.create_wallet_with_vanity(starts_with, ends_with);
+    }
+
     fn remove_wallet(&mut self) {
-        let _ = fs::remove_file(DEFAULT_WALLET);
-        self.show_private = false;
+        let _ = fs::remove_file(LEGACY_WALLET_FILE);
+        let _ = fs::remove_file(ENCRYPTED_WALLET_FILE);
+        self.last_generated_mnemonic = None;
         self.reload_wallet();
         self.push_event("Removed default wallet");
     }
@@ -354,14 +492,19 @@ impl WalletApp {
             return;
         }
         arr.copy_from_slice(&bytes);
+        let Some(passphrase) = self.current_wallet_passphrase() else {
+            self.push_event("Wallet passphrase is required");
+            return;
+        };
         match SecretKey::from_byte_array(arr) {
-            Ok(sk) => {
-                save_default_wallet(&sk);
-                self.show_private = false;
-                self.import_priv_input.clear();
-                self.reload_wallet();
-                self.push_event("Imported private key and set wallet as default");
-            }
+            Ok(sk) => match save_default_wallet(&sk, None, &passphrase) {
+                Ok(()) => {
+                    self.import_priv_input.clear();
+                    self.reload_wallet();
+                    self.push_event("Imported private key and set wallet as default");
+                }
+                Err(_) => self.push_event("Failed to save encrypted wallet"),
+            },
             Err(_) => self.push_event("Invalid private key value"),
         }
     }
@@ -383,19 +526,28 @@ impl WalletApp {
         }
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&bytes);
+        let Some(passphrase) = self.current_wallet_passphrase() else {
+            self.push_event("Wallet passphrase is required");
+            return;
+        };
         match SecretKey::from_byte_array(arr) {
-            Ok(sk) => {
-                save_default_wallet(&sk);
-                self.show_private = false;
-                self.reload_wallet();
-                self.push_event("Imported wallet from .dat file");
-            }
+            Ok(sk) => match save_default_wallet(&sk, None, &passphrase) {
+                Ok(()) => {
+                    self.reload_wallet();
+                    self.push_event("Imported wallet from .dat file");
+                }
+                Err(_) => self.push_event("Failed to save encrypted wallet"),
+            },
             Err(_) => self.push_event("Invalid key data in .dat file"),
         }
     }
 
     fn export_dat_file(&mut self) {
-        let Some(sk) = load_default_wallet() else {
+        let Some(passphrase) = self.current_wallet_passphrase() else {
+            self.push_event("Wallet passphrase is required");
+            return;
+        };
+        let Some(sk) = load_default_wallet(&passphrase) else {
             self.push_event("No default wallet to export");
             return;
         };
@@ -435,7 +587,11 @@ impl WalletApp {
             .unwrap_or(MIN_BROADCAST_PEERS)
             .max(MIN_BROADCAST_PEERS);
 
-        let Some(sk) = load_default_wallet() else {
+        let Some(passphrase) = self.current_wallet_passphrase() else {
+            self.push_event("Wallet passphrase is required");
+            return;
+        };
+        let Some(sk) = load_default_wallet(&passphrase) else {
             self.push_event("No default wallet loaded");
             return;
         };
@@ -445,6 +601,42 @@ impl WalletApp {
         self.push_event(outcome);
         self.amount_input.clear();
         self.refresh_all(true);
+    }
+
+    fn recover_wallet_from_phrase(&mut self) {
+        let phrase = self.recovery_phrase_input.trim().to_string();
+        if phrase.is_empty() {
+            self.push_event("Recovery phrase is required");
+            return;
+        }
+        let Some(passphrase) = self.current_wallet_passphrase() else {
+            self.push_event("Wallet passphrase is required");
+            return;
+        };
+        let derived = match derive_secret_key_from_mnemonic(
+            &phrase,
+            &self.mnemonic_passphrase(),
+            DEFAULT_DERIVATION_PATH,
+        ) {
+            Ok(v) => v,
+            Err(_) => {
+                self.push_event("Invalid recovery phrase");
+                return;
+            }
+        };
+        let Ok(sk) = SecretKey::from_byte_array(derived) else {
+            self.push_event("Derived key is invalid");
+            return;
+        };
+        match save_default_wallet(&sk, Some(&phrase), &passphrase) {
+            Ok(()) => {
+                self.recovery_phrase_input.clear();
+                self.last_generated_mnemonic = None;
+                self.reload_wallet();
+                self.push_event("Recovered wallet from phrase");
+            }
+            Err(_) => self.push_event("Failed to save recovered wallet"),
+        }
     }
 
     fn faucet_me(&mut self) {
@@ -618,6 +810,19 @@ fn card(ui: &mut egui::Ui, title: &str, add_contents: impl FnOnce(&mut egui::Ui)
 
 fn draw_wallet_card(ui: &mut egui::Ui, app: &mut WalletApp) {
     card(ui, "Wallet", |ui| {
+        ui.add(
+            egui::TextEdit::singleline(&mut app.wallet_passphrase_input)
+                .hint_text("Wallet passphrase (or set LOFSWAP_WALLET_PASSPHRASE)")
+                .password(true)
+                .desired_width(f32::INFINITY),
+        );
+        if app.current_wallet_passphrase().is_none() {
+            ui.label(
+                egui::RichText::new("Set wallet passphrase to unlock encrypted keystore")
+                    .color(egui::Color32::from_rgb(255, 191, 120)),
+            );
+        }
+
         ui.horizontal_wrapped(|ui| {
             if ui
                 .add(
@@ -642,12 +847,39 @@ fn draw_wallet_card(ui: &mut egui::Ui, app: &mut WalletApp) {
 
         ui.horizontal(|ui| {
             ui.add(
+                egui::TextEdit::singleline(&mut app.vanity_starts_with_input)
+                    .hint_text("startswith (after LFS)")
+                    .desired_width(180.0),
+            );
+            ui.add(
+                egui::TextEdit::singleline(&mut app.vanity_ends_with_input)
+                    .hint_text("endswith")
+                    .desired_width(140.0),
+            );
+            if ui.button("Create Vanity").clicked() {
+                app.create_vanity_wallet();
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.add(
                 egui::TextEdit::singleline(&mut app.import_priv_input)
                     .hint_text("Private key hex (64 chars)")
                     .desired_width(260.0),
             );
             if ui.button("Import Hex").clicked() {
                 app.import_private_hex();
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut app.recovery_phrase_input)
+                    .hint_text("Recovery phrase (12+ words)")
+                    .desired_width(320.0),
+            );
+            if ui.button("Recover Seed").clicked() {
+                app.recover_wallet_from_phrase();
             }
         });
 
@@ -672,24 +904,15 @@ fn draw_wallet_card(ui: &mut egui::Ui, app: &mut WalletApp) {
         }
 
         ui.horizontal(|ui| {
-            let reveal_label = if app.show_private {
-                "Hide Private"
-            } else {
-                "Reveal Private"
-            };
-            if ui.button(reveal_label).clicked() {
-                app.show_private = !app.show_private;
-                app.reload_wallet();
-            }
             if ui.button("Faucet Me").clicked() {
                 app.faucet_me();
             }
         });
 
-        if app.show_private {
-            if let Some(privkey) = &app.wallet.privkey {
-                ui.monospace(format!("Private: {privkey}"));
-            }
+        if let Some(mnemonic) = &app.last_generated_mnemonic {
+            ui.separator();
+            ui.label("Recovery phrase (shown once, store offline):");
+            ui.monospace(mnemonic);
         }
     });
 }
@@ -845,22 +1068,45 @@ fn draw_activity_card(ui: &mut egui::Ui, app: &mut WalletApp) {
     });
 }
 
-fn save_default_wallet(sk: &SecretKey) {
-    let _ = fs::write(DEFAULT_WALLET, hex::encode(sk.secret_bytes()));
+fn save_default_wallet(
+    sk: &SecretKey,
+    mnemonic: Option<&str>,
+    passphrase: &str,
+) -> Result<(), String> {
+    let bytes = sk.secret_bytes();
+    let keystore = encrypt_secret_key(&bytes, mnemonic, Some(DEFAULT_DERIVATION_PATH), passphrase)?;
+    save_keystore_file(Path::new(ENCRYPTED_WALLET_FILE), &keystore)?;
+    let _ = fs::remove_file(LEGACY_WALLET_FILE);
+    Ok(())
 }
 
-fn load_default_wallet() -> Option<SecretKey> {
-    fs::read_to_string(DEFAULT_WALLET)
+fn migrate_legacy_wallet(passphrase: &str) -> Option<SecretKey> {
+    let bytes = fs::read_to_string(LEGACY_WALLET_FILE)
         .ok()
-        .and_then(|h| hex::decode(h.trim()).ok())
-        .and_then(|bytes| {
-            if bytes.len() != 32 {
-                return None;
-            }
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&bytes);
-            SecretKey::from_byte_array(arr).ok()
-        })
+        .and_then(|h| hex::decode(h.trim()).ok())?;
+    if bytes.len() != 32 {
+        return None;
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&bytes);
+    let sk = SecretKey::from_byte_array(arr).ok()?;
+    if save_default_wallet(&sk, None, passphrase).is_ok() {
+        let _ = fs::remove_file(LEGACY_WALLET_FILE);
+    }
+    Some(sk)
+}
+
+fn load_default_wallet(passphrase: &str) -> Option<SecretKey> {
+    if Path::new(ENCRYPTED_WALLET_FILE).exists() {
+        let keystore = load_keystore_file(Path::new(ENCRYPTED_WALLET_FILE)).ok()?;
+        let payload = decrypt_secret_key(&keystore, passphrase).ok()?;
+        let bytes = payload_secret_key_bytes(&payload).ok()?;
+        return SecretKey::from_byte_array(bytes).ok();
+    }
+    if Path::new(LEGACY_WALLET_FILE).exists() {
+        return migrate_legacy_wallet(passphrase);
+    }
+    None
 }
 
 fn peer_cache_path() -> PathBuf {
@@ -1058,6 +1304,37 @@ fn normalize_tx_addr(addr: &str) -> String {
     } else {
         pubkey_to_address(addr)
     }
+}
+
+fn vanity_max_attempts() -> u64 {
+    std::env::var("LOFSWAP_VANITY_MAX_ATTEMPTS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(DEFAULT_VANITY_MAX_ATTEMPTS)
+}
+
+fn valid_vanity_pattern(pattern: &str) -> bool {
+    !pattern.is_empty() && pattern.chars().all(|c| BASE58_ALPHABET.contains(c))
+}
+
+fn address_matches_vanity(
+    address: &str,
+    starts_with: Option<&str>,
+    ends_with: Option<&str>,
+) -> bool {
+    let payload = address.strip_prefix("LFS").unwrap_or(address);
+    if let Some(prefix) = starts_with {
+        if !payload.starts_with(prefix) {
+            return false;
+        }
+    }
+    if let Some(suffix) = ends_with {
+        if !payload.ends_with(suffix) {
+            return false;
+        }
+    }
+    true
 }
 
 fn load_pending_transactions() -> Vec<Transaction> {

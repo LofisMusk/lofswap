@@ -1,23 +1,51 @@
-use std::collections::{HashMap, HashSet};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::Path,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use blockchain_core::{
     Block, CHAIN_ID, DEFAULT_DIFFICULTY_ZEROS, Transaction, TxKind, pubkey_to_address,
 };
 use secp256k1::{Message, PublicKey, Secp256k1, ecdsa::Signature};
+use serde::{Deserialize, Serialize};
 use serde_json;
 use sha2::{Digest, Sha256};
 
 use crate::{
     errors::NodeError,
-    storage::{read_data_file, write_data_file},
-    wallet::read_mempool,
+    mempool::{read_mempool, replace_mempool},
+    storage::{data_path, read_data_file, remove_data_file, write_data_file},
 };
 
 const INITIAL_SUBSIDY: u64 = 1000;
 const HALVING_INTERVAL: u64 = 100_000;
 const MAX_FUTURE_DRIFT_SECS: i64 = 2 * 60 * 60;
 const MIN_TX_FEE: u64 = 1;
+const CHAIN_SNAPSHOT_FILE: &str = "blockchain.json";
+const CHAIN_DB_DIR: &str = "chain_db";
+const CHAIN_DB_BLOCKS_TREE: &str = "blocks";
+const CHAIN_DB_HEIGHT_TO_HASH_TREE: &str = "height_to_hash";
+const CHAIN_DB_TXID_TO_LOC_TREE: &str = "txid_to_loc";
+const CHAIN_DB_STATE_SNAPSHOTS_TREE: &str = "state_snapshots";
+const STATE_SNAPSHOT_FILE: &str = "state_snapshot.json";
+const STATE_SNAPSHOT_INTERVAL: u64 = 256;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TxLocation {
+    height: u64,
+    tx_index: u32,
+    block_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StateSnapshot {
+    version: u8,
+    height: u64,
+    block_hash: String,
+    balances: HashMap<String, i128>,
+}
 
 pub fn block_subsidy(height: u64) -> u64 {
     let halvings = height / HALVING_INTERVAL;
@@ -82,8 +110,7 @@ pub fn calculate_balances(chain: &[Block]) -> HashMap<String, i128> {
             let from_addr = normalize_addr(&tx.from);
             let to_addr = normalize_addr(&tx.to);
             if !from_addr.is_empty() {
-                *balances.entry(from_addr).or_insert(0) -=
-                    (tx.amount as i128) + (tx.fee as i128);
+                *balances.entry(from_addr).or_insert(0) -= (tx.amount as i128) + (tx.fee as i128);
             }
             *balances.entry(to_addr).or_insert(0) += tx.amount as i128;
         }
@@ -255,14 +282,7 @@ fn verify_tx_signature(
     };
     let msg_data_v3 = format!(
         "{}|{}|{:?}|{}|{}|{}|{}|{}",
-        tx.version,
-        chain_id,
-        tx.kind,
-        pubkey_str,
-        tx.to,
-        tx.amount,
-        tx.fee,
-        tx.timestamp
+        tx.version, chain_id, tx.kind, pubkey_str, tx.to, tx.amount, tx.fee, tx.timestamp
     );
     let msg_data_v3 = format!("{}|{}", msg_data_v3, tx.nonce);
     let hash_v3 = Sha256::digest(msg_data_v3.as_bytes());
@@ -530,34 +550,212 @@ pub fn validate_chain(chain: &[Block]) -> Result<(), NodeError> {
     Ok(())
 }
 
+fn height_key(height: u64) -> [u8; 8] {
+    height.to_be_bytes()
+}
+
+fn open_chain_db() -> Result<sled::Db, NodeError> {
+    let path = data_path(CHAIN_DB_DIR);
+    sled::open(path).map_err(|e| NodeError::NetworkError(format!("chain db open: {}", e)))
+}
+
+fn remove_dir_if_exists(path: &Path) -> Result<(), NodeError> {
+    match fs::remove_dir_all(path) {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(NodeError::NetworkError(e.to_string())),
+    }
+}
+
+fn normalize_loaded_chain(mut chain: Vec<Block>) -> Vec<Block> {
+    if chain.is_empty() {
+        return vec![Block::genesis()];
+    }
+    // One-time normalization for old local stores that had time-based genesis.
+    if chain.len() == 1 {
+        let candidate = &chain[0];
+        if candidate.index == 0
+            && candidate.previous_hash == "0"
+            && candidate.transactions.is_empty()
+        {
+            chain[0] = Block::genesis();
+        }
+    }
+    chain
+}
+
+fn persist_chain_to_sled(chain: &[Block]) -> Result<(), NodeError> {
+    let db = open_chain_db()?;
+    let blocks = db
+        .open_tree(CHAIN_DB_BLOCKS_TREE)
+        .map_err(|e| NodeError::NetworkError(format!("chain db blocks tree: {}", e)))?;
+    let height_to_hash = db
+        .open_tree(CHAIN_DB_HEIGHT_TO_HASH_TREE)
+        .map_err(|e| NodeError::NetworkError(format!("chain db height tree: {}", e)))?;
+    let txid_to_loc = db
+        .open_tree(CHAIN_DB_TXID_TO_LOC_TREE)
+        .map_err(|e| NodeError::NetworkError(format!("chain db tx index tree: {}", e)))?;
+    let state_snapshots = db
+        .open_tree(CHAIN_DB_STATE_SNAPSHOTS_TREE)
+        .map_err(|e| NodeError::NetworkError(format!("chain db state tree: {}", e)))?;
+
+    blocks
+        .clear()
+        .map_err(|e| NodeError::NetworkError(format!("clear blocks tree: {}", e)))?;
+    height_to_hash
+        .clear()
+        .map_err(|e| NodeError::NetworkError(format!("clear height tree: {}", e)))?;
+    txid_to_loc
+        .clear()
+        .map_err(|e| NodeError::NetworkError(format!("clear tx index tree: {}", e)))?;
+    state_snapshots
+        .clear()
+        .map_err(|e| NodeError::NetworkError(format!("clear state snapshot tree: {}", e)))?;
+
+    let mut balances: HashMap<String, i128> = HashMap::new();
+    let mut latest_snapshot: Option<StateSnapshot> = None;
+
+    for block in chain {
+        let block_bytes = serde_json::to_vec(block)
+            .map_err(|e| NodeError::SerializationError(format!("serialize block: {}", e)))?;
+        blocks
+            .insert(block.hash.as_bytes(), block_bytes)
+            .map_err(|e| NodeError::NetworkError(format!("insert block: {}", e)))?;
+        height_to_hash
+            .insert(height_key(block.index), block.hash.as_bytes())
+            .map_err(|e| NodeError::NetworkError(format!("insert height index: {}", e)))?;
+
+        for (tx_index, tx) in block.transactions.iter().enumerate() {
+            let txid = if tx.txid.is_empty() {
+                tx.compute_txid()
+            } else {
+                tx.txid.clone()
+            };
+            let loc = TxLocation {
+                height: block.index,
+                tx_index: tx_index as u32,
+                block_hash: block.hash.clone(),
+            };
+            let loc_bytes = serde_json::to_vec(&loc)
+                .map_err(|e| NodeError::SerializationError(format!("serialize tx index: {}", e)))?;
+            txid_to_loc
+                .insert(txid.as_bytes(), loc_bytes)
+                .map_err(|e| NodeError::NetworkError(format!("insert tx index: {}", e)))?;
+
+            let from_addr = normalize_addr(&tx.from);
+            if !from_addr.is_empty() {
+                *balances.entry(from_addr).or_insert(0) -= (tx.amount as i128) + (tx.fee as i128);
+            }
+            let to_addr = normalize_addr(&tx.to);
+            *balances.entry(to_addr).or_insert(0) += tx.amount as i128;
+        }
+
+        let is_tip = block.index.saturating_add(1) == chain.len() as u64;
+        if block.index % STATE_SNAPSHOT_INTERVAL == 0 || is_tip {
+            let snapshot = StateSnapshot {
+                version: 1,
+                height: block.index,
+                block_hash: block.hash.clone(),
+                balances: balances.clone(),
+            };
+            let snapshot_bytes = serde_json::to_vec(&snapshot).map_err(|e| {
+                NodeError::SerializationError(format!("serialize state snapshot: {}", e))
+            })?;
+            state_snapshots
+                .insert(height_key(block.index), snapshot_bytes)
+                .map_err(|e| NodeError::NetworkError(format!("insert state snapshot: {}", e)))?;
+            latest_snapshot = Some(snapshot);
+        }
+    }
+
+    db.flush()
+        .map_err(|e| NodeError::NetworkError(format!("flush chain db: {}", e)))?;
+
+    if let Some(snapshot) = latest_snapshot {
+        let json = serde_json::to_string_pretty(&snapshot)
+            .map_err(|e| NodeError::SerializationError(e.to_string()))?;
+        write_data_file(STATE_SNAPSHOT_FILE, &json)
+            .map_err(|e| NodeError::NetworkError(e.to_string()))?;
+    }
+
+    Ok(())
+}
+
+fn load_chain_from_sled() -> Result<Option<Vec<Block>>, NodeError> {
+    let db = open_chain_db()?;
+    let blocks = db
+        .open_tree(CHAIN_DB_BLOCKS_TREE)
+        .map_err(|e| NodeError::NetworkError(format!("chain db blocks tree: {}", e)))?;
+    let height_to_hash = db
+        .open_tree(CHAIN_DB_HEIGHT_TO_HASH_TREE)
+        .map_err(|e| NodeError::NetworkError(format!("chain db height tree: {}", e)))?;
+
+    if height_to_hash.is_empty() {
+        return Ok(None);
+    }
+
+    let mut chain = Vec::new();
+    for item in height_to_hash.iter() {
+        let (_, hash_bytes) =
+            item.map_err(|e| NodeError::NetworkError(format!("iterate height index: {}", e)))?;
+        let hash = String::from_utf8(hash_bytes.to_vec())
+            .map_err(|e| NodeError::SerializationError(format!("invalid hash key: {}", e)))?;
+        let Some(block_bytes) = blocks
+            .get(hash.as_bytes())
+            .map_err(|e| NodeError::NetworkError(format!("read block by hash: {}", e)))?
+        else {
+            return Err(NodeError::ValidationError(format!(
+                "missing block payload for hash {}",
+                hash
+            )));
+        };
+        let block = serde_json::from_slice::<Block>(&block_bytes)
+            .map_err(|e| NodeError::SerializationError(format!("decode block: {}", e)))?;
+        chain.push(block);
+    }
+
+    Ok(Some(chain))
+}
+
+pub fn clear_chain_storage() -> Result<(), NodeError> {
+    remove_data_file(CHAIN_SNAPSHOT_FILE).map_err(|e| NodeError::NetworkError(e.to_string()))?;
+    remove_data_file(STATE_SNAPSHOT_FILE).map_err(|e| NodeError::NetworkError(e.to_string()))?;
+
+    let data_db_path = data_path(CHAIN_DB_DIR);
+    remove_dir_if_exists(&data_db_path)?;
+    remove_dir_if_exists(Path::new(CHAIN_DB_DIR))?;
+    Ok(())
+}
+
 pub fn save_chain(chain: &[Block]) -> Result<(), NodeError> {
+    persist_chain_to_sled(chain)?;
     let json = serde_json::to_string_pretty(chain)
         .map_err(|e| NodeError::SerializationError(e.to_string()))?;
-    write_data_file("blockchain.json", &json).map_err(|e| NodeError::NetworkError(e.to_string()))
+    write_data_file(CHAIN_SNAPSHOT_FILE, &json).map_err(|e| NodeError::NetworkError(e.to_string()))
 }
 
 pub fn load_chain() -> Result<Vec<Block>, NodeError> {
-    match read_data_file("blockchain.json").map_err(|e| NodeError::NetworkError(e.to_string()))? {
-        Some(json) => {
-            let mut chain: Vec<Block> = serde_json::from_str(&json)
-                .map_err(|e| NodeError::SerializationError(e.to_string()))?;
-            if chain.is_empty() {
-                return Ok(vec![Block::genesis()]);
-            }
-            // One-time normalization for old local stores that had time-based genesis.
-            if chain.len() == 1 {
-                let candidate = &chain[0];
-                if candidate.index == 0
-                    && candidate.previous_hash == "0"
-                    && candidate.transactions.is_empty()
-                {
-                    chain[0] = Block::genesis();
-                }
-            }
-            Ok(chain)
+    match load_chain_from_sled() {
+        Ok(Some(chain)) => return Ok(normalize_loaded_chain(chain)),
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("[CHAIN] Failed to load chain from sled, falling back to JSON snapshot: {e}")
         }
-        None => Ok(vec![Block::genesis()]),
     }
+
+    let loaded = match read_data_file(CHAIN_SNAPSHOT_FILE)
+        .map_err(|e| NodeError::NetworkError(e.to_string()))?
+    {
+        Some(json) => {
+            let chain: Vec<Block> = serde_json::from_str(&json)
+                .map_err(|e| NodeError::SerializationError(e.to_string()))?;
+            normalize_loaded_chain(chain)
+        }
+        None => vec![Block::genesis()],
+    };
+
+    persist_chain_to_sled(&loaded)?;
+    Ok(loaded)
 }
 
 pub fn load_peers() -> Result<Vec<String>, NodeError> {
@@ -576,13 +774,7 @@ pub fn save_peers(peers: &[String]) -> Result<(), NodeError> {
 }
 
 fn parse_mempool_transactions() -> Vec<Transaction> {
-    read_data_file("mempool.json")
-        .ok()
-        .flatten()
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|l| serde_json::from_str(l).ok())
-        .collect()
+    read_mempool()
 }
 
 fn filter_valid_transactions(parsed: Vec<Transaction>, chain: &[Block]) -> Vec<Transaction> {
@@ -638,11 +830,6 @@ pub fn prune_mempool(chain: &[Block]) -> Result<(usize, usize), NodeError> {
     let before = parsed.len();
     let valid = filter_valid_transactions(parsed, chain);
     let after = valid.len();
-    let json = valid
-        .iter()
-        .filter_map(|tx| serde_json::to_string(tx).ok())
-        .collect::<Vec<_>>()
-        .join("\n");
-    write_data_file("mempool.json", &json).map_err(|e| NodeError::NetworkError(e.to_string()))?;
+    replace_mempool(valid).map_err(NodeError::NetworkError)?;
     Ok((before, after))
 }

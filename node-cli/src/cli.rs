@@ -2,17 +2,18 @@ use std::io::{self, IsTerminal};
 use std::sync::Arc;
 use std::time::Duration;
 
-use blockchain_core::{Block, Transaction};
+use blockchain_core::Block;
 use rustyline::{DefaultEditor, error::ReadlineError};
 use serde_json;
 use tokio::sync::Mutex;
 
 use crate::{
     OBSERVED_IP,
-    chain::save_peers,
+    chain::{clear_chain_storage, save_peers},
+    mempool::read_mempool,
     miner::mine_block,
     p2p::{determine_public_ip_from_peers, get_my_address, ping_peer, sync_chain},
-    storage::{read_data_file, remove_data_file},
+    storage::read_data_file,
 };
 
 const SELF_PEER_NOTE: &str = "Note: if peers.json contains this node's own address, it stays in the file but is hidden from the peer list while still being broadcast to other nodes.";
@@ -197,23 +198,22 @@ async fn remove_offline_peers(peers: &Arc<Mutex<Vec<String>>>) {
 }
 
 fn clear_chain() {
-    match remove_data_file("blockchain.json") {
+    match clear_chain_storage() {
         Ok(_) => println!("Chain cleared"),
         Err(e) => eprintln!("Failed to clear chain: {}", e),
     }
 }
 
 fn print_mempool() {
-    match read_data_file("mempool.json").ok().flatten() {
-        Some(mempool) if !mempool.trim().is_empty() => {
-            println!("Mempool transactions:");
-            for (i, line) in mempool.lines().enumerate() {
-                if let Ok(tx) = serde_json::from_str::<Transaction>(line) {
-                    println!("{}. {} -> {} amount: {}", i + 1, tx.from, tx.to, tx.amount);
-                }
-            }
-        }
-        _ => println!("Mempool is empty"),
+    let mempool = read_mempool();
+    if mempool.is_empty() {
+        println!("Mempool is empty");
+        return;
+    }
+
+    println!("Mempool transactions:");
+    for (i, tx) in mempool.iter().enumerate() {
+        println!("{}. {} -> {} amount: {}", i + 1, tx.from, tx.to, tx.amount);
     }
 }
 

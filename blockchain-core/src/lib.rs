@@ -2,6 +2,8 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub mod wallet_keystore;
+
 // spec_v0.9 constants
 pub const SPEC_VERSION: &str = "0.9";
 pub const DEFAULT_DIFFICULTY_ZEROS: u32 = 4;

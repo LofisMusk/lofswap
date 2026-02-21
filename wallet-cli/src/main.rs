@@ -2,7 +2,14 @@
 //! Wallet CLI - relies only on `peers.json` + `BOOTSTRAP_NODES`.
 //! All legacy `nodes.txt` paths have been removed.
 
-use blockchain_core::{Block, CHAIN_ID, Transaction, TxKind, pubkey_to_address};
+use blockchain_core::{
+    Block, CHAIN_ID, Transaction, TxKind, pubkey_to_address,
+    wallet_keystore::{
+        DEFAULT_DERIVATION_PATH, decrypt_secret_key, derive_secret_key_from_mnemonic,
+        encrypt_secret_key, generate_mnemonic_12, load_keystore_file, payload_secret_key_bytes,
+        save_keystore_file,
+    },
+};
 use chrono::Utc;
 use rand::seq::IndexedRandom;
 use secp256k1::{Message, PublicKey, Secp256k1, SecretKey, ecdsa::Signature};
@@ -12,7 +19,8 @@ use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 static BOOTSTRAP_NODES: &[&str] = &["89.168.107.239:6000", "79.76.116.108:6000"];
@@ -26,14 +34,72 @@ const OFFLINE_GRACE: Duration = Duration::from_secs(10);
 const MIN_BROADCAST_PEERS: usize = 2;
 const WHOAMI_TIMEOUT: Duration = Duration::from_millis(800);
 const DEFAULT_TX_FEE: u64 = 1;
+const DEFAULT_VANITY_MAX_ATTEMPTS: u64 = 500_000;
+const BASE58_ALPHABET: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
 // ---------- Default wallet ----------
-const DEFAULT_WALLET: &str = ".default_wallet";
-fn save_default_wallet(sk: &SecretKey) {
-    let _ = fs::write(DEFAULT_WALLET, hex::encode(sk.secret_bytes()));
+const LEGACY_WALLET: &str = ".default_wallet";
+const ENCRYPTED_WALLET: &str = ".default_wallet.keystore.json";
+const WALLET_PASSPHRASE_ENV: &str = "LOFSWAP_WALLET_PASSPHRASE";
+const WALLET_MNEMONIC_ENV: &str = "LOFSWAP_WALLET_MNEMONIC_PASSPHRASE";
+const PRIVATE_EXPORT_CONFIRM_ENV: &str = "LOFSWAP_ALLOW_PRIVATE_KEY_EXPORT";
+const PRIVATE_EXPORT_CONFIRM_VALUE: &str = "YES_I_UNDERSTAND";
+
+static CACHED_WALLET_PASSPHRASE: OnceLock<String> = OnceLock::new();
+
+fn read_line_prompt(prompt: &str) -> Option<String> {
+    print!("{prompt}");
+    let _ = io::stdout().flush();
+    let mut input = String::new();
+    io::stdin().read_line(&mut input).ok()?;
+    let trimmed = input.trim().to_string();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
 }
-fn load_default_wallet() -> Option<SecretKey> {
-    fs::read_to_string(DEFAULT_WALLET)
+
+fn wallet_passphrase() -> Option<String> {
+    if let Ok(value) = env::var(WALLET_PASSPHRASE_ENV) {
+        let value = value.trim().to_string();
+        if !value.is_empty() {
+            return Some(value);
+        }
+    }
+    if let Some(cached) = CACHED_WALLET_PASSPHRASE.get() {
+        return Some(cached.clone());
+    }
+    let entered = rpassword::prompt_password("Wallet passphrase: ").ok()?;
+    let entered = entered.trim().to_string();
+    if entered.is_empty() {
+        return None;
+    }
+    let _ = CACHED_WALLET_PASSPHRASE.set(entered.clone());
+    Some(entered)
+}
+
+fn mnemonic_passphrase() -> String {
+    env::var(WALLET_MNEMONIC_ENV)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .unwrap_or_default()
+}
+
+fn save_default_wallet_with_mnemonic(sk: &SecretKey, mnemonic: Option<&str>) -> Result<(), String> {
+    let Some(passphrase) = wallet_passphrase() else {
+        return Err("wallet passphrase is required".to_string());
+    };
+    let bytes = sk.secret_bytes();
+    let keystore =
+        encrypt_secret_key(&bytes, mnemonic, Some(DEFAULT_DERIVATION_PATH), &passphrase)?;
+    save_keystore_file(Path::new(ENCRYPTED_WALLET), &keystore)?;
+    let _ = fs::remove_file(LEGACY_WALLET);
+    Ok(())
+}
+
+fn migrate_legacy_wallet(passphrase: &str) -> Option<SecretKey> {
+    let legacy_key = fs::read_to_string(LEGACY_WALLET)
         .ok()
         .and_then(|h| hex::decode(h.trim()).ok())
         .and_then(|b| {
@@ -44,7 +110,29 @@ fn load_default_wallet() -> Option<SecretKey> {
             } else {
                 None
             }
-        })
+        })?;
+    let bytes = legacy_key.secret_bytes();
+    let keystore =
+        encrypt_secret_key(&bytes, None, Some(DEFAULT_DERIVATION_PATH), passphrase).ok()?;
+    if save_keystore_file(Path::new(ENCRYPTED_WALLET), &keystore).is_ok() {
+        let _ = fs::remove_file(LEGACY_WALLET);
+    }
+    Some(legacy_key)
+}
+
+fn load_default_wallet() -> Option<SecretKey> {
+    if Path::new(ENCRYPTED_WALLET).exists() {
+        let passphrase = wallet_passphrase()?;
+        let keystore = load_keystore_file(Path::new(ENCRYPTED_WALLET)).ok()?;
+        let payload = decrypt_secret_key(&keystore, &passphrase).ok()?;
+        let bytes = payload_secret_key_bytes(&payload).ok()?;
+        return SecretKey::from_byte_array(bytes).ok();
+    }
+    if Path::new(LEGACY_WALLET).exists() {
+        let passphrase = wallet_passphrase()?;
+        return migrate_legacy_wallet(&passphrase);
+    }
+    None
 }
 
 fn default_address() -> Option<String> {
@@ -52,6 +140,85 @@ fn default_address() -> Option<String> {
         let pk = PublicKey::from_secret_key(&Secp256k1::new(), &sk);
         pubkey_to_address(&pk.to_string())
     })
+}
+
+fn vanity_max_attempts() -> u64 {
+    env::var("LOFSWAP_VANITY_MAX_ATTEMPTS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(DEFAULT_VANITY_MAX_ATTEMPTS)
+}
+
+fn valid_vanity_pattern(pattern: &str) -> bool {
+    !pattern.is_empty() && pattern.chars().all(|c| BASE58_ALPHABET.contains(c))
+}
+
+fn address_matches_vanity(
+    address: &str,
+    starts_with: Option<&str>,
+    ends_with: Option<&str>,
+) -> bool {
+    let payload = address.strip_prefix("LFS").unwrap_or(address);
+    if let Some(prefix) = starts_with {
+        if !payload.starts_with(prefix) {
+            return false;
+        }
+    }
+    if let Some(suffix) = ends_with {
+        if !payload.ends_with(suffix) {
+            return false;
+        }
+    }
+    true
+}
+
+fn parse_vanity_args(args: &[&str]) -> Result<(Option<String>, Option<String>), String> {
+    if args.is_empty() {
+        return Ok((None, None));
+    }
+    if args.len() % 2 != 0 {
+        return Err("Expected key/value pairs: startswith <prefix> endswith <suffix>".to_string());
+    }
+
+    let mut starts_with: Option<String> = None;
+    let mut ends_with: Option<String> = None;
+    let mut i = 0usize;
+    while i < args.len() {
+        let key = args[i].to_ascii_lowercase();
+        let value = args[i + 1].trim();
+        if value.is_empty() {
+            return Err("Vanity value cannot be empty".to_string());
+        }
+        if !valid_vanity_pattern(value) {
+            return Err(format!(
+                "Invalid vanity pattern '{}'. Use Base58 chars only.",
+                value
+            ));
+        }
+        match key.as_str() {
+            "startswith" => {
+                if starts_with.is_some() {
+                    return Err("Duplicate startswith argument".to_string());
+                }
+                starts_with = Some(value.to_string());
+            }
+            "endswith" => {
+                if ends_with.is_some() {
+                    return Err("Duplicate endswith argument".to_string());
+                }
+                ends_with = Some(value.to_string());
+            }
+            _ => {
+                return Err(format!(
+                    "Unknown argument '{}'. Use startswith/endswith.",
+                    args[i]
+                ));
+            }
+        }
+        i += 2;
+    }
+    Ok((starts_with, ends_with))
 }
 
 // ---------- Peers ----------
@@ -185,6 +352,7 @@ impl PeerStore {
     }
 }
 
+#[allow(dead_code)]
 fn connect_and_send(addr: &str, data: &[u8]) -> io::Result<()> {
     let sock: SocketAddr = addr
         .parse()
@@ -687,7 +855,10 @@ fn import_dat(path: &str) {
     {
         if let Ok(sk) = SecretKey::from_byte_array(buf) {
             let pk = PublicKey::from_secret_key(&Secp256k1::new(), &sk);
-            save_default_wallet(&sk);
+            if let Err(e) = save_default_wallet_with_mnemonic(&sk, None) {
+                println!("Failed to save imported wallet: {}", e);
+                return;
+            }
             println!("Imported file. Public Key: {}", pk);
             return;
         }
@@ -709,22 +880,108 @@ fn export_dat(path: &str) {
 // ---------- CLI ----------
 fn help() {
     println!(
-        "Commands:\n  help\n  create-wallet\n  import-priv <hex>\n  import-dat <file>\n  export-dat <file>\n  default-wallet\n  send <to?> <amount> [n=2]   (defaults to your address)\n  send-priv <priv> <to> <amount> [n=2]\n  sign-raw <to> <amount>      (sign only; save locally)\n  sign-raw-priv <priv> <to> <amount>\n  send-raw <sig|txid> [n=2]   (broadcast a stored raw tx)\n  raw_tx                      (list stored raw-signed txs)\n  force-send <signature>     (resend a pending tx even if only one peer is reachable)\n  balance [address]          (defaults to your address)\n  faucet [address]           (disabled in v2; coinbase-only emission)\n  tx-history [address]       (defaults to your address)\n  tx-info <txid|signature>\n  list-peers\n  print-mempool\n  exit"
+        "Commands:\n  help\n  create-wallet [startswith <prefix>] [endswith <suffix>]   (prefix/suffix applies after LFS, can combine)\n  recover-mnemonic <seed words...>\n  import-priv <hex>\n  import-dat <file>\n  export-dat <file>\n  export-priv               (requires strong confirmation)\n  default-wallet\n  send <to?> <amount> [n=2]   (defaults to your address)\n  send-priv <priv> <to> <amount> [n=2]\n  sign-raw <to> <amount>      (sign only; save locally)\n  sign-raw-priv <priv> <to> <amount>\n  send-raw <sig|txid> [n=2]   (broadcast a stored raw tx)\n  raw_tx                      (list stored raw-signed txs)\n  force-send <signature>     (resend a pending tx even if only one peer is reachable)\n  balance [address]          (defaults to your address)\n  faucet [address]           (disabled in v2; coinbase-only emission)\n  tx-history [address]       (defaults to your address)\n  tx-info <txid|signature>\n  list-peers\n  print-mempool\n  exit"
     );
 }
 
 // Create a new wallet and set it as default
-fn create_wallet() {
-    let secp = Secp256k1::new();
-    let mut rng = rand::rng();
-    let mut bytes = [0u8; 32];
-    use rand::RngCore;
-    rng.fill_bytes(&mut bytes);
-    let sk = SecretKey::from_byte_array(bytes).expect("rng produced invalid bytes");
-    let pk = PublicKey::from_secret_key(&secp, &sk);
-    save_default_wallet(&sk);
-    println!("Created new wallet.");
-    println!("Private: {}", hex::encode(sk.secret_bytes()));
+fn create_wallet(starts_with: Option<&str>, ends_with: Option<&str>) {
+    let tries_limit = vanity_max_attempts();
+    let mnemonic_pwd = mnemonic_passphrase();
+    let vanity_enabled = starts_with.is_some() || ends_with.is_some();
+    if vanity_enabled {
+        println!(
+            "Generating vanity wallet (startswith={:?}, endswith={:?}, max_attempts={})",
+            starts_with, ends_with, tries_limit
+        );
+    }
+
+    for attempt in 1..=tries_limit {
+        let mnemonic = match generate_mnemonic_12() {
+            Ok(m) => m,
+            Err(e) => {
+                println!("Failed to generate mnemonic: {}", e);
+                return;
+            }
+        };
+        let derived = match derive_secret_key_from_mnemonic(
+            &mnemonic,
+            &mnemonic_pwd,
+            DEFAULT_DERIVATION_PATH,
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                println!("Failed to derive key from mnemonic: {}", e);
+                return;
+            }
+        };
+        let Ok(sk) = SecretKey::from_byte_array(derived) else {
+            continue;
+        };
+        let secp = Secp256k1::new();
+        let pk = PublicKey::from_secret_key(&secp, &sk);
+        let address = pubkey_to_address(&pk.to_string());
+
+        if !address_matches_vanity(&address, starts_with, ends_with) {
+            if vanity_enabled && attempt % 10_000 == 0 {
+                println!("Vanity search attempts: {}", attempt);
+            }
+            continue;
+        }
+
+        if let Err(e) = save_default_wallet_with_mnemonic(&sk, Some(&mnemonic)) {
+            println!("Failed to save wallet: {}", e);
+            return;
+        }
+        println!("Created new encrypted wallet.");
+        if vanity_enabled {
+            println!("Vanity matched after {} attempts.", attempt);
+        }
+        println!("Public : {}", pk);
+        println!("Address: {}", address);
+        println!("Recovery phrase (store offline, never share):");
+        println!("  {}", mnemonic);
+        println!("Derivation path: {}", DEFAULT_DERIVATION_PATH);
+        return;
+    }
+
+    if vanity_enabled {
+        println!(
+            "Vanity pattern not found in {} attempts. Try shorter prefix/suffix or increase LOFSWAP_VANITY_MAX_ATTEMPTS.",
+            tries_limit
+        );
+    } else {
+        println!("Failed to create wallet");
+    }
+}
+
+fn recover_wallet_from_mnemonic(words: &str) {
+    let phrase = words.trim();
+    if phrase.is_empty() {
+        println!("Recovery phrase is required");
+        return;
+    }
+    let derived = match derive_secret_key_from_mnemonic(
+        phrase,
+        &mnemonic_passphrase(),
+        DEFAULT_DERIVATION_PATH,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            println!("Invalid recovery phrase: {}", e);
+            return;
+        }
+    };
+    let Ok(sk) = SecretKey::from_byte_array(derived) else {
+        println!("Derived key is invalid for secp256k1");
+        return;
+    };
+    if let Err(e) = save_default_wallet_with_mnemonic(&sk, Some(phrase)) {
+        println!("Failed to save recovered wallet: {}", e);
+        return;
+    }
+    let pk = PublicKey::from_secret_key(&Secp256k1::new(), &sk);
+    println!("Recovered wallet.");
     println!("Public : {}", pk);
     println!("Address: {}", pubkey_to_address(&pk.to_string()));
 }
@@ -735,7 +992,10 @@ fn import_priv(priv_hex: &str) {
         Ok(bytes) => match SecretKey::from_byte_array(hex_to_32_bytes(bytes)) {
             Ok(sk) => {
                 let pk = PublicKey::from_secret_key(&Secp256k1::new(), &sk);
-                save_default_wallet(&sk);
+                if let Err(e) = save_default_wallet_with_mnemonic(&sk, None) {
+                    println!("Failed to save wallet: {}", e);
+                    return;
+                }
                 println!("Imported private key. Public Key: {}", pk);
                 println!("Address: {}", pubkey_to_address(&pk.to_string()));
             }
@@ -743,6 +1003,37 @@ fn import_priv(priv_hex: &str) {
         },
         Err(_) => println!("Invalid hex format"),
     }
+}
+
+fn export_private_key() {
+    let env_ok = env::var(PRIVATE_EXPORT_CONFIRM_ENV)
+        .ok()
+        .map(|v| v.trim() == PRIVATE_EXPORT_CONFIRM_VALUE)
+        .unwrap_or(false);
+    if !env_ok {
+        println!(
+            "Private key export blocked. Set {}={} to unlock.",
+            PRIVATE_EXPORT_CONFIRM_ENV, PRIVATE_EXPORT_CONFIRM_VALUE
+        );
+        return;
+    }
+    let Some(typed) = read_line_prompt("Type EXACTLY 'EXPORT PRIVATE KEY' to continue: ") else {
+        println!("Cancelled.");
+        return;
+    };
+    if typed != "EXPORT PRIVATE KEY" {
+        println!("Cancelled.");
+        return;
+    }
+    if !confirm("Final confirmation? (y/N)") {
+        println!("Cancelled.");
+        return;
+    }
+    let Some(sk) = load_default_wallet() else {
+        println!("No default wallet");
+        return;
+    };
+    println!("Private: {}", hex::encode(sk.secret_bytes()));
 }
 
 fn hex_to_32(priv_hex: &str) -> [u8; 32] {
@@ -917,17 +1208,17 @@ fn tx_signed_by_wallet(tx: &Transaction, sk: &SecretKey) -> bool {
     } else {
         tx.chain_id.as_str()
     };
-    let new_preimage = format!(
-        "{}|{}|{}|{}|{}|{}|{}",
-        tx.version, chain_id, signer, tx.to, tx.amount, tx.timestamp, tx.nonce
-    );
-    let new_hash = Sha256::digest(new_preimage.as_bytes());
     if tx.version >= 3 {
         if chain_id != CHAIN_ID {
             return false;
         }
+        let v3_preimage = format!(
+            "{}|{}|{:?}|{}|{}|{}|{}|{}|{}",
+            tx.version, chain_id, tx.kind, signer, tx.to, tx.amount, tx.fee, tx.timestamp, tx.nonce
+        );
+        let v3_hash = Sha256::digest(v3_preimage.as_bytes());
         return secp
-            .verify_ecdsa(Message::from_digest(new_hash.into()), &sig, &pk)
+            .verify_ecdsa(Message::from_digest(v3_hash.into()), &sig, &pk)
             .is_ok();
     }
     if tx.version >= 2 {
@@ -1117,16 +1408,26 @@ fn main() {
         }
         match a[0] {
             "help" => help(),
-            "create-wallet" => create_wallet(),
+            "create-wallet" => match parse_vanity_args(&a[1..]) {
+                Ok((starts_with, ends_with)) => {
+                    create_wallet(starts_with.as_deref(), ends_with.as_deref())
+                }
+                Err(e) => println!(
+                    "{}\nUsage: create-wallet [startswith <prefix>] [endswith <suffix>]",
+                    e
+                ),
+            },
+            "recover-mnemonic" if a.len() >= 2 => recover_wallet_from_mnemonic(&a[1..].join(" ")),
             "import-priv" if a.len() == 2 => import_priv(a[1]),
             "import-dat" if a.len() == 2 => import_dat(a[1]),
             "export-dat" if a.len() == 2 => export_dat(a[1]),
+            "export-priv" => export_private_key(),
             "default-wallet" => {
                 if let Some(sk) = load_default_wallet() {
                     let pk = PublicKey::from_secret_key(&Secp256k1::new(), &sk);
-                    println!("Private: {}", hex::encode(sk.secret_bytes()));
                     println!("Public : {}", pk);
                     println!("Address: {}", pubkey_to_address(&pk.to_string()));
+                    println!("Private key is hidden by default.");
                 } else {
                     println!("No default wallet");
                 }
@@ -1251,5 +1552,19 @@ mod tests {
         };
         let tx = build_tx(&mut store, &sk, "LFS11111111111111111111", 5);
         assert!(tx_signed_by_wallet(&tx, &sk));
+    }
+
+    #[test]
+    fn parse_vanity_args_supports_combined_filters() {
+        let parsed = parse_vanity_args(&["startswith", "abc", "endswith", "9"]).unwrap();
+        assert_eq!(parsed.0.as_deref(), Some("abc"));
+        assert_eq!(parsed.1.as_deref(), Some("9"));
+    }
+
+    #[test]
+    fn vanity_match_uses_payload_after_lfs() {
+        let addr = "LFSabc1239";
+        assert!(address_matches_vanity(addr, Some("abc"), Some("9")));
+        assert!(!address_matches_vanity(addr, Some("LFS"), None));
     }
 }
