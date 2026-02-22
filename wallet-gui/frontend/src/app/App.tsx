@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type KeyboardEvent } from "react";
 import {
   AlertTriangle,
   Copy,
@@ -14,6 +14,7 @@ import {
   ShieldCheck,
   Trash2,
   Wallet,
+  X,
 } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import { toast, Toaster } from "sonner";
@@ -220,6 +221,25 @@ function OnboardingView({
 
   const passwordsValid = passphrase.trim().length > 0 && passphrase === confirmPassphrase;
 
+  function handlePasswordEnter(event: KeyboardEvent<HTMLInputElement>) {
+    if (event.key !== "Enter") {
+      return;
+    }
+    event.preventDefault();
+    if (creating) {
+      return;
+    }
+    if (tab === "import_private") {
+      void handleImportPrivateKey();
+      return;
+    }
+    if (tab === "import_dat") {
+      void handleImportDat();
+      return;
+    }
+    void handleCreate();
+  }
+
   async function handleCreate() {
     if (!passwordsValid) {
       toast.error("Set a wallet password and confirm it");
@@ -306,7 +326,7 @@ function OnboardingView({
   }
 
   return (
-    <div className="min-h-screen bg-black text-white p-6 md:p-10">
+    <div className="h-full min-h-full overflow-y-auto bg-black text-white p-6 md:p-10 overscroll-none">
       <div className="max-w-5xl mx-auto">
         <header className="mb-8">
           <div className="inline-flex items-center gap-3 px-4 py-2 rounded-full border border-zinc-800 bg-zinc-950">
@@ -345,6 +365,7 @@ function OnboardingView({
                 type="password"
                 value={passphrase}
                 onChange={(e) => setPassphrase(e.target.value)}
+                onKeyDown={handlePasswordEnter}
                 className="w-full h-11 rounded-lg border border-zinc-700 bg-zinc-900 px-3 outline-none focus:border-blue-500"
                 placeholder="Enter password"
               />
@@ -355,6 +376,7 @@ function OnboardingView({
                 type="password"
                 value={confirmPassphrase}
                 onChange={(e) => setConfirmPassphrase(e.target.value)}
+                onKeyDown={handlePasswordEnter}
                 className="w-full h-11 rounded-lg border border-zinc-700 bg-zinc-900 px-3 outline-none focus:border-blue-500"
                 placeholder="Confirm password"
               />
@@ -484,7 +506,7 @@ function UnlockView({
   }
 
   return (
-    <div className="min-h-screen bg-black text-white flex items-center justify-center px-6">
+    <div className="h-full min-h-full overflow-y-auto bg-black text-white flex items-center justify-center px-6 overscroll-none">
       <div className="w-full max-w-xl rounded-2xl border border-zinc-800 bg-zinc-950 p-8 space-y-6">
         <div className="flex items-center gap-3">
           <Lock className="w-6 h-6 text-blue-400" />
@@ -506,6 +528,15 @@ function UnlockView({
             type="password"
             value={passphrase}
             onChange={(e) => setPassphrase(e.target.value)}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter") {
+                return;
+              }
+              event.preventDefault();
+              if (!unlocking) {
+                void handleUnlock();
+              }
+            }}
             className="w-full h-11 rounded-lg border border-zinc-700 bg-zinc-900 px-3 outline-none focus:border-blue-500"
             placeholder="Enter password"
           />
@@ -566,6 +597,7 @@ function WalletView({
   const [revealedPrivateKeyHex, setRevealedPrivateKeyHex] = useState<string | null>(null);
   const [showPrivateKey, setShowPrivateKey] = useState(false);
   const [deletingWalletConfig, setDeletingWalletConfig] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const receiveAddress = appState.wallet_address ?? "";
   const parsedMinPeers = Number.parseInt(minPeersInput, 10);
   const minPeersValid = Number.isFinite(parsedMinPeers) && parsedMinPeers >= 1;
@@ -573,6 +605,22 @@ function WalletView({
   useEffect(() => {
     setMinPeersInput(String(appState.min_broadcast_peers || 2));
   }, [appState.min_broadcast_peers]);
+
+  useEffect(() => {
+    if (!settingsOpen) {
+      return undefined;
+    }
+    const handleGlobalKeydown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setSettingsOpen(false);
+      }
+    };
+    window.addEventListener("keydown", handleGlobalKeydown);
+    return () => {
+      window.removeEventListener("keydown", handleGlobalKeydown);
+    };
+  }, [settingsOpen]);
 
   async function handleCopyAddress() {
     if (!receiveAddress) {
@@ -775,7 +823,7 @@ function WalletView({
   }
 
   return (
-    <div className="min-h-screen bg-black text-white">
+    <div className="h-full min-h-full bg-black text-white flex flex-col overflow-hidden">
       <header className="border-b border-zinc-800 bg-zinc-950/60 backdrop-blur px-6 md:px-10 py-5">
         <div className="max-w-7xl mx-auto flex flex-col md:flex-row md:items-center md:justify-between gap-4">
           <div>
@@ -800,6 +848,14 @@ function WalletView({
               Refresh
             </button>
             <button
+              onClick={() => setSettingsOpen(true)}
+              className="h-10 w-10 rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-200 inline-flex items-center justify-center"
+              title="Settings"
+              aria-label="Open settings"
+            >
+              <Settings className="w-4 h-4" />
+            </button>
+            <button
               onClick={() => void handleLock()}
               disabled={locking}
               className="h-10 px-3 rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-200 inline-flex items-center gap-2 disabled:opacity-50"
@@ -811,8 +867,8 @@ function WalletView({
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto p-6 md:p-10 grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <section className="lg:col-span-1 space-y-6">
+      <main className="max-w-7xl w-full mx-auto flex-1 min-h-0 p-6 md:p-10 grid grid-cols-1 lg:grid-cols-3 gap-6 overflow-y-auto lg:overflow-hidden overscroll-none">
+        <section className="lg:col-span-1 space-y-6 lg:overflow-y-auto lg:pr-1">
           <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-6">
             <p className="text-sm text-zinc-500 uppercase tracking-[0.2em]">Balance</p>
             <h2 className="text-4xl font-light mt-3">{appState.balance ?? 0} LFS</h2>
@@ -890,14 +946,16 @@ function WalletView({
           </div>
         </section>
 
-        <section className="lg:col-span-2 space-y-6">
-          <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-6">
+        <section className="lg:col-span-2 lg:min-h-0 lg:flex lg:flex-col">
+          <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-6 flex flex-col lg:flex-1 lg:min-h-0">
             <h3 className="text-lg font-medium mb-5">Recent Transactions</h3>
 
             {appState.transactions.length === 0 ? (
-              <p className="text-zinc-400">No on-chain transactions found for this wallet yet.</p>
+              <div className="flex-1 min-h-0 rounded-xl border border-zinc-800 bg-zinc-900/30 p-4 text-zinc-400">
+                No on-chain transactions found for this wallet yet.
+              </div>
             ) : (
-              <div className="space-y-3">
+              <div className="space-y-3 flex-1 min-h-0 overflow-y-auto pr-1">
                 {appState.transactions.map((tx) => (
                   <div
                     key={`${tx.txid}-${tx.signature}`}
@@ -931,12 +989,26 @@ function WalletView({
               </div>
             )}
           </div>
+        </section>
+      </main>
 
-          <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-6 space-y-6">
-            <h3 className="text-lg font-medium inline-flex items-center gap-2">
-              <Settings className="w-4 h-4" />
-              Settings
-            </h3>
+      {settingsOpen && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm p-4 md:p-8">
+          <div className="max-w-4xl mx-auto max-h-[92vh] overflow-y-auto rounded-2xl border border-zinc-800 bg-zinc-950 p-6 space-y-6">
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-medium inline-flex items-center gap-2">
+                <Settings className="w-4 h-4" />
+                Settings
+              </h3>
+              <button
+                onClick={() => setSettingsOpen(false)}
+                className="h-10 w-10 rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-200 inline-flex items-center justify-center"
+                aria-label="Close settings"
+                title="Close settings"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
 
             <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-4 space-y-3">
               <p className="text-sm text-zinc-400">Public key</p>
@@ -962,6 +1034,15 @@ function WalletView({
                   step={1}
                   value={minPeersInput}
                   onChange={(e) => setMinPeersInput(e.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key !== "Enter") {
+                      return;
+                    }
+                    event.preventDefault();
+                    if (!savingMinPeers) {
+                      void handleSaveMinPeers();
+                    }
+                  }}
                   className="w-full md:w-44 h-11 rounded-lg border border-zinc-700 bg-zinc-900 px-3 outline-none focus:border-blue-500"
                   placeholder="2"
                 />
@@ -989,6 +1070,15 @@ function WalletView({
                   type="password"
                   value={currentPassphrase}
                   onChange={(e) => setCurrentPassphrase(e.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key !== "Enter") {
+                      return;
+                    }
+                    event.preventDefault();
+                    if (!changingPassphrase) {
+                      void handleChangePassphrase();
+                    }
+                  }}
                   className="h-11 rounded-lg border border-zinc-700 bg-zinc-900 px-3 outline-none focus:border-blue-500"
                   placeholder="Current password"
                 />
@@ -996,6 +1086,15 @@ function WalletView({
                   type="password"
                   value={newPassphrase}
                   onChange={(e) => setNewPassphrase(e.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key !== "Enter") {
+                      return;
+                    }
+                    event.preventDefault();
+                    if (!changingPassphrase) {
+                      void handleChangePassphrase();
+                    }
+                  }}
                   className="h-11 rounded-lg border border-zinc-700 bg-zinc-900 px-3 outline-none focus:border-blue-500"
                   placeholder="New password"
                 />
@@ -1003,6 +1102,15 @@ function WalletView({
                   type="password"
                   value={confirmNewPassphrase}
                   onChange={(e) => setConfirmNewPassphrase(e.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key !== "Enter") {
+                      return;
+                    }
+                    event.preventDefault();
+                    if (!changingPassphrase) {
+                      void handleChangePassphrase();
+                    }
+                  }}
                   className="h-11 rounded-lg border border-zinc-700 bg-zinc-900 px-3 outline-none focus:border-blue-500"
                   placeholder="Confirm new password"
                 />
@@ -1026,6 +1134,15 @@ function WalletView({
                     type="password"
                     value={revealPassphrase}
                     onChange={(e) => setRevealPassphrase(e.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key !== "Enter") {
+                        return;
+                      }
+                      event.preventDefault();
+                      if (!revealingPrivateKey) {
+                        void handleRevealPrivateKey();
+                      }
+                    }}
                     className="w-full h-11 rounded-lg border border-zinc-700 bg-zinc-900 px-3 outline-none focus:border-blue-500"
                     placeholder="Wallet password"
                   />
@@ -1071,6 +1188,15 @@ function WalletView({
                     type="password"
                     value={exportPassphrase}
                     onChange={(e) => setExportPassphrase(e.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key !== "Enter") {
+                        return;
+                      }
+                      event.preventDefault();
+                      if (!exportingPrivateKey) {
+                        void handleExportPrivateKey();
+                      }
+                    }}
                     className="w-full h-11 rounded-lg border border-zinc-700 bg-zinc-900 px-3 outline-none focus:border-blue-500"
                     placeholder="Wallet password"
                   />
@@ -1101,8 +1227,8 @@ function WalletView({
               </button>
             </div>
           </div>
-        </section>
-      </main>
+        </div>
+      )}
     </div>
   );
 }

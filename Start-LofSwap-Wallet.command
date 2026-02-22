@@ -13,6 +13,14 @@ APP_DIST_SOURCE="$ROOT_DIR/wallet-gui/frontend/dist"
 APP_DIST_BUNDLE="$APP_BUNDLE/Contents/Resources/frontend-dist"
 APP_ICON_PNG="$ROOT_DIR/lofswap-logo.png"
 
+if [ "$(uname -s)" = "Darwin" ]; then
+  APP_RUNTIME_DATA_DIR="$HOME/Library/Application Support/LofSwap Wallet"
+  APP_RUNTIME_DIST_DIR="$APP_RUNTIME_DATA_DIR/frontend-dist"
+else
+  APP_RUNTIME_DATA_DIR=""
+  APP_RUNTIME_DIST_DIR=""
+fi
+
 if ! command -v npm >/dev/null 2>&1; then
   echo "npm is required. Install Node.js first."
   exit 1
@@ -34,11 +42,18 @@ cargo build --release -p wallet-gui
 
 echo "Preparing app bundle..."
 rm -rf "$APP_BUNDLE"
+if [ -n "$APP_RUNTIME_DIST_DIR" ]; then
+  rm -rf "$APP_RUNTIME_DIST_DIR"
+  mkdir -p "$APP_RUNTIME_DIST_DIR"
+fi
 mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources" "$APP_DIST_BUNDLE"
 
 cp "$APP_BINARY_SOURCE" "$APP_BINARY_WRAPPED"
 chmod +x "$APP_BINARY_WRAPPED"
 cp -R "$APP_DIST_SOURCE/." "$APP_DIST_BUNDLE/"
+if [ -n "$APP_RUNTIME_DIST_DIR" ]; then
+  cp -R "$APP_DIST_SOURCE/." "$APP_RUNTIME_DIST_DIR/"
+fi
 if [ -f "$APP_ICON_PNG" ]; then
   cp "$APP_ICON_PNG" "$APP_BUNDLE/Contents/Resources/AppIcon.png"
 fi
@@ -47,9 +62,14 @@ cat > "$APP_EXECUTABLE" <<EOF
 #!/bin/bash
 set -euo pipefail
 APP_CONTENTS_DIR="\$(cd "\$(dirname "\$0")/.." && pwd)"
-export GUI_APP_DIST_DIR="\$APP_CONTENTS_DIR/Resources/frontend-dist"
+if [ "\$(uname -s)" = "Darwin" ]; then
+  export GUI_APP_DATA_DIR="\$HOME/Library/Application Support/LofSwap Wallet"
+  mkdir -p "\$GUI_APP_DATA_DIR"
+  export GUI_APP_DIST_DIR="\$GUI_APP_DATA_DIR/frontend-dist"
+else
+  export GUI_APP_DIST_DIR="\$APP_CONTENTS_DIR/Resources/frontend-dist"
+fi
 unset GUI_APP_DEV_URL
-cd "$ROOT_DIR"
 exec "\$APP_CONTENTS_DIR/Resources/wallet-gui.bin"
 EOF
 chmod +x "$APP_EXECUTABLE"

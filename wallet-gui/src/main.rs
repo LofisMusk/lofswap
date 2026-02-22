@@ -6,7 +6,7 @@ use std::io::{Cursor, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
@@ -32,6 +32,8 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::{Icon, Window, WindowId};
 use wry::http::{Method, Request, Response, StatusCode};
+#[cfg(target_os = "macos")]
+use wry::Rect;
 use wry::{WebView, WebViewBuilder};
 
 const APP_TITLE: &str = "LofSwap Wallet";
@@ -39,6 +41,7 @@ const DEFAULT_DEV_URL: &str = "http://127.0.0.1:5173";
 const APP_PROTOCOL: &str = "lofswap";
 const APP_ICON_PNG: &[u8] = include_bytes!("../../lofswap-logo.png");
 const GUI_APP_DIST_DIR_ENV: &str = "GUI_APP_DIST_DIR";
+const GUI_APP_DATA_DIR_ENV: &str = "GUI_APP_DATA_DIR";
 
 const LEGACY_WALLET: &str = ".default_wallet";
 const ENCRYPTED_WALLET: &str = ".default_wallet.keystore.json";
@@ -47,13 +50,13 @@ const BIOMETRIC_MARKER_FILE: &str = ".default_wallet.biometric_enabled";
 const BIOMETRIC_SERVICE: &str = "lofswap-wallet";
 const BIOMETRIC_ACCOUNT: &str = "default-wallet-passphrase";
 #[cfg(target_os = "macos")]
-const TOUCH_ID_HELPER_BIN: &str = "wallet-cache/LofSwap Wallet TouchID";
+const TOUCH_ID_HELPER_BIN: &str = "LofSwap Wallet TouchID";
 #[cfg(target_os = "macos")]
-const TOUCH_ID_HELPER_SRC: &str = "wallet-cache/lofswap-touchid-helper.swift";
+const TOUCH_ID_HELPER_SRC: &str = "lofswap-touchid-helper.swift";
 #[cfg(target_os = "macos")]
-const TOUCH_ID_HELPER_ICON: &str = "wallet-cache/lofswap-touchid-icon.png";
+const TOUCH_ID_HELPER_ICON: &str = "lofswap-touchid-icon.png";
 #[cfg(target_os = "macos")]
-const TOUCH_ID_HELPER_VERSION_FILE: &str = "wallet-cache/lofswap-touchid-helper.version";
+const TOUCH_ID_HELPER_VERSION_FILE: &str = "lofswap-touchid-helper.version";
 #[cfg(target_os = "macos")]
 const TOUCH_ID_HELPER_VERSION: &str = "3";
 #[cfg(target_os = "macos")]
@@ -95,8 +98,8 @@ exit(authenticated ? 0 : 3)
 "#;
 
 const WALLET_CACHE_DIR: &str = "wallet-cache";
-const PEER_CACHE_FILE: &str = "wallet-cache/peers_cache.json";
-const GUI_SETTINGS_FILE: &str = "wallet-cache/gui_settings.json";
+const PEER_CACHE_FILE: &str = "peers_cache.json";
+const GUI_SETTINGS_FILE: &str = "gui_settings.json";
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 const OFFLINE_GRACE: Duration = Duration::from_secs(10);
 const PEER_DISCOVERY_INTERVAL: Duration = Duration::from_secs(20);
@@ -105,6 +108,7 @@ const DEFAULT_TX_FEE: u64 = 1;
 const DEFAULT_TX_HISTORY_LIMIT: usize = 50;
 
 static BOOTSTRAP_NODES: &[&str] = &["89.168.107.239:6000", "79.76.116.108:6000"];
+static GUI_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 type AnyError = Box<dyn Error + Send + Sync>;
 
@@ -148,20 +152,112 @@ fn resolve_frontend_source() -> FrontendSource {
         }
     }
 
-    let dist_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("frontend")
-        .join("dist");
-    if dist_dir.join("index.html").is_file() {
+    if let Some(dist_dir) = bundled_frontend_dist_dir() {
         return FrontendSource {
             app_url: format!("{APP_PROTOCOL}://app/index.html"),
             dist_dir: Some(dist_dir),
         };
     }
 
+    #[cfg(debug_assertions)]
+    {
+        let dist_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("frontend")
+            .join("dist");
+        if dist_dir.join("index.html").is_file() {
+            return FrontendSource {
+                app_url: format!("{APP_PROTOCOL}://app/index.html"),
+                dist_dir: Some(dist_dir),
+            };
+        }
+    }
+
     FrontendSource {
         app_url: DEFAULT_DEV_URL.to_string(),
         dist_dir: None,
     }
+}
+
+fn bundled_frontend_dist_dir() -> Option<PathBuf> {
+    let exe = env::current_exe().ok()?;
+    let resources = exe.parent()?.parent()?.join("Resources");
+    let dist_dir = resources.join("frontend-dist");
+    if dist_dir.join("index.html").is_file() {
+        Some(dist_dir)
+    } else {
+        None
+    }
+}
+
+fn gui_data_dir() -> &'static Path {
+    GUI_DATA_DIR.get_or_init(compute_gui_data_dir).as_path()
+}
+
+fn compute_gui_data_dir() -> PathBuf {
+    if let Ok(value) = env::var(GUI_APP_DATA_DIR_ENV) {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(home) = env::var_os("HOME") {
+            return PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+                .join("LofSwap Wallet");
+        }
+    }
+
+    env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("wallet-gui-data")
+}
+
+fn data_path(file_name: &str) -> PathBuf {
+    gui_data_dir().join(file_name)
+}
+
+fn cache_dir_path() -> PathBuf {
+    gui_data_dir().join(WALLET_CACHE_DIR)
+}
+
+fn cache_file_path(file_name: &str) -> PathBuf {
+    cache_dir_path().join(file_name)
+}
+
+fn encrypted_wallet_path() -> PathBuf {
+    data_path(ENCRYPTED_WALLET)
+}
+
+fn legacy_wallet_path() -> PathBuf {
+    data_path(LEGACY_WALLET)
+}
+
+fn biometric_marker_path() -> PathBuf {
+    data_path(BIOMETRIC_MARKER_FILE)
+}
+
+#[cfg(target_os = "macos")]
+fn touch_id_helper_bin_path() -> PathBuf {
+    cache_file_path(TOUCH_ID_HELPER_BIN)
+}
+
+#[cfg(target_os = "macos")]
+fn touch_id_helper_src_path() -> PathBuf {
+    cache_file_path(TOUCH_ID_HELPER_SRC)
+}
+
+#[cfg(target_os = "macos")]
+fn touch_id_helper_icon_path() -> PathBuf {
+    cache_file_path(TOUCH_ID_HELPER_ICON)
+}
+
+#[cfg(target_os = "macos")]
+fn touch_id_helper_version_path() -> PathBuf {
+    cache_file_path(TOUCH_ID_HELPER_VERSION_FILE)
 }
 
 struct FrontendSource {
@@ -206,7 +302,8 @@ impl UserSettings {
 
     fn load() -> Self {
         ensure_cache_dir();
-        let from_disk = fs::read_to_string(GUI_SETTINGS_FILE)
+        let settings_path = cache_file_path(GUI_SETTINGS_FILE);
+        let from_disk = fs::read_to_string(settings_path)
             .ok()
             .and_then(|body| serde_json::from_str::<UserSettings>(&body).ok())
             .unwrap_or_default();
@@ -219,7 +316,8 @@ impl UserSettings {
         ensure_cache_dir();
         let body = serde_json::to_string_pretty(self)
             .map_err(|e| format!("failed to serialize settings: {e}"))?;
-        fs::write(GUI_SETTINGS_FILE, body).map_err(|e| format!("failed to write settings: {e}"))
+        let settings_path = cache_file_path(GUI_SETTINGS_FILE);
+        fs::write(settings_path, body).map_err(|e| format!("failed to write settings: {e}"))
     }
 }
 
@@ -283,13 +381,36 @@ impl GuiApp {
                 )
             });
 
-        builder.build(window)
+        #[cfg(target_os = "macos")]
+        {
+            // On macOS, using `build()` replaces NSWindow contentView. Winit expects its own
+            // WinitView there and can crash on minimize/deactivate callbacks otherwise.
+            return builder
+                .with_bounds(webview_bounds_for_window(window))
+                .build_as_child(window);
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            builder.build(window)
+        }
     }
 
     fn clear_window_state(&mut self) {
         // WebView must be dropped before Window on macOS to avoid platform crashes.
         self.webview = None;
         self.window = None;
+    }
+
+    fn sync_webview_bounds_to_window(&self) {
+        #[cfg(target_os = "macos")]
+        {
+            if let (Some(webview), Some(window)) = (self.webview.as_ref(), self.window.as_ref()) {
+                if let Err(err) = webview.set_bounds(webview_bounds_for_window(window)) {
+                    eprintln!("failed to resize webview bounds: {err}");
+                }
+            }
+        }
     }
 }
 
@@ -343,14 +464,19 @@ impl ApplicationHandler for GuiApp {
     ) {
         match event {
             WindowEvent::CloseRequested => {
-                self.clear_window_state();
                 event_loop.exit();
             }
-            WindowEvent::Destroyed => {
-                self.clear_window_state();
+            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
+                self.sync_webview_bounds_to_window();
             }
             _ => {}
         }
+    }
+
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // Drop WebView/Window only when the app is really exiting.
+        // This avoids lifecycle edge-cases on macOS minimize/restore.
+        self.clear_window_state();
     }
 }
 
@@ -358,6 +484,20 @@ fn load_app_icon() -> Option<Icon> {
     let icon = build_squircle_icon_image(512)?;
     let (width, height) = icon.dimensions();
     Icon::from_rgba(icon.into_raw(), width, height).ok()
+}
+
+#[cfg(target_os = "macos")]
+fn webview_bounds_for_window(window: &Window) -> Rect {
+    let logical = window
+        .inner_size()
+        .to_logical::<f64>(window.scale_factor());
+    let width = logical.width.max(1.0).round() as i32;
+    let height = logical.height.max(1.0).round() as i32;
+
+    Rect {
+        position: wry::dpi::LogicalPosition::new(0i32, 0i32).into(),
+        size: wry::dpi::LogicalSize::new(width, height).into(),
+    }
 }
 
 fn build_squircle_icon_png() -> Option<Vec<u8>> {
@@ -375,17 +515,9 @@ fn build_squircle_icon_image(size: u32) -> Option<RgbaImage> {
     }
 
     let source = image::load_from_memory(APP_ICON_PNG).ok()?.into_rgba8();
-    let mut canvas = RgbaImage::from_pixel(size, size, Rgba([0, 0, 0, 0]));
-    let radius = ((size as f32) * 0.24).round() as i32;
-    let size_i32 = size as i32;
-
-    for y in 0..size {
-        for x in 0..size {
-            if in_rounded_square(x as i32, y as i32, size_i32, radius) {
-                canvas.put_pixel(x, y, Rgba([10, 10, 12, 255]));
-            }
-        }
-    }
+    // Keep icon fully opaque. macOS applies platform icon shaping/styling;
+    // transparent corners here can produce visible outline artifacts.
+    let mut canvas = RgbaImage::from_pixel(size, size, Rgba([10, 10, 12, 255]));
 
     let logo_size = ((size as f32) * 0.62).round().clamp(32.0, size as f32) as u32;
     let logo = resize(&source, logo_size, logo_size, FilterType::Lanczos3);
@@ -393,19 +525,6 @@ fn build_squircle_icon_image(size: u32) -> Option<RgbaImage> {
     overlay(&mut canvas, &logo, offset, offset);
 
     Some(canvas)
-}
-
-fn in_rounded_square(x: i32, y: i32, size: i32, radius: i32) -> bool {
-    if radius <= 0 || radius * 2 >= size {
-        return true;
-    }
-    let min = radius;
-    let max = size - radius - 1;
-    let nearest_x = x.clamp(min, max);
-    let nearest_y = y.clamp(min, max);
-    let dx = x - nearest_x;
-    let dy = y - nearest_y;
-    dx * dx + dy * dy <= radius * radius
 }
 
 #[cfg(target_os = "macos")]
@@ -1292,21 +1411,21 @@ fn access_private_key(req: PrivateKeyAccessRequest) -> ApiResult<PrivateKeyAcces
 }
 
 fn delete_wallet_configuration(state: &mut BackendState) -> ApiResult<WalletDeleteResult> {
-    if let Err(err) = fs::remove_file(ENCRYPTED_WALLET) {
+    if let Err(err) = fs::remove_file(encrypted_wallet_path()) {
         if err.kind() != std::io::ErrorKind::NotFound {
             return Err(ApiError::internal(format!(
                 "failed to delete encrypted wallet file: {err}"
             )));
         }
     }
-    if let Err(err) = fs::remove_file(LEGACY_WALLET) {
+    if let Err(err) = fs::remove_file(legacy_wallet_path()) {
         if err.kind() != std::io::ErrorKind::NotFound {
             return Err(ApiError::internal(format!(
                 "failed to delete legacy wallet file: {err}"
             )));
         }
     }
-    if let Err(err) = fs::remove_file(BIOMETRIC_MARKER_FILE) {
+    if let Err(err) = fs::remove_file(biometric_marker_path()) {
         if err.kind() != std::io::ErrorKind::NotFound {
             return Err(ApiError::internal(format!(
                 "failed to delete biometric marker file: {err}"
@@ -1386,7 +1505,7 @@ fn default_mnemonic_passphrase() -> String {
 }
 
 fn wallet_files_exist() -> bool {
-    Path::new(ENCRYPTED_WALLET).exists() || Path::new(LEGACY_WALLET).exists()
+    encrypted_wallet_path().exists() || legacy_wallet_path().exists()
 }
 
 fn save_default_wallet_with_mnemonic(
@@ -1396,13 +1515,13 @@ fn save_default_wallet_with_mnemonic(
 ) -> Result<(), String> {
     let bytes = secret_key.secret_bytes();
     let keystore = encrypt_secret_key(&bytes, mnemonic, Some(DEFAULT_DERIVATION_PATH), passphrase)?;
-    save_keystore_file(Path::new(ENCRYPTED_WALLET), &keystore)?;
-    let _ = fs::remove_file(LEGACY_WALLET);
+    save_keystore_file(&encrypted_wallet_path(), &keystore)?;
+    let _ = fs::remove_file(legacy_wallet_path());
     Ok(())
 }
 
 fn migrate_legacy_wallet(passphrase: &str) -> Result<SecretKey, String> {
-    let body = fs::read_to_string(LEGACY_WALLET)
+    let body = fs::read_to_string(legacy_wallet_path())
         .map_err(|e| format!("failed to read legacy wallet file: {e}"))?;
     let bytes = hex::decode(body.trim()).map_err(|_| "legacy wallet hex is invalid".to_string())?;
     if bytes.len() != 32 {
@@ -1418,15 +1537,15 @@ fn migrate_legacy_wallet(passphrase: &str) -> Result<SecretKey, String> {
 }
 
 fn load_default_wallet(passphrase: &str) -> Result<SecretKey, String> {
-    if Path::new(ENCRYPTED_WALLET).exists() {
-        let keystore = load_keystore_file(Path::new(ENCRYPTED_WALLET))?;
+    if encrypted_wallet_path().exists() {
+        let keystore = load_keystore_file(&encrypted_wallet_path())?;
         let payload = decrypt_secret_key(&keystore, passphrase)?;
         let key_bytes = payload_secret_key_bytes(&payload)?;
         return SecretKey::from_byte_array(key_bytes)
             .map_err(|_| "wallet secret key is invalid for secp256k1".to_string());
     }
 
-    if Path::new(LEGACY_WALLET).exists() {
+    if legacy_wallet_path().exists() {
         return migrate_legacy_wallet(passphrase);
     }
 
@@ -1434,14 +1553,14 @@ fn load_default_wallet(passphrase: &str) -> Result<SecretKey, String> {
 }
 
 fn load_default_wallet_payload(passphrase: &str) -> Result<WalletSecretPayload, String> {
-    if Path::new(ENCRYPTED_WALLET).exists() {
-        let keystore = load_keystore_file(Path::new(ENCRYPTED_WALLET))?;
+    if encrypted_wallet_path().exists() {
+        let keystore = load_keystore_file(&encrypted_wallet_path())?;
         return decrypt_secret_key(&keystore, passphrase);
     }
 
-    if Path::new(LEGACY_WALLET).exists() {
+    if legacy_wallet_path().exists() {
         let _ = migrate_legacy_wallet(passphrase)?;
-        let keystore = load_keystore_file(Path::new(ENCRYPTED_WALLET))?;
+        let keystore = load_keystore_file(&encrypted_wallet_path())?;
         return decrypt_secret_key(&keystore, passphrase);
     }
 
@@ -1461,8 +1580,8 @@ fn save_wallet_from_payload(payload: &WalletSecretPayload, passphrase: &str) -> 
         Some(derivation_path),
         passphrase,
     )?;
-    save_keystore_file(Path::new(ENCRYPTED_WALLET), &keystore)?;
-    let _ = fs::remove_file(LEGACY_WALLET);
+    save_keystore_file(&encrypted_wallet_path(), &keystore)?;
+    let _ = fs::remove_file(legacy_wallet_path());
     Ok(())
 }
 
@@ -1479,19 +1598,19 @@ fn biometric_label() -> &'static str {
 }
 
 fn biometric_marker_exists() -> bool {
-    Path::new(BIOMETRIC_MARKER_FILE).exists()
+    biometric_marker_path().exists()
 }
 
 fn sync_biometric_preference(use_biometric: bool, passphrase: &str) -> ApiResult<()> {
     if use_biometric {
         store_biometric_passphrase(passphrase)
             .map_err(|e| ApiError::internal(format!("failed to enable biometric unlock: {}", e)))?;
-        fs::write(BIOMETRIC_MARKER_FILE, b"enabled").map_err(|e| {
+        fs::write(biometric_marker_path(), b"enabled").map_err(|e| {
             ApiError::internal(format!("failed to persist biometric setting marker: {e}"))
         })?;
     } else {
         let _ = clear_biometric_passphrase();
-        let _ = fs::remove_file(BIOMETRIC_MARKER_FILE);
+        let _ = fs::remove_file(biometric_marker_path());
     }
     Ok(())
 }
@@ -1702,9 +1821,9 @@ fn prompt_touch_id(reason: &str) -> Result<(), String> {
 #[cfg(target_os = "macos")]
 fn ensure_touch_id_helper_binary() -> Result<PathBuf, String> {
     ensure_cache_dir();
-    let helper_binary = PathBuf::from(TOUCH_ID_HELPER_BIN);
-    let helper_source = PathBuf::from(TOUCH_ID_HELPER_SRC);
-    let helper_version = PathBuf::from(TOUCH_ID_HELPER_VERSION_FILE);
+    let helper_binary = touch_id_helper_bin_path();
+    let helper_source = touch_id_helper_src_path();
+    let helper_version = touch_id_helper_version_path();
 
     let needs_rebuild = !helper_binary.is_file()
         || fs::read_to_string(&helper_version)
@@ -1764,7 +1883,7 @@ fn ensure_touch_id_helper_binary() -> Result<PathBuf, String> {
 #[cfg(target_os = "macos")]
 fn ensure_touch_id_helper_icon() -> Result<PathBuf, String> {
     ensure_cache_dir();
-    let icon_path = PathBuf::from(TOUCH_ID_HELPER_ICON);
+    let icon_path = touch_id_helper_icon_path();
     let icon_png = build_squircle_icon_png()
         .ok_or_else(|| "failed to generate Touch ID helper icon".to_string())?;
     fs::write(&icon_path, &icon_png)
@@ -1773,11 +1892,12 @@ fn ensure_touch_id_helper_icon() -> Result<PathBuf, String> {
 }
 
 fn ensure_cache_dir() {
-    let _ = fs::create_dir_all(WALLET_CACHE_DIR);
+    let _ = fs::create_dir_all(gui_data_dir());
+    let _ = fs::create_dir_all(cache_dir_path());
 }
 
 fn peer_cache_path() -> PathBuf {
-    PathBuf::from(PEER_CACHE_FILE)
+    cache_file_path(PEER_CACHE_FILE)
 }
 
 fn is_valid_peer(peer: &str) -> bool {
