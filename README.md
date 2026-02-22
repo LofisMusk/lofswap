@@ -1,12 +1,14 @@
 # Lofswap
 
-Lofswap is a Proof-of-Work blockchain designed to enable cross-chain swaps (e.g., BTC → SOL) via a secure protocol and supporting infrastructure. This repo contains the core node, wallet CLI, and GUI app.
+![LofSwap logo](lofswap-logo.png)
+
+Lofswap is a Proof-of-Work blockchain designed to enable cross-chain swaps (e.g., BTC -> SOL) via a secure protocol and supporting infrastructure. This repo contains the core node, wallet CLI, and desktop wallet GUI.
 
 ## What is in this repo
 - `blockchain-core/` Core data structures and hashing logic
 - `node-cli/` P2P node (TCP 6000)
 - `wallet-cli/` Wallet CLI for creating/sending transactions
-- `gui-app/` Desktop UI client
+- `wallet-gui/` Desktop UI client (Rust + WRY + React frontend)
 - `docs/` Notes, TODOs, changelog
 
 ## Quick start (local)
@@ -18,6 +20,23 @@ cargo build -r
 Run the node:
 ```
 ./target/release/node-cli
+```
+
+Run the desktop app (one-click build + start on macOS):
+```
+./Start-LofSwap-Wallet.command
+```
+
+Run the desktop app directly from Cargo:
+```
+cargo run -p wallet-gui
+```
+
+Build frontend only:
+```
+cd wallet-gui/frontend
+npm install
+npm run build
 ```
 
 ## CLI quality of life

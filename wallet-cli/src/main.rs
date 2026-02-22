@@ -303,9 +303,12 @@ impl PeerStore {
             .collect();
 
         for peer in candidates {
-            if let Ok(mut stream) =
-                TcpStream::connect_timeout(&peer.parse().unwrap(), CONNECT_TIMEOUT)
-            {
+            let Ok(sock) = peer.parse::<SocketAddr>() else {
+                continue;
+            };
+            if let Ok(mut stream) = TcpStream::connect_timeout(&sock, CONNECT_TIMEOUT) {
+                let _ = stream.set_read_timeout(Some(CONNECT_TIMEOUT));
+                let _ = stream.set_write_timeout(Some(CONNECT_TIMEOUT));
                 let _ = stream.write_all(b"/peers");
                 let mut buf = Vec::new();
                 if stream.read_to_end(&mut buf).is_ok() {
@@ -354,20 +357,17 @@ impl PeerStore {
 
 #[allow(dead_code)]
 fn connect_and_send(addr: &str, data: &[u8]) -> io::Result<()> {
-    let sock: SocketAddr = addr
-        .parse()
-        .map_err(|_| io::Error::new(io::ErrorKind::Other, "bad addr"))?;
+    let sock: SocketAddr = addr.parse().map_err(|_| io::Error::other("bad addr"))?;
     let mut s = TcpStream::connect_timeout(&sock, CONNECT_TIMEOUT)?;
     s.write_all(data)?;
     Ok(())
 }
 
 fn send_tx_and_get_reply(addr: &str, data: &[u8]) -> io::Result<Option<String>> {
-    let sock: SocketAddr = addr
-        .parse()
-        .map_err(|_| io::Error::new(io::ErrorKind::Other, "bad addr"))?;
+    let sock: SocketAddr = addr.parse().map_err(|_| io::Error::other("bad addr"))?;
     let mut s = TcpStream::connect_timeout(&sock, CONNECT_TIMEOUT)?;
     let _ = s.set_read_timeout(Some(Duration::from_millis(1200)));
+    let _ = s.set_write_timeout(Some(CONNECT_TIMEOUT));
     s.write_all(data)?;
     let mut buf = Vec::new();
     match s.read_to_end(&mut buf) {
@@ -602,6 +602,8 @@ fn fetch_next_nonce_from_peers(store: &mut PeerStore, from_addr: &str) -> Option
             continue;
         };
         if let Ok(mut s) = TcpStream::connect_timeout(&sock, CONNECT_TIMEOUT) {
+            let _ = s.set_read_timeout(Some(CONNECT_TIMEOUT));
+            let _ = s.set_write_timeout(Some(CONNECT_TIMEOUT));
             if s.write_all(query.as_bytes()).is_ok() {
                 let mut buf = String::new();
                 if s.read_to_string(&mut buf).is_ok() {
@@ -735,7 +737,12 @@ fn balance(store: &mut PeerStore, addr: &str) {
     store.discover();
     let query = format!("/balance/{}", addr);
     for p in store.as_slice() {
-        if let Ok(mut s) = TcpStream::connect_timeout(&p.parse().unwrap(), CONNECT_TIMEOUT) {
+        let Ok(sock) = p.parse::<SocketAddr>() else {
+            continue;
+        };
+        if let Ok(mut s) = TcpStream::connect_timeout(&sock, CONNECT_TIMEOUT) {
+            let _ = s.set_read_timeout(Some(CONNECT_TIMEOUT));
+            let _ = s.set_write_timeout(Some(CONNECT_TIMEOUT));
             if s.write_all(query.as_bytes()).is_ok() {
                 let mut buf = String::new();
                 if s.read_to_string(&mut buf).is_ok() {

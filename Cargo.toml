@@ -1,8 +1,9 @@
 [workspace]
+resolver = "3"
 members = [
     "blockchain-core",
     "explorer-api",
     "wallet-cli",
     "node-cli",
-    "gui-app"
+    "wallet-gui"
 ]

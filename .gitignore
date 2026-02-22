@@ -13,3 +13,6 @@ linux-build
 __pycache__/
 wallet-cache/
 .DS_Store
+wallet-gui/node_modules
+wallet-gui/frontend/node_modules
+wallet-gui/frontend/dist
