@@ -12,15 +12,19 @@ use blockchain_core::{
 };
 use chrono::Utc;
 use rand::seq::IndexedRandom;
+use rustyline::{DefaultEditor, error::ReadlineError};
 use secp256k1::{Message, PublicKey, Secp256k1, SecretKey, ecdsa::Signature};
 use serde_json;
 use sha2::{Digest, Sha256};
 use std::env;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, mpsc};
+use std::thread;
 use std::time::{Duration, Instant};
 
 static BOOTSTRAP_NODES: &[&str] = &["89.168.107.239:6000", "79.76.116.108:6000"];
@@ -34,7 +38,7 @@ const OFFLINE_GRACE: Duration = Duration::from_secs(10);
 const MIN_BROADCAST_PEERS: usize = 2;
 const WHOAMI_TIMEOUT: Duration = Duration::from_millis(800);
 const DEFAULT_TX_FEE: u64 = 1;
-const DEFAULT_VANITY_MAX_ATTEMPTS: u64 = 500_000;
+const DEFAULT_VANITY_MAX_ATTEMPTS: u64 = 500_000_000;
 const BASE58_ALPHABET: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
 // ---------- Default wallet ----------
@@ -173,16 +177,43 @@ fn address_matches_vanity(
     true
 }
 
-fn parse_vanity_args(args: &[&str]) -> Result<(Option<String>, Option<String>), String> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VanityComputeMode {
+    Cpu,
+    Gpu,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CreateWalletOptions {
+    starts_with: Option<String>,
+    ends_with: Option<String>,
+    compute_mode: VanityComputeMode,
+    worker_count: Option<usize>,
+}
+
+impl Default for CreateWalletOptions {
+    fn default() -> Self {
+        Self {
+            starts_with: None,
+            ends_with: None,
+            compute_mode: VanityComputeMode::Cpu,
+            worker_count: None,
+        }
+    }
+}
+
+fn parse_vanity_args(args: &[&str]) -> Result<CreateWalletOptions, String> {
     if args.is_empty() {
-        return Ok((None, None));
+        return Ok(CreateWalletOptions::default());
     }
     if args.len() % 2 != 0 {
-        return Err("Expected key/value pairs: startswith <prefix> endswith <suffix>".to_string());
+        return Err(
+            "Expected key/value pairs: startswith <prefix> endswith <suffix> cpu|gpu <workers>"
+                .to_string(),
+        );
     }
 
-    let mut starts_with: Option<String> = None;
-    let mut ends_with: Option<String> = None;
+    let mut parsed = CreateWalletOptions::default();
     let mut i = 0usize;
     while i < args.len() {
         let key = args[i].to_ascii_lowercase();
@@ -190,35 +221,175 @@ fn parse_vanity_args(args: &[&str]) -> Result<(Option<String>, Option<String>), 
         if value.is_empty() {
             return Err("Vanity value cannot be empty".to_string());
         }
-        if !valid_vanity_pattern(value) {
-            return Err(format!(
-                "Invalid vanity pattern '{}'. Use Base58 chars only.",
-                value
-            ));
-        }
         match key.as_str() {
             "startswith" => {
-                if starts_with.is_some() {
+                if parsed.starts_with.is_some() {
                     return Err("Duplicate startswith argument".to_string());
                 }
-                starts_with = Some(value.to_string());
+                if !valid_vanity_pattern(value) {
+                    return Err(format!(
+                        "Invalid vanity pattern '{}'. Use Base58 chars only.",
+                        value
+                    ));
+                }
+                parsed.starts_with = Some(value.to_string());
             }
             "endswith" => {
-                if ends_with.is_some() {
+                if parsed.ends_with.is_some() {
                     return Err("Duplicate endswith argument".to_string());
                 }
-                ends_with = Some(value.to_string());
+                if !valid_vanity_pattern(value) {
+                    return Err(format!(
+                        "Invalid vanity pattern '{}'. Use Base58 chars only.",
+                        value
+                    ));
+                }
+                parsed.ends_with = Some(value.to_string());
+            }
+            "cpu" | "gpu" => {
+                if parsed.worker_count.is_some() {
+                    return Err("Duplicate compute mode/worker-count argument".to_string());
+                }
+                let workers = value
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|n| *n > 0)
+                    .ok_or_else(|| "Worker count must be a positive integer".to_string())?;
+                parsed.compute_mode = if key == "gpu" {
+                    VanityComputeMode::Gpu
+                } else {
+                    VanityComputeMode::Cpu
+                };
+                parsed.worker_count = Some(workers);
             }
             _ => {
                 return Err(format!(
-                    "Unknown argument '{}'. Use startswith/endswith.",
+                    "Unknown argument '{}'. Use startswith/endswith/cpu/gpu.",
                     args[i]
                 ));
             }
         }
         i += 2;
     }
-    Ok((starts_with, ends_with))
+    Ok(parsed)
+}
+
+fn default_cpu_workers() -> usize {
+    thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .max(1)
+}
+
+#[derive(Debug)]
+struct VanityMatch {
+    sk: SecretKey,
+    mnemonic: String,
+    public_key: String,
+    address: String,
+    attempts: u64,
+}
+
+fn find_vanity_wallet_parallel(
+    starts_with: Option<&str>,
+    ends_with: Option<&str>,
+    tries_limit: u64,
+    mnemonic_pwd: &str,
+    worker_count: usize,
+) -> Result<Option<VanityMatch>, String> {
+    let workers = worker_count.max(1);
+    let stop = Arc::new(AtomicBool::new(false));
+    let attempts = Arc::new(AtomicU64::new(0));
+    let (tx, rx) = mpsc::channel::<VanityMatch>();
+
+    let starts_owned = starts_with.map(|s| s.to_string());
+    let ends_owned = ends_with.map(|s| s.to_string());
+    let mnemonic_pwd = Arc::new(mnemonic_pwd.to_string());
+
+    let mut handles = Vec::with_capacity(workers);
+    for _ in 0..workers {
+        let tx = tx.clone();
+        let stop = Arc::clone(&stop);
+        let attempts = Arc::clone(&attempts);
+        let starts_owned = starts_owned.clone();
+        let ends_owned = ends_owned.clone();
+        let mnemonic_pwd = Arc::clone(&mnemonic_pwd);
+
+        handles.push(thread::spawn(move || {
+            let secp = Secp256k1::new();
+            loop {
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                let attempt = attempts.fetch_add(1, Ordering::Relaxed) + 1;
+                if attempt > tries_limit {
+                    break;
+                }
+
+                let Ok(mnemonic) = generate_mnemonic_12() else {
+                    continue;
+                };
+                let Ok(derived) =
+                    derive_secret_key_from_mnemonic(&mnemonic, &mnemonic_pwd, DEFAULT_DERIVATION_PATH)
+                else {
+                    continue;
+                };
+                let Ok(sk) = SecretKey::from_byte_array(derived) else {
+                    continue;
+                };
+
+                let pk = PublicKey::from_secret_key(&secp, &sk);
+                let public_key = pk.to_string();
+                let address = pubkey_to_address(&public_key);
+
+                if !address_matches_vanity(&address, starts_owned.as_deref(), ends_owned.as_deref()) {
+                    continue;
+                }
+
+                if stop
+                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    let _ = tx.send(VanityMatch {
+                        sk,
+                        mnemonic,
+                        public_key,
+                        address,
+                        attempts: attempt,
+                    });
+                }
+                break;
+            }
+        }));
+    }
+    drop(tx);
+
+    let mut last_progress_printed = 0u64;
+    let mut found: Option<VanityMatch> = None;
+    loop {
+        match rx.recv_timeout(Duration::from_millis(250)) {
+            Ok(result) => {
+                found = Some(result);
+                stop.store(true, Ordering::SeqCst);
+                break;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let current = attempts.load(Ordering::Relaxed).min(tries_limit);
+                if current >= last_progress_printed.saturating_add(10_000) {
+                    println!("Vanity search attempts: {}", current);
+                    last_progress_printed = current;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    for handle in handles {
+        let _ = handle.join();
+    }
+
+    Ok(found)
 }
 
 // ---------- Peers ----------
@@ -887,20 +1058,62 @@ fn export_dat(path: &str) {
 // ---------- CLI ----------
 fn help() {
     println!(
-        "Commands:\n  help\n  create-wallet [startswith <prefix>] [endswith <suffix>]   (prefix/suffix applies after LFS, can combine)\n  recover-mnemonic <seed words...>\n  import-priv <hex>\n  import-dat <file>\n  export-dat <file>\n  export-priv               (requires strong confirmation)\n  default-wallet\n  send <to?> <amount> [n=2]   (defaults to your address)\n  send-priv <priv> <to> <amount> [n=2]\n  sign-raw <to> <amount>      (sign only; save locally)\n  sign-raw-priv <priv> <to> <amount>\n  send-raw <sig|txid> [n=2]   (broadcast a stored raw tx)\n  raw_tx                      (list stored raw-signed txs)\n  force-send <signature>     (resend a pending tx even if only one peer is reachable)\n  balance [address]          (defaults to your address)\n  faucet [address]           (disabled in v2; coinbase-only emission)\n  tx-history [address]       (defaults to your address)\n  tx-info <txid|signature>\n  list-peers\n  print-mempool\n  exit"
+        "Commands:\n  help\n  create-wallet [startswith <prefix>] [endswith <suffix>] [cpu <workers>|gpu <workers>]\n                              (prefix/suffix applies after LFS; vanity uses all CPU cores by default)\n  recover-mnemonic <seed words...>\n  import-priv <hex>\n  import-dat <file>\n  export-dat <file>\n  export-priv               (requires strong confirmation)\n  default-wallet\n  send <to?> <amount> [n=2]   (defaults to your address)\n  send-priv <priv> <to> <amount> [n=2]\n  sign-raw <to> <amount>      (sign only; save locally)\n  sign-raw-priv <priv> <to> <amount>\n  send-raw <sig|txid> [n=2]   (broadcast a stored raw tx)\n  raw_tx                      (list stored raw-signed txs)\n  force-send <signature>     (resend a pending tx even if only one peer is reachable)\n  balance [address]          (defaults to your address)\n  faucet [address]           (disabled in v2; coinbase-only emission)\n  tx-history [address]       (defaults to your address)\n  tx-info <txid|signature>\n  list-peers\n  print-mempool\n  exit"
     );
 }
 
 // Create a new wallet and set it as default
-fn create_wallet(starts_with: Option<&str>, ends_with: Option<&str>) {
+fn create_wallet(starts_with: Option<&str>, ends_with: Option<&str>, mode: VanityComputeMode, workers: Option<usize>) {
     let tries_limit = vanity_max_attempts();
     let mnemonic_pwd = mnemonic_passphrase();
     let vanity_enabled = starts_with.is_some() || ends_with.is_some();
     if vanity_enabled {
+        let requested_workers = workers.unwrap_or_else(default_cpu_workers);
+        let effective_mode = match mode {
+            VanityComputeMode::Cpu => "cpu",
+            VanityComputeMode::Gpu => "gpu (fallback to cpu in this build)",
+        };
         println!(
-            "Generating vanity wallet (startswith={:?}, endswith={:?}, max_attempts={})",
-            starts_with, ends_with, tries_limit
+            "Generating vanity wallet (startswith={:?}, endswith={:?}, mode={}, workers={}, max_attempts={})",
+            starts_with, ends_with, effective_mode, requested_workers, tries_limit
         );
+        if mode == VanityComputeMode::Gpu {
+            println!("GPU vanity search backend is not enabled in this build; using CPU workers.");
+        }
+
+        match find_vanity_wallet_parallel(
+            starts_with,
+            ends_with,
+            tries_limit,
+            &mnemonic_pwd,
+            requested_workers,
+        ) {
+            Ok(Some(found)) => {
+                if let Err(e) = save_default_wallet_with_mnemonic(&found.sk, Some(&found.mnemonic)) {
+                    println!("Failed to save wallet: {}", e);
+                    return;
+                }
+                println!("Created new encrypted wallet.");
+                println!("Vanity matched after {} attempts.", found.attempts);
+                println!("Public : {}", found.public_key);
+                println!("Address: {}", found.address);
+                println!("Recovery phrase (store offline, never share):");
+                println!("  {}", found.mnemonic);
+                println!("Derivation path: {}", DEFAULT_DERIVATION_PATH);
+                return;
+            }
+            Ok(None) => {
+                println!(
+                    "Vanity pattern not found in {} attempts. Try shorter prefix/suffix or increase LOFSWAP_VANITY_MAX_ATTEMPTS.",
+                    tries_limit
+                );
+                return;
+            }
+            Err(e) => {
+                println!("Vanity search failed: {}", e);
+                return;
+            }
+        }
     }
 
     for attempt in 1..=tries_limit {
@@ -930,9 +1143,6 @@ fn create_wallet(starts_with: Option<&str>, ends_with: Option<&str>) {
         let address = pubkey_to_address(&pk.to_string());
 
         if !address_matches_vanity(&address, starts_with, ends_with) {
-            if vanity_enabled && attempt % 10_000 == 0 {
-                println!("Vanity search attempts: {}", attempt);
-            }
             continue;
         }
 
@@ -952,12 +1162,7 @@ fn create_wallet(starts_with: Option<&str>, ends_with: Option<&str>) {
         return;
     }
 
-    if vanity_enabled {
-        println!(
-            "Vanity pattern not found in {} attempts. Try shorter prefix/suffix or increase LOFSWAP_VANITY_MAX_ATTEMPTS.",
-            tries_limit
-        );
-    } else {
+    if !vanity_enabled {
         println!("Failed to create wallet");
     }
 }
@@ -1402,6 +1607,36 @@ fn main() {
     println!("Wallet CLI (bootstrap discovery, cached peers)");
     let mut peers = PeerStore::load();
     peers.discover();
+
+    if io::stdin().is_terminal() && io::stdout().is_terminal() {
+        if let Ok(mut editor) = DefaultEditor::new() {
+            loop {
+                match editor.readline("> ") {
+                    Ok(line) => {
+                        if line.trim().is_empty() {
+                            continue;
+                        }
+                        let _ = editor.add_history_entry(line.as_str());
+                        if !handle_command_line(&mut peers, &line) {
+                            break;
+                        }
+                    }
+                    Err(ReadlineError::Interrupted) => {
+                        println!("^C");
+                        continue;
+                    }
+                    Err(ReadlineError::Eof) => break,
+                    Err(err) => {
+                        eprintln!("Interactive input error ({err}); falling back to basic stdin.");
+                        break;
+                    }
+                }
+            }
+            peers.save();
+            return;
+        }
+    }
+
     loop {
         print!("> ");
         let _ = io::stdout().flush();
@@ -1409,18 +1644,31 @@ fn main() {
         if io::stdin().read_line(&mut line).is_err() {
             continue;
         }
-        let a: Vec<&str> = line.trim().split_whitespace().collect();
-        if a.is_empty() {
-            continue;
+        if !handle_command_line(&mut peers, &line) {
+            break;
         }
-        match a[0] {
+    }
+    peers.save();
+}
+
+fn handle_command_line(peers: &mut PeerStore, line: &str) -> bool {
+    let a: Vec<&str> = line.trim().split_whitespace().collect();
+    if a.is_empty() {
+        return true;
+    }
+    match a[0] {
             "help" => help(),
             "create-wallet" => match parse_vanity_args(&a[1..]) {
-                Ok((starts_with, ends_with)) => {
-                    create_wallet(starts_with.as_deref(), ends_with.as_deref())
+                Ok(opts) => {
+                    create_wallet(
+                        opts.starts_with.as_deref(),
+                        opts.ends_with.as_deref(),
+                        opts.compute_mode,
+                        opts.worker_count,
+                    )
                 }
                 Err(e) => println!(
-                    "{}\nUsage: create-wallet [startswith <prefix>] [endswith <suffix>]",
+                    "{}\nUsage: create-wallet [startswith <prefix>] [endswith <suffix>] [cpu <workers>|gpu <workers>]",
                     e
                 ),
             },
@@ -1445,7 +1693,7 @@ fn main() {
                     (Some(to), Some(amt)) => {
                         if let Ok(amount) = amt.parse() {
                             let n = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(2);
-                            send_default(&mut peers, to, amount, n);
+                            send_default(peers, to, amount, n);
                         } else {
                             println!("Invalid amount");
                         }
@@ -1454,7 +1702,7 @@ fn main() {
                         if let Some(def_to) = default_address() {
                             if let Ok(amount) = amt.parse() {
                                 let n = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(2);
-                                send_default(&mut peers, &def_to, amount, n);
+                                send_default(peers, &def_to, amount, n);
                             } else {
                                 println!("Invalid amount");
                             }
@@ -1468,7 +1716,7 @@ fn main() {
             "send-priv" if a.len() >= 4 => {
                 if let Ok(amount) = a[3].parse() {
                     let n = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(2);
-                    send_priv(&mut peers, a[1], a[2], amount, n);
+                    send_priv(peers, a[1], a[2], amount, n);
                 } else {
                     println!("Invalid amount");
                 }
@@ -1476,7 +1724,7 @@ fn main() {
             "sign-raw" => match (a.get(1), a.get(2)) {
                 (Some(to), Some(amt)) => {
                     if let Ok(amount) = amt.parse() {
-                        sign_raw_default(&mut peers, to, amount);
+                        sign_raw_default(peers, to, amount);
                     } else {
                         println!("Invalid amount");
                     }
@@ -1485,7 +1733,7 @@ fn main() {
             },
             "sign-raw-priv" if a.len() >= 4 => {
                 if let Ok(amount) = a[3].parse() {
-                    sign_raw_priv(&mut peers, a[1], a[2], amount);
+                    sign_raw_priv(peers, a[1], a[2], amount);
                 } else {
                     println!("Invalid amount");
                 }
@@ -1496,54 +1744,53 @@ fn main() {
                         .get(2)
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(MIN_BROADCAST_PEERS);
-                    send_raw(&mut peers, sig, n);
+                    send_raw(peers, sig, n);
                 }
                 None => println!("Usage: send-raw <sig|txid> [n_peers]"),
             },
             "raw_tx" => show_raw_signed(),
             "force-send" if a.len() == 2 => {
-                force_send(&mut peers, a[1]);
+                force_send(peers, a[1]);
             }
             "balance" => {
                 if a.len() == 2 {
-                    balance(&mut peers, a[1]);
+                    balance(peers, a[1]);
                 } else if let Some(addr) = default_address() {
-                    balance(&mut peers, &addr);
+                    balance(peers, &addr);
                 } else {
                     println!("No default wallet");
                 }
             }
             "faucet" => {
                 if a.len() == 2 {
-                    faucet(&mut peers, a[1]);
+                    faucet(peers, a[1]);
                 } else if let Some(addr) = default_address() {
-                    faucet(&mut peers, &addr);
+                    faucet(peers, &addr);
                 } else {
                     println!("No default wallet or address");
                 }
             }
             "tx-history" => {
                 if a.len() == 2 {
-                    print_history(&mut peers, a[1]);
+                    print_history(peers, a[1]);
                 } else if let Some(addr) = default_address() {
-                    print_history(&mut peers, &addr);
+                    print_history(peers, &addr);
                 } else {
                     println!("No default wallet");
                 }
             }
             "tx-info" if a.len() == 2 => {
-                tx_info(&mut peers, a[1]);
+                tx_info(peers, a[1]);
             }
-            "list-peers" => list_peers(&mut peers),
+            "list-peers" => list_peers(peers),
             "print-mempool" => show_mempool(),
             "exit" => {
                 peers.save();
-                break;
+                return false;
             }
             _ => println!("Unknown command - type 'help'"),
-        }
     }
-    peers.save();
+    true
 }
 
 #[cfg(test)]
@@ -1564,8 +1811,18 @@ mod tests {
     #[test]
     fn parse_vanity_args_supports_combined_filters() {
         let parsed = parse_vanity_args(&["startswith", "abc", "endswith", "9"]).unwrap();
-        assert_eq!(parsed.0.as_deref(), Some("abc"));
-        assert_eq!(parsed.1.as_deref(), Some("9"));
+        assert_eq!(parsed.starts_with.as_deref(), Some("abc"));
+        assert_eq!(parsed.ends_with.as_deref(), Some("9"));
+        assert_eq!(parsed.compute_mode, VanityComputeMode::Cpu);
+        assert_eq!(parsed.worker_count, None);
+    }
+
+    #[test]
+    fn parse_vanity_args_supports_gpu_and_worker_count() {
+        let parsed = parse_vanity_args(&["startswith", "abc", "gpu", "8"]).unwrap();
+        assert_eq!(parsed.starts_with.as_deref(), Some("abc"));
+        assert_eq!(parsed.compute_mode, VanityComputeMode::Gpu);
+        assert_eq!(parsed.worker_count, Some(8));
     }
 
     #[test]

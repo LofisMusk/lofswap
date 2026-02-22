@@ -13,6 +13,115 @@ APP_DIST_SOURCE="$ROOT_DIR/wallet-gui/frontend/dist"
 APP_DIST_BUNDLE="$APP_BUNDLE/Contents/Resources/frontend-dist"
 APP_ICON_PNG="$ROOT_DIR/lofswap-logo.png"
 
+generate_bundle_icon_png() {
+  local src_png="$1"
+  local out_png="$2"
+
+  if [ "$(uname -s)" != "Darwin" ]; then
+    cp "$src_png" "$out_png"
+    return 0
+  fi
+
+  if ! command -v swift >/dev/null 2>&1; then
+    cp "$src_png" "$out_png"
+    return 0
+  fi
+
+  if swift - "$src_png" "$out_png" <<'SWIFT'
+import AppKit
+import Foundation
+
+let args = CommandLine.arguments
+guard args.count >= 3 else {
+  fputs("missing icon args\n", stderr)
+  exit(2)
+}
+
+let srcPath = args[1]
+let outPath = args[2]
+let iconSize: CGFloat = 1024
+let logoScale: CGFloat = 0.94
+let inset: CGFloat = iconSize * 0.028
+let cornerRadius: CGFloat = iconSize * 0.225
+
+guard let logo = NSImage(contentsOfFile: srcPath) else {
+  fputs("failed to load source logo\n", stderr)
+  exit(3)
+}
+
+guard let bitmap = NSBitmapImageRep(
+  bitmapDataPlanes: nil,
+  pixelsWide: Int(iconSize),
+  pixelsHigh: Int(iconSize),
+  bitsPerSample: 8,
+  samplesPerPixel: 4,
+  hasAlpha: true,
+  isPlanar: false,
+  colorSpaceName: .deviceRGB,
+  bytesPerRow: 0,
+  bitsPerPixel: 0
+) else {
+  fputs("failed to create bitmap canvas\n", stderr)
+  exit(4)
+}
+
+guard let context = NSGraphicsContext(bitmapImageRep: bitmap) else {
+  fputs("failed to create graphics context\n", stderr)
+  exit(5)
+}
+
+NSGraphicsContext.saveGraphicsState()
+NSGraphicsContext.current = context
+context.imageInterpolation = .high
+defer { NSGraphicsContext.restoreGraphicsState() }
+
+NSColor.clear.setFill()
+NSBezierPath(rect: NSRect(x: 0, y: 0, width: iconSize, height: iconSize)).fill()
+
+let bgRect = NSRect(
+  x: inset,
+  y: inset,
+  width: iconSize - (inset * 2.0),
+  height: iconSize - (inset * 2.0)
+)
+NSColor(calibratedRed: 10.0 / 255.0, green: 10.0 / 255.0, blue: 12.0 / 255.0, alpha: 1.0).setFill()
+NSBezierPath(roundedRect: bgRect, xRadius: cornerRadius, yRadius: cornerRadius).fill()
+
+let sourceSize = logo.size
+if sourceSize.width > 0 && sourceSize.height > 0 {
+  let maxSide = min(bgRect.width, bgRect.height) * logoScale
+  let factor = min(maxSide / sourceSize.width, maxSide / sourceSize.height)
+  let drawSize = NSSize(width: sourceSize.width * factor, height: sourceSize.height * factor)
+  let drawRect = NSRect(
+    x: (iconSize - drawSize.width) / 2.0,
+    y: (iconSize - drawSize.height) / 2.0,
+    width: drawSize.width,
+    height: drawSize.height
+  )
+  logo.draw(in: drawRect, from: .zero, operation: .sourceOver, fraction: 1.0)
+}
+context.flushGraphics()
+
+guard let pngData = bitmap.representation(using: .png, properties: [:]) else {
+  fputs("failed to encode icon png\n", stderr)
+  exit(6)
+}
+
+do {
+  try pngData.write(to: URL(fileURLWithPath: outPath), options: .atomic)
+} catch {
+  fputs("failed to write icon png: \(error)\n", stderr)
+  exit(7)
+}
+SWIFT
+  then
+    return 0
+  fi
+
+  cp "$src_png" "$out_png"
+  return 0
+}
+
 if [ "$(uname -s)" = "Darwin" ]; then
   APP_RUNTIME_DATA_DIR="$HOME/Library/Application Support/LofSwap Wallet"
   APP_RUNTIME_DIST_DIR="$APP_RUNTIME_DATA_DIR/frontend-dist"
@@ -55,7 +164,7 @@ if [ -n "$APP_RUNTIME_DIST_DIR" ]; then
   cp -R "$APP_DIST_SOURCE/." "$APP_RUNTIME_DIST_DIR/"
 fi
 if [ -f "$APP_ICON_PNG" ]; then
-  cp "$APP_ICON_PNG" "$APP_BUNDLE/Contents/Resources/AppIcon.png"
+  generate_bundle_icon_png "$APP_ICON_PNG" "$APP_BUNDLE/Contents/Resources/AppIcon.png"
 fi
 
 cat > "$APP_EXECUTABLE" <<EOF

@@ -426,7 +426,6 @@ impl ApplicationHandler for GuiApp {
                 configure_macos_app_shell();
                 self.macos_shell_configured = true;
             }
-            apply_macos_app_icon();
         }
 
         let window_attributes = Window::default_attributes()
@@ -515,48 +514,41 @@ fn build_squircle_icon_image(size: u32) -> Option<RgbaImage> {
     }
 
     let source = image::load_from_memory(APP_ICON_PNG).ok()?.into_rgba8();
-    // Keep icon fully opaque. macOS applies platform icon shaping/styling;
-    // transparent corners here can produce visible outline artifacts.
-    let mut canvas = RgbaImage::from_pixel(size, size, Rgba([10, 10, 12, 255]));
+    // Bake in a black squircle/rounded-rect icon silhouette so the Dock/app icon
+    // doesn't appear as a plain square when macOS uses the PNG directly.
+    let mut canvas = RgbaImage::from_pixel(size, size, Rgba([0, 0, 0, 0]));
+    let side = size as f32;
+    let inset = (side * 0.028).max(2.0);
+    let half_w = ((side - inset * 2.0) * 0.5).max(1.0);
+    let half_h = half_w;
+    let corner_radius = (side * 0.225).min(half_w).min(half_h);
+    let center = side * 0.5;
 
-    let logo_size = ((size as f32) * 0.62).round().clamp(32.0, size as f32) as u32;
+    for y in 0..size {
+        let py = y as f32 + 0.5;
+        for x in 0..size {
+            let px = x as f32 + 0.5;
+
+            // Signed distance to a rounded rectangle, with a 1px AA edge.
+            let qx = (px - center).abs() - (half_w - corner_radius);
+            let qy = (py - center).abs() - (half_h - corner_radius);
+            let outside = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt();
+            let inside = qx.max(qy).min(0.0);
+            let sdf = outside + inside - corner_radius;
+            let alpha = ((0.5 - sdf).clamp(0.0, 1.0) * 255.0).round() as u8;
+
+            if alpha > 0 {
+                canvas.put_pixel(x, y, Rgba([10, 10, 12, alpha]));
+            }
+        }
+    }
+
+    let logo_size = ((size as f32) * 0.94).round().clamp(32.0, size as f32) as u32;
     let logo = resize(&source, logo_size, logo_size, FilterType::Lanczos3);
     let offset = ((size - logo_size) / 2) as i64;
     overlay(&mut canvas, &logo, offset, offset);
 
     Some(canvas)
-}
-
-#[cfg(target_os = "macos")]
-fn apply_macos_app_icon() {
-    use cocoa::appkit::{NSApp, NSApplication, NSImage};
-    use cocoa::base::{id, nil};
-    use cocoa::foundation::{NSData, NSUInteger};
-
-    let Some(icon_png) = build_squircle_icon_png() else {
-        return;
-    };
-
-    unsafe {
-        let data: id = NSData::dataWithBytes_length_(
-            nil,
-            icon_png.as_ptr().cast(),
-            icon_png.len() as NSUInteger,
-        );
-        if data == nil {
-            return;
-        }
-
-        let image: id = NSImage::initWithData_(NSImage::alloc(nil), data);
-        if image == nil {
-            return;
-        }
-
-        let app = NSApp();
-        if app != nil {
-            app.setApplicationIconImage_(image);
-        }
-    }
 }
 
 #[cfg(target_os = "macos")]

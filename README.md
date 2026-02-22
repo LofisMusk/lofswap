@@ -39,10 +39,6 @@ npm install
 npm run build
 ```
 
-## CLI quality of life
-- Interactive history with arrow-up/arrow-down via Rustyline
-- Non-interactive mode remains supported for containers and pipes
-
 ## Consensus and safety behavior
 - **Block validation**: index, previous hash, timestamp monotonicity, hash correctness, and PoW difficulty are verified before acceptance.
 - **Transaction validation**: ECDSA signatures are verified; balances are checked (including pending mempool for new txs); duplicate signatures/txids across the chain are rejected.
