@@ -237,7 +237,7 @@ impl VanitySearchBackend {
                         requested_workers: requested_workers.max(1),
                         selected_adapter: Some(best),
                         fallback_reason:
-                            "GPU vanity kernel is not implemented yet in this build; using CPU workers for search."
+                            "GPU vanity hybrid kernel enabled (wgpu compute). Will fall back to CPU search only if GPU runtime/setup fails."
                                 .to_string(),
                     }
                 } else {
