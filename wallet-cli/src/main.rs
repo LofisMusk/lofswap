@@ -1,4 +1,5 @@
 mod gpu;
+mod opencl;
 mod vanity;
 
 use blockchain_core::{
@@ -28,6 +29,7 @@ use crate::gpu::{
     gpu_hash_pubkey_batch, gpu_pipeline_test, gpu_smoke_test, gpu_vanity_job_pipeline_test,
     gpu_vanity_probe, print_gpu_info,
 };
+use crate::opencl::print_opencl_info;
 use crate::vanity::{
     VanityComputeMode, VanitySearchBackend, VanitySearchRequest, address_matches_vanity,
     default_cpu_workers, parse_vanity_args, run_vanity_search,
@@ -487,7 +489,7 @@ fn broadcast(store: &mut PeerStore, json: &[u8], min_peers: usize) {
         return;
     }
     let mut rng = rand::rng();
-    let selected: Vec<String> = peers.choose_multiple(&mut rng, required).cloned().collect();
+    let selected: Vec<String> = peers.sample(&mut rng, required).cloned().collect();
     let mut ok = 0;
     let mut rejected_reason: Option<String> = None;
     for p in &selected {
@@ -825,7 +827,7 @@ fn export_dat(path: &str) {
 // ---------- CLI ----------
 fn help() {
     println!(
-        "Commands:\n  help\n  create-wallet [startswith <prefix>] [endswith <suffix>] [cpu <workers>|gpu <workers>]\n                              (prefix/suffix applies after LFS; vanity uses all CPU cores by default)\n  gpu-info                    (list detected GPU adapters/backends via wgpu)\n  gpu-test [adapter_index]    (run a small compute shader smoke test)\n  gpu-pubkey-hash-test [adapter_index] [count]\n                              (GPU SHA-256 over compressed pubkey hex strings with CPU verification)\n  gpu-pipeline-test [adapter_index] [chunks] [workgroups]\n                              (chunked compute dispatch test for future GPU vanity pipeline)\n  gpu-vanity-probe [adapter_index] [chunks] [workgroups] [prefix|-] [suffix|-]\n                              (vanity-like GPU probe: params+pattern buffers+hit counters; no real crypto yet)\n  gpu-vanity-job-test [adapter_index] [chunks] [workgroups] [prefix|-] [suffix|-] [max_hits] [stop_after_hits]\n                              (work-item + hit-buffer + stop-flag GPU pipeline test, closer to final vanity backend)\n  recover-mnemonic <seed words...>\n  import-priv <hex>\n  import-dat <file>\n  export-dat <file>\n  export-priv               (requires strong confirmation)\n  default-wallet\n  send <to?> <amount> [n=2]   (defaults to your address)\n  send-priv <priv> <to> <amount> [n=2]\n  sign-raw <to> <amount>      (sign only; save locally)\n  sign-raw-priv <priv> <to> <amount>\n  send-raw <sig|txid> [n=2]   (broadcast a stored raw tx)\n  raw_tx                      (list stored raw-signed txs)\n  force-send <signature>     (resend a pending tx even if only one peer is reachable)\n  balance [address]          (defaults to your address)\n  faucet [address]           (disabled in v2; coinbase-only emission)\n  tx-history [address]       (defaults to your address)\n  tx-info <txid|signature>\n  list-peers\n  print-mempool\n  exit"
+        "Commands:\n  help\n  create-wallet [startswith <prefix>] [endswith <suffix>] [cpu [workers]|gpu [workers]|opencl [workers]]\n                              (prefix/suffix applies after LFS; omitted workers auto-selects a system default)\n  gpu-info                    (list detected GPU adapters/backends via wgpu)\n  opencl-info                 (list detected OpenCL devices; OpenCL backend is feature-gated)\n  gpu-test [adapter_index]    (run a small compute shader smoke test)\n  gpu-pubkey-hash-test [adapter_index] [count]\n                              (GPU SHA-256 over compressed pubkey hex strings with CPU verification)\n  gpu-pipeline-test [adapter_index] [chunks] [workgroups]\n                              (chunked compute dispatch test for future GPU vanity pipeline)\n  gpu-vanity-probe [adapter_index] [chunks] [workgroups] [prefix|-] [suffix|-]\n                              (vanity-like GPU probe: params+pattern buffers+hit counters; no real crypto yet)\n  gpu-vanity-job-test [adapter_index] [chunks] [workgroups] [prefix|-] [suffix|-] [max_hits] [stop_after_hits]\n                              (work-item + hit-buffer + stop-flag GPU pipeline test, closer to final vanity backend)\n  recover-mnemonic <seed words...>\n  import-priv <hex>\n  import-dat <file>\n  export-dat <file>\n  export-priv               (requires strong confirmation)\n  default-wallet\n  send <to?> <amount> [n=2]   (defaults to your address)\n  send-priv <priv> <to> <amount> [n=2]\n  sign-raw <to> <amount>      (sign only; save locally)\n  sign-raw-priv <priv> <to> <amount>\n  send-raw <sig|txid> [n=2]   (broadcast a stored raw tx)\n  raw_tx                      (list stored raw-signed txs)\n  force-send <signature>     (resend a pending tx even if only one peer is reachable)\n  balance [address]          (defaults to your address)\n  faucet [address]           (disabled in v2; coinbase-only emission)\n  tx-history [address]       (defaults to your address)\n  tx-info <txid|signature>\n  list-peers\n  print-mempool\n  exit"
     );
 }
 
@@ -914,7 +916,7 @@ fn create_wallet(
         }
     }
 
-    if workers.is_some() || mode == VanityComputeMode::Gpu {
+    if workers.is_some() || mode != VanityComputeMode::Cpu {
         println!(
             "Note: compute mode/worker count options are used only for vanity search (startswith/endswith)."
         );
@@ -1320,7 +1322,7 @@ fn send_raw(store: &mut PeerStore, sig_or_txid: &str, min_peers: usize) {
     }
     let mut rng = rand::rng();
     let selected: Vec<String> = peers_online
-        .choose_multiple(&mut rng, min_peers.max(1).min(peers_online.len()))
+        .sample(&mut rng, min_peers.max(1).min(peers_online.len()))
         .cloned()
         .collect();
     let mut ok = 0;
@@ -1463,6 +1465,7 @@ fn handle_command_line(peers: &mut PeerStore, line: &str) -> bool {
     match a[0] {
         "help" => help(),
         "gpu-info" => print_gpu_info(),
+        "opencl-info" => print_opencl_info(),
         "gpu-test" => {
             let adapter_index = match a.get(1) {
                 None => None,
@@ -1729,7 +1732,7 @@ fn handle_command_line(peers: &mut PeerStore, line: &str) -> bool {
                 opts.worker_count,
             ),
             Err(e) => println!(
-                "{}\nUsage: create-wallet [startswith <prefix>] [endswith <suffix>] [cpu <workers>|gpu <workers>]",
+                "{}\nUsage: create-wallet [startswith <prefix>] [endswith <suffix>] [cpu [workers]|gpu [workers]|opencl [workers]]",
                 e
             ),
         },
@@ -1884,6 +1887,38 @@ mod tests {
         assert_eq!(parsed.starts_with.as_deref(), Some("abc"));
         assert_eq!(parsed.compute_mode, VanityComputeMode::Gpu);
         assert_eq!(parsed.worker_count, Some(8));
+    }
+
+    #[test]
+    fn parse_vanity_args_supports_gpu_without_worker_count() {
+        let parsed = parse_vanity_args(&["startswith", "abc", "gpu"]).unwrap();
+        assert_eq!(parsed.starts_with.as_deref(), Some("abc"));
+        assert_eq!(parsed.compute_mode, VanityComputeMode::Gpu);
+        assert_eq!(parsed.worker_count, None);
+    }
+
+    #[test]
+    fn parse_vanity_args_supports_gpu_without_worker_before_other_keys() {
+        let parsed = parse_vanity_args(&["gpu", "endswith", "9"]).unwrap();
+        assert_eq!(parsed.compute_mode, VanityComputeMode::Gpu);
+        assert_eq!(parsed.worker_count, None);
+        assert_eq!(parsed.ends_with.as_deref(), Some("9"));
+    }
+
+    #[test]
+    fn parse_vanity_args_supports_opencl_without_worker_count() {
+        let parsed = parse_vanity_args(&["startswith", "abc", "opencl"]).unwrap();
+        assert_eq!(parsed.starts_with.as_deref(), Some("abc"));
+        assert_eq!(parsed.compute_mode, VanityComputeMode::OpenCl);
+        assert_eq!(parsed.worker_count, None);
+    }
+
+    #[test]
+    fn parse_vanity_args_supports_opencl_and_worker_count() {
+        let parsed = parse_vanity_args(&["opencl", "12", "endswith", "9"]).unwrap();
+        assert_eq!(parsed.compute_mode, VanityComputeMode::OpenCl);
+        assert_eq!(parsed.worker_count, Some(12));
+        assert_eq!(parsed.ends_with.as_deref(), Some("9"));
     }
 
     #[test]

@@ -9,7 +9,7 @@ use blockchain_core::{Block, CHAIN_ID, DEFAULT_DIFFICULTY_ZEROS, Transaction};
 use local_ip_address::local_ip;
 use once_cell::sync::Lazy;
 use public_ip;
-use rand::RngCore;
+use rand::rand_core::Rng;
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 use serde_json;

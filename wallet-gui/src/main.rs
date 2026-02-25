@@ -5,7 +5,6 @@ use std::fs;
 use std::io::{Cursor, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -35,6 +34,8 @@ use wry::http::{Method, Request, Response, StatusCode};
 #[cfg(target_os = "macos")]
 use wry::Rect;
 use wry::{WebView, WebViewBuilder};
+#[cfg(target_os = "macos")]
+use std::process::Command;
 
 const APP_TITLE: &str = "LofSwap Wallet";
 const DEFAULT_DEV_URL: &str = "http://127.0.0.1:5173";
@@ -369,10 +370,11 @@ impl GuiApp {
     fn build_webview(&self, window: &Window) -> Result<WebView, wry::Error> {
         let api_state = Arc::clone(&self.backend_state);
         let dist_dir = self.frontend.dist_dir.clone().map(Arc::new);
+        let init_script = self.api_base_initialization_script();
 
         let builder = WebViewBuilder::new()
             .with_url(&self.frontend.app_url)
-            .with_initialization_script("window.__LOFSWAP_API_BASE__ = 'lofswap://app/api';")
+            .with_initialization_script(&init_script)
             .with_custom_protocol(APP_PROTOCOL.to_string(), move |_id, request| {
                 handle_protocol_request(
                     &api_state,
@@ -393,6 +395,25 @@ impl GuiApp {
         #[cfg(not(target_os = "macos"))]
         {
             builder.build(window)
+        }
+    }
+
+    fn api_base_initialization_script(&self) -> String {
+        if self.frontend.dist_dir.is_some() {
+            // In bundled mode, use same-origin relative API paths so Windows WebView2
+            // custom protocol origin mapping (`http://lofswap.app/...`) works with fetch().
+            return "window.__LOFSWAP_API_BASE__ = '/api';".to_string();
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            // Wry maps `lofswap://app/...` custom protocol requests to an HTTP origin on Windows.
+            return "window.__LOFSWAP_API_BASE__ = 'http://lofswap.app/api';".to_string();
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            "window.__LOFSWAP_API_BASE__ = 'lofswap://app/api';".to_string()
         }
     }
 

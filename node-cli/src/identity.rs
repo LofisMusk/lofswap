@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use once_cell::sync::Lazy;
-use rand::RngCore;
+use rand::rand_core::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 

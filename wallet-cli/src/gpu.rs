@@ -92,7 +92,7 @@ fn summarize_adapter(info: WgpuAdapterInfo) -> GpuAdapterSummary {
 
 pub(crate) fn list_gpu_adapters() -> Vec<GpuAdapterSummary> {
     let instance = wgpu::Instance::default();
-    let adapters = instance.enumerate_adapters(wgpu::Backends::all());
+    let adapters = simple_block_on(instance.enumerate_adapters(wgpu::Backends::all()));
 
     adapters
         .into_iter()
@@ -175,7 +175,7 @@ fn select_adapter_for_run(
     requested_index: Option<usize>,
 ) -> Result<(usize, GpuAdapterSummary, wgpu::Adapter), String> {
     let instance = wgpu::Instance::default();
-    let adapters = instance.enumerate_adapters(wgpu::Backends::all());
+    let adapters = simple_block_on(instance.enumerate_adapters(wgpu::Backends::all()));
     if adapters.is_empty() {
         return Err("No adapters detected by wgpu".to_string());
     }
@@ -199,8 +199,7 @@ fn select_adapter_for_run(
             .ok_or_else(|| "No suitable adapter selected".to_string())?
     };
 
-    let adapter = instance
-        .enumerate_adapters(wgpu::Backends::all())
+    let adapter = simple_block_on(instance.enumerate_adapters(wgpu::Backends::all()))
         .into_iter()
         .nth(selected_idx)
         .ok_or_else(|| format!("Failed to reopen adapter index {}", selected_idx))?;
@@ -212,13 +211,21 @@ fn request_compute_device(
     adapter: &wgpu::Adapter,
     label: &'static str,
 ) -> Result<(wgpu::Device, wgpu::Queue), String> {
+    // Keep conservative defaults, but don't clamp this below adapter support.
+    // The vanity payload filter bind group uses 7 storage buffers.
+    let mut required_limits = wgpu::Limits::downlevel_defaults();
+    required_limits.max_storage_buffers_per_shader_stage =
+        adapter.limits().max_storage_buffers_per_shader_stage;
+
     simple_block_on(adapter.request_device(
         &wgpu::DeviceDescriptor {
             label: Some(label),
             required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::downlevel_defaults(),
+            required_limits,
+            experimental_features: wgpu::ExperimentalFeatures::disabled(),
+            memory_hints: wgpu::MemoryHints::Performance,
+            trace: wgpu::Trace::Off,
         },
-        None,
     ))
     .map_err(|e| format!("request_device failed: {}", e))
 }
@@ -316,14 +323,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("wallet-cli-gpu-smoke-pipeline-layout"),
         bind_group_layouts: &[&bind_group_layout],
-        push_constant_ranges: &[],
+        immediate_size: 0,
     });
 
     let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some("wallet-cli-gpu-smoke-pipeline"),
         layout: Some(&pipeline_layout),
         module: &shader,
-        entry_point: "main",
+        entry_point: Some("main"),
+        compilation_options: wgpu::PipelineCompilationOptions::default(),
+        cache: None,
     });
 
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -356,7 +365,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         .map_async(wgpu::MapMode::Read, move |res| {
             let _ = tx.send(res);
         });
-    let _ = device.poll(wgpu::Maintain::Wait);
+    let _ = device.poll(wgpu::PollType::wait_indefinitely());
 
     match rx.recv_timeout(Duration::from_secs(5)) {
         Ok(Ok(())) => {}
@@ -476,13 +485,15 @@ fn main() {
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("wallet-cli-gpu-counter-pipeline-layout"),
         bind_group_layouts: &[&bind_group_layout],
-        push_constant_ranges: &[],
+        immediate_size: 0,
     });
     let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some("wallet-cli-gpu-counter-pipeline"),
         layout: Some(&pipeline_layout),
         module: &shader,
-        entry_point: "main",
+        entry_point: Some("main"),
+        compilation_options: wgpu::PipelineCompilationOptions::default(),
+        cache: None,
     });
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("wallet-cli-gpu-counter-bind-group"),
@@ -530,7 +541,7 @@ fn main() {
         .map_async(wgpu::MapMode::Read, move |res| {
             let _ = tx.send(res);
         });
-    let _ = device.poll(wgpu::Maintain::Wait);
+    let _ = device.poll(wgpu::PollType::wait_indefinitely());
 
     match rx.recv_timeout(Duration::from_secs(10)) {
         Ok(Ok(())) => {}
@@ -593,6 +604,7 @@ const VANITY_JOB_WORKGROUP_SIZE: u32 = 64;
 const VANITY_JOB_MAX_PATTERN_LEN: usize = 16;
 const VANITY_JOB_PAYLOAD_LEN: u32 = 20;
 const VANITY_JOB_MAX_HITS: usize = 64;
+const GPU_FILTER_BATCH_STORAGE_BUFFERS_PER_SHADER_STAGE: u32 = 7;
 const BASE58_ALPHABET_BYTES: &[u8; 58] =
     b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 const GPU_FILTER_BATCH_MAX_PAYLOAD_LEN: usize = 64;
@@ -692,7 +704,7 @@ fn small_sigma1(x: u32) -> u32 {
     return rotr(x, 17u) ^ rotr(x, 19u) ^ (x >> 10u);
 }
 
-const SHA256_K: array<u32, 64> = array<u32, 64>(
+var<private> SHA256_K: array<u32, 64> = array<u32, 64>(
     0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u,
     0x3956c25bu, 0x59f111f1u, 0x923f82a4u, 0xab1c5ed5u,
     0xd807aa98u, 0x12835b01u, 0x243185beu, 0x550c7dc3u,
@@ -711,7 +723,7 @@ const SHA256_K: array<u32, 64> = array<u32, 64>(
     0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u
 );
 
-fn sha256_compress(state_in: array<u32, 8>, w_in: array<u32, 64>) -> array<u32, 8> {
+fn sha256_compress(state_in: array<u32, 8>, w_in_ptr: ptr<function, array<u32, 64>>) -> array<u32, 8> {
     var a = state_in[0];
     var b = state_in[1];
     var c = state_in[2];
@@ -724,7 +736,7 @@ fn sha256_compress(state_in: array<u32, 8>, w_in: array<u32, 64>) -> array<u32, 
     var t = 0u;
     loop {
         if (t >= 64u) { break; }
-        let t1 = h + big_sigma1(e) + ch(e, f, g) + SHA256_K[t] + w_in[t];
+        let t1 = h + big_sigma1(e) + ch(e, f, g) + SHA256_K[t] + (*w_in_ptr)[t];
         let t2 = big_sigma0(a) + maj(a, b, c);
         h = g;
         g = f;
@@ -790,7 +802,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         w0[t] = small_sigma1(w0[t - 2u]) + w0[t - 7u] + small_sigma0(w0[t - 15u]) + w0[t - 16u];
         t = t + 1u;
     }
-    state = sha256_compress(state, w0);
+    state = sha256_compress(state, &w0);
 
     var w1: array<u32, 64>;
     t = 0u;
@@ -810,7 +822,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         w1[t] = small_sigma1(w1[t - 2u]) + w1[t - 7u] + small_sigma0(w1[t - 15u]) + w1[t - 16u];
         t = t + 1u;
     }
-    state = sha256_compress(state, w1);
+    state = sha256_compress(state, &w1);
 
     var i = 0u;
     loop {
@@ -891,13 +903,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("wallet-cli-gpu-pubkey-sha256-pipeline-layout"),
             bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("wallet-cli-gpu-pubkey-sha256-pipeline"),
             layout: Some(&pipeline_layout),
             module: &shader,
-            entry_point: "main",
+            entry_point: Some("main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            cache: None,
         });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("wallet-cli-gpu-pubkey-sha256-bind-group"),
@@ -1009,7 +1023,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             pass.dispatch_workgroups(dispatch_workgroups, 1, 1);
         }
         self.queue.submit(Some(encoder.finish()));
-        let _ = self.device.poll(wgpu::Maintain::Poll);
+        let _ = self.device.poll(wgpu::PollType::Poll);
 
         let copy_size = (pubkeys.len() * 8 * std::mem::size_of::<u32>()) as u64;
         let mut encoder = self
@@ -1032,7 +1046,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             .map_async(wgpu::MapMode::Read, move |res| {
                 let _ = tx.send(res);
             });
-        let _ = self.device.poll(wgpu::Maintain::Wait);
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
         match rx.recv_timeout(Duration::from_secs(10)) {
             Ok(Ok(())) => {}
             Ok(Err(e)) => return Err(format!("GPU pubkey SHA-256 readback map failed: {}", e)),
@@ -1424,13 +1438,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("wallet-cli-gpu-vanity-probe-pipeline-layout"),
         bind_group_layouts: &[&bind_group_layout],
-        push_constant_ranges: &[],
+        immediate_size: 0,
     });
     let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some("wallet-cli-gpu-vanity-probe-pipeline"),
         layout: Some(&pipeline_layout),
         module: &shader,
-        entry_point: "main",
+        entry_point: Some("main"),
+        compilation_options: wgpu::PipelineCompilationOptions::default(),
+        cache: None,
     });
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("wallet-cli-gpu-vanity-probe-bind-group"),
@@ -1512,7 +1528,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         .map_async(wgpu::MapMode::Read, move |res| {
             let _ = tx.send(res);
         });
-    let _ = device.poll(wgpu::Maintain::Wait);
+    let _ = device.poll(wgpu::PollType::wait_indefinitely());
 
     match rx.recv_timeout(Duration::from_secs(10)) {
         Ok(Ok(())) => {}
@@ -1931,13 +1947,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("wallet-cli-gpu-vanity-job-pipeline-layout"),
         bind_group_layouts: &[&bind_group_layout],
-        push_constant_ranges: &[],
+        immediate_size: 0,
     });
     let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some("wallet-cli-gpu-vanity-job-pipeline"),
         layout: Some(&pipeline_layout),
         module: &shader,
-        entry_point: "main",
+        entry_point: Some("main"),
+        compilation_options: wgpu::PipelineCompilationOptions::default(),
+        cache: None,
     });
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("wallet-cli-gpu-vanity-job-bind-group"),
@@ -2027,7 +2045,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
         queue.submit(Some(encoder.finish()));
 
-        let _ = device.poll(wgpu::Maintain::Poll);
+        let _ = device.poll(wgpu::PollType::Poll);
 
         if config.chunks <= 8 || chunk_idx + 1 == config.chunks {
             let done = chunk_idx + 1;
@@ -2056,7 +2074,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 .map_async(wgpu::MapMode::Read, move |res| {
                     let _ = tx.send(res);
                 });
-            let _ = device.poll(wgpu::Maintain::Wait);
+            let _ = device.poll(wgpu::PollType::wait_indefinitely());
             match rx.recv_timeout(Duration::from_secs(5)) {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => return Err(format!("stop flag map failed: {}", e)),
@@ -2120,7 +2138,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         .map_async(wgpu::MapMode::Read, move |res| {
             let _ = tx_h.send(res);
         });
-    let _ = device.poll(wgpu::Maintain::Wait);
+    let _ = device.poll(wgpu::PollType::wait_indefinitely());
 
     match rx_c.recv_timeout(Duration::from_secs(10)) {
         Ok(Ok(())) => {}
@@ -2318,6 +2336,16 @@ impl GpuPayloadBatchFilterSession {
 
         let device = Arc::clone(&runtime.device);
         let queue = Arc::clone(&runtime.queue);
+        let limits = device.limits();
+        if limits.max_storage_buffers_per_shader_stage
+            < GPU_FILTER_BATCH_STORAGE_BUFFERS_PER_SHADER_STAGE
+        {
+            return Err(format!(
+                "GPU payload filter requires at least {} storage buffers per compute shader stage, but device limit is {}",
+                GPU_FILTER_BATCH_STORAGE_BUFFERS_PER_SHADER_STAGE,
+                limits.max_storage_buffers_per_shader_stage
+            ));
+        }
 
         let shader_src = r#"
 struct Counters {
@@ -2560,13 +2588,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("wallet-cli-gpu-payload-filter-pipeline-layout"),
             bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("wallet-cli-gpu-payload-filter-pipeline"),
             layout: Some(&pipeline_layout),
             module: &shader,
-            entry_point: "main",
+            entry_point: Some("main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            cache: None,
         });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("wallet-cli-gpu-payload-filter-bind-group"),
@@ -2758,7 +2788,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             pass.dispatch_workgroups(dispatch_workgroups, 1, 1);
         }
         self.queue.submit(Some(encoder.finish()));
-        let _ = self.device.poll(wgpu::Maintain::Poll);
+        let _ = self.device.poll(wgpu::PollType::Poll);
 
         let mut encoder = self
             .device
@@ -2806,7 +2836,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             .map_async(wgpu::MapMode::Read, move |res| {
                 let _ = tx_h.send(res);
             });
-        let _ = self.device.poll(wgpu::Maintain::Wait);
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
 
         match rx_c.recv_timeout(Duration::from_secs(10)) {
             Ok(Ok(())) => {}

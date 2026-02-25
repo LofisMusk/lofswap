@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bip39::{Language, Mnemonic};
 use blockchain_core::{
@@ -11,21 +11,37 @@ use blockchain_core::{
     },
 };
 use hkdf::Hkdf;
-use rand::RngCore;
+use rand::rand_core::Rng;
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use sha2::Sha256;
+use wgpu::DeviceType as WgpuDeviceType;
 
 use crate::gpu::{
     GPU_PUBKEY_SHA256_ASCII_LEN, GpuAdapterSummary, GpuComputeRuntime, GpuPayloadBatchFilterConfig,
     GpuPayloadBatchFilterSession, GpuPubkeySha256Session, gpu_filter_payload_batch,
     list_gpu_adapters, select_best_gpu_adapter,
 };
+use crate::opencl::{OpenClDeviceSummary, list_opencl_devices, select_best_opencl_device};
 
 const BASE58_ALPHABET: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 const VANITY_ATTEMPT_RESERVATION_CHUNK: u64 = 256;
 
 fn valid_vanity_pattern(pattern: &str) -> bool {
     !pattern.is_empty() && pattern.chars().all(|c| BASE58_ALPHABET.contains(c))
+}
+
+fn format_attempt_rate_per_sec(rate: f64) -> String {
+    if !rate.is_finite() || rate <= 0.0 {
+        "0.00/s".to_string()
+    } else if rate >= 1_000_000_000.0 {
+        format!("{:.2} G/s", rate / 1_000_000_000.0)
+    } else if rate >= 1_000_000.0 {
+        format!("{:.2} M/s", rate / 1_000_000.0)
+    } else if rate >= 1_000.0 {
+        format!("{:.2} K/s", rate / 1_000.0)
+    } else {
+        format!("{:.2}/s", rate)
+    }
 }
 
 pub(crate) fn address_matches_vanity(
@@ -51,6 +67,7 @@ pub(crate) fn address_matches_vanity(
 pub(crate) enum VanityComputeMode {
     Cpu,
     Gpu,
+    OpenCl,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,23 +93,21 @@ pub(crate) fn parse_vanity_args(args: &[&str]) -> Result<CreateWalletOptions, St
     if args.is_empty() {
         return Ok(CreateWalletOptions::default());
     }
-    if args.len() % 2 != 0 {
-        return Err(
-            "Expected key/value pairs: startswith <prefix> endswith <suffix> cpu|gpu <workers>"
-                .to_string(),
-        );
-    }
 
     let mut parsed = CreateWalletOptions::default();
+    let mut compute_mode_seen = false;
     let mut i = 0usize;
     while i < args.len() {
         let key = args[i].to_ascii_lowercase();
-        let value = args[i + 1].trim();
-        if value.is_empty() {
-            return Err("Vanity value cannot be empty".to_string());
-        }
         match key.as_str() {
             "startswith" => {
+                let value = args
+                    .get(i + 1)
+                    .map(|v| v.trim())
+                    .ok_or_else(|| "Missing value for startswith".to_string())?;
+                if value.is_empty() {
+                    return Err("Vanity value cannot be empty".to_string());
+                }
                 if parsed.starts_with.is_some() {
                     return Err("Duplicate startswith argument".to_string());
                 }
@@ -103,8 +118,16 @@ pub(crate) fn parse_vanity_args(args: &[&str]) -> Result<CreateWalletOptions, St
                     ));
                 }
                 parsed.starts_with = Some(value.to_string());
+                i += 2;
             }
             "endswith" => {
+                let value = args
+                    .get(i + 1)
+                    .map(|v| v.trim())
+                    .ok_or_else(|| "Missing value for endswith".to_string())?;
+                if value.is_empty() {
+                    return Err("Vanity value cannot be empty".to_string());
+                }
                 if parsed.ends_with.is_some() {
                     return Err("Duplicate endswith argument".to_string());
                 }
@@ -115,31 +138,51 @@ pub(crate) fn parse_vanity_args(args: &[&str]) -> Result<CreateWalletOptions, St
                     ));
                 }
                 parsed.ends_with = Some(value.to_string());
+                i += 2;
             }
-            "cpu" | "gpu" => {
-                if parsed.worker_count.is_some() {
+            "cpu" | "gpu" | "opencl" => {
+                if compute_mode_seen {
                     return Err("Duplicate compute mode/worker-count argument".to_string());
                 }
-                let workers = value
-                    .parse::<usize>()
-                    .ok()
-                    .filter(|n| *n > 0)
-                    .ok_or_else(|| "Worker count must be a positive integer".to_string())?;
-                parsed.compute_mode = if key == "gpu" {
-                    VanityComputeMode::Gpu
-                } else {
-                    VanityComputeMode::Cpu
+                compute_mode_seen = true;
+                parsed.compute_mode = match key.as_str() {
+                    "gpu" => VanityComputeMode::Gpu,
+                    "opencl" => VanityComputeMode::OpenCl,
+                    _ => VanityComputeMode::Cpu,
                 };
-                parsed.worker_count = Some(workers);
+                let next = args.get(i + 1).map(|v| v.trim());
+                let next_is_key = next
+                    .map(|v| {
+                        matches!(
+                            v.to_ascii_lowercase().as_str(),
+                            "startswith" | "endswith" | "cpu" | "gpu" | "opencl"
+                        )
+                    })
+                    .unwrap_or(false);
+                if let Some(value) = next {
+                    if value.is_empty() {
+                        return Err("Worker count must be a positive integer".to_string());
+                    }
+                    if !next_is_key {
+                        let workers = value
+                            .parse::<usize>()
+                            .ok()
+                            .filter(|n| *n > 0)
+                            .ok_or_else(|| "Worker count must be a positive integer".to_string())?;
+                        parsed.worker_count = Some(workers);
+                        i += 2;
+                        continue;
+                    }
+                }
+                i += 1;
             }
             _ => {
                 return Err(format!(
-                    "Unknown argument '{}'. Use startswith/endswith/cpu/gpu.",
+                    "Unknown argument '{}'. Use startswith/endswith/cpu/gpu/opencl.",
                     args[i]
                 ));
             }
         }
-        i += 2;
     }
     Ok(parsed)
 }
@@ -171,7 +214,7 @@ fn hkdf_salt_for_wallet_derivation() -> String {
     format!("{}|{}", CHAIN_ID, DEFAULT_DERIVATION_PATH)
 }
 
-fn generate_mnemonic_12_fast<R: RngCore + ?Sized>(rng: &mut R) -> Result<Mnemonic, String> {
+fn generate_mnemonic_12_fast<R: Rng + ?Sized>(rng: &mut R) -> Result<Mnemonic, String> {
     let mut entropy = [0u8; 16];
     rng.fill_bytes(&mut entropy);
     Mnemonic::from_entropy_in(Language::English, &entropy)
@@ -213,6 +256,11 @@ pub(crate) enum VanitySearchBackend {
         selected_adapter: Option<GpuAdapterSummary>,
         fallback_reason: String,
     },
+    OpenCl {
+        requested_workers: usize,
+        selected_device: Option<OpenClDeviceSummary>,
+        fallback_reason: String,
+    },
 }
 
 impl VanitySearchBackend {
@@ -233,6 +281,15 @@ impl VanitySearchBackend {
                 }
 
                 if let Some(best) = select_best_gpu_adapter(&adapters) {
+                    if best.device_type == WgpuDeviceType::Cpu {
+                        return Self::Gpu {
+                            requested_workers: requested_workers.max(1),
+                            selected_adapter: None,
+                            fallback_reason:
+                                "Only CPU/software adapters detected; using CPU workers."
+                                    .to_string(),
+                        };
+                    }
                     Self::Gpu {
                         requested_workers: requested_workers.max(1),
                         selected_adapter: Some(best),
@@ -249,6 +306,36 @@ impl VanitySearchBackend {
                     }
                 }
             }
+            VanityComputeMode::OpenCl => match list_opencl_devices() {
+                Ok(devices) if devices.is_empty() => Self::OpenCl {
+                    requested_workers: requested_workers.max(1),
+                    selected_device: None,
+                    fallback_reason: "No OpenCL devices detected; using CPU workers.".to_string(),
+                },
+                Ok(devices) => {
+                    if let Some(best) = select_best_opencl_device(&devices) {
+                        Self::OpenCl {
+                            requested_workers: requested_workers.max(1),
+                            selected_device: Some(best),
+                            fallback_reason:
+                                "OpenCL vanity backend selected (scaffolded). Will fall back to CPU until OpenCL vanity kernels are implemented."
+                                    .to_string(),
+                        }
+                    } else {
+                        Self::OpenCl {
+                            requested_workers: requested_workers.max(1),
+                            selected_device: None,
+                            fallback_reason:
+                                "No suitable OpenCL device selected; using CPU workers.".to_string(),
+                        }
+                    }
+                }
+                Err(err) => Self::OpenCl {
+                    requested_workers: requested_workers.max(1),
+                    selected_device: None,
+                    fallback_reason: format!("OpenCL unavailable ({}); using CPU workers.", err),
+                },
+            },
         }
     }
 
@@ -258,6 +345,9 @@ impl VanitySearchBackend {
             Self::Gpu {
                 requested_workers, ..
             } => *requested_workers,
+            Self::OpenCl {
+                requested_workers, ..
+            } => *requested_workers,
         }
     }
 
@@ -265,26 +355,57 @@ impl VanitySearchBackend {
         match self {
             Self::Cpu { .. } => "cpu",
             Self::Gpu { .. } => "gpu",
+            Self::OpenCl { .. } => "opencl",
         }
     }
 
     pub(crate) fn print_preflight(&self) {
-        if let Self::Gpu {
-            selected_adapter,
-            fallback_reason,
-            ..
-        } = self
-        {
-            if let Some(best) = selected_adapter {
-                println!(
-                    "Selected GPU adapter: {} | vendor={} (0x{:04x}) | type={:?} | backend={:?}",
-                    best.name, best.vendor_name, best.vendor, best.device_type, best.backend
-                );
-                if !best.driver.is_empty() {
-                    println!("GPU driver: {}", best.driver);
+        match self {
+            Self::Gpu {
+                selected_adapter,
+                fallback_reason,
+                ..
+            } => {
+                if let Some(best) = selected_adapter {
+                    println!(
+                        "Selected GPU adapter: {} | vendor={} (0x{:04x}) | type={:?} | backend={:?}",
+                        best.name, best.vendor_name, best.vendor, best.device_type, best.backend
+                    );
+                    if !best.driver.is_empty() {
+                        println!("GPU driver: {}", best.driver);
+                    }
                 }
+                println!("{}", fallback_reason);
             }
-            println!("{}", fallback_reason);
+            Self::OpenCl {
+                selected_device,
+                fallback_reason,
+                ..
+            } => {
+                if let Some(best) = selected_device {
+                    println!(
+                        "Selected OpenCL device: {} | vendor={} | type={} | CU={} | clock={}MHz | mem={} MiB",
+                        best.name,
+                        best.vendor,
+                        best.device_type_label,
+                        best.max_compute_units,
+                        best.max_clock_mhz,
+                        best.global_mem_mib
+                    );
+                    println!(
+                        "OpenCL platform: {} | vendor={}",
+                        best.platform_name, best.platform_vendor
+                    );
+                    if !best.driver_version.is_empty() {
+                        println!("OpenCL driver: {}", best.driver_version);
+                    }
+                    if !best.version.is_empty() {
+                        println!("OpenCL version: {}", best.version);
+                    }
+                }
+                println!("{}", fallback_reason);
+            }
+            Self::Cpu { .. } => {}
         }
     }
 }
@@ -293,73 +414,99 @@ pub(crate) fn run_vanity_search(
     request: &VanitySearchRequest,
     backend: &VanitySearchBackend,
 ) -> Result<Option<VanityMatch>, String> {
-    if let VanitySearchBackend::Gpu {
-        requested_workers, ..
+    if let VanitySearchBackend::OpenCl {
+        selected_device: Some(_),
+        ..
     } = backend
     {
-        let sample_target = (*requested_workers).clamp(1, 256).saturating_mul(64);
-        let (payloads, cpu_matches) = build_real_address_payload_preflight_batch(
-            sample_target,
-            &request.mnemonic_pwd,
-            request.starts_with.as_deref(),
-            request.ends_with.as_deref(),
+        println!(
+            "OpenCL vanity backend is scaffolded, but OpenCL vanity kernels are not implemented yet. Continuing with CPU fallback."
         );
-        if payloads.is_empty() {
-            println!("GPU preflight skipped: could not build real-address sample batch.");
-        } else {
-            let filter_config = GpuPayloadBatchFilterConfig {
-                prefix: request.starts_with.clone(),
-                suffix: request.ends_with.clone(),
-                max_hits: 32,
-                stop_after_hits: 8,
-            };
-            match gpu_filter_payload_batch(None, &payloads, &filter_config) {
-                Ok(result) => {
-                    println!(
-                        "GPU real-address preflight summary: batch={} gpu_candidate_count={} attempts={} prefix_hits={} suffix_hits={} cpu_matches={} gpu_combined_hits={} hit_count={} stored_hits={} verified_hits={} mismatches={} stop_flag={} elapsed={:.3}s",
-                        payloads.len(),
-                        result.candidate_count,
-                        result.attempts,
-                        result.prefix_hits,
-                        result.suffix_hits,
-                        cpu_matches,
-                        result.combined_hits,
-                        result.hit_count,
-                        result.stored_hit_indices.len(),
-                        result.verified_stored_hits,
-                        result.verification_mismatches,
-                        result.stop_flag_triggered,
-                        result.elapsed.as_secs_f64()
-                    );
-                    if result.combined_hits != cpu_matches as u64 {
+    }
+
+    if let VanitySearchBackend::Gpu {
+        requested_workers,
+        selected_adapter,
+        ..
+    } = backend
+    {
+        if selected_adapter.is_some() {
+            let sample_target = (*requested_workers).clamp(1, 256).saturating_mul(64);
+            let (payloads, cpu_matches) = build_real_address_payload_preflight_batch(
+                sample_target,
+                &request.mnemonic_pwd,
+                request.starts_with.as_deref(),
+                request.ends_with.as_deref(),
+            );
+            if payloads.is_empty() {
+                println!("GPU preflight skipped: could not build real-address sample batch.");
+            } else {
+                let filter_config = GpuPayloadBatchFilterConfig {
+                    prefix: request.starts_with.clone(),
+                    suffix: request.ends_with.clone(),
+                    max_hits: 32,
+                    stop_after_hits: 8,
+                };
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    gpu_filter_payload_batch(None, &payloads, &filter_config)
+                })) {
+                    Ok(Ok(result)) => {
                         println!(
-                            "Warning: GPU/CPU preflight hit-count mismatch (gpu={}, cpu={})",
-                            result.combined_hits, cpu_matches
+                            "GPU real-address preflight summary: batch={} gpu_candidate_count={} attempts={} prefix_hits={} suffix_hits={} cpu_matches={} gpu_combined_hits={} hit_count={} stored_hits={} verified_hits={} mismatches={} stop_flag={} elapsed={:.3}s",
+                            payloads.len(),
+                            result.candidate_count,
+                            result.attempts,
+                            result.prefix_hits,
+                            result.suffix_hits,
+                            cpu_matches,
+                            result.combined_hits,
+                            result.hit_count,
+                            result.stored_hit_indices.len(),
+                            result.verified_stored_hits,
+                            result.verification_mismatches,
+                            result.stop_flag_triggered,
+                            result.elapsed.as_secs_f64()
+                        );
+                        if result.combined_hits != cpu_matches as u64 {
+                            println!(
+                                "Warning: GPU/CPU preflight hit-count mismatch (gpu={}, cpu={})",
+                                result.combined_hits, cpu_matches
+                            );
+                        }
+                    }
+                    Ok(Err(err)) => {
+                        println!(
+                            "GPU real-address preflight failed (continuing with CPU fallback): {}",
+                            err
+                        );
+                    }
+                    Err(_) => {
+                        println!(
+                            "GPU real-address preflight panicked (continuing with CPU fallback)."
                         );
                     }
                 }
-                Err(err) => {
+            }
+
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                find_vanity_wallet_gpu_hybrid(
+                    request.starts_with.as_deref(),
+                    request.ends_with.as_deref(),
+                    request.tries_limit,
+                    &request.mnemonic_pwd,
+                    *requested_workers,
+                )
+            })) {
+                Ok(Ok(result)) => return Ok(result),
+                Ok(Err(err)) => {
                     println!(
-                        "GPU real-address preflight failed (continuing with CPU fallback): {}",
+                        "GPU hybrid search failed (continuing with CPU fallback): {}",
                         err
                     );
                 }
-            }
-        }
-
-        match find_vanity_wallet_gpu_hybrid(
-            request.starts_with.as_deref(),
-            request.ends_with.as_deref(),
-            request.tries_limit,
-            &request.mnemonic_pwd,
-            *requested_workers,
-        ) {
-            Ok(result) => return Ok(result),
-            Err(err) => {
-                println!(
-                    "GPU hybrid search failed (continuing with CPU fallback): {}",
-                    err
-                );
+                Err(_) => {
+                    println!("GPU hybrid search panicked (continuing with CPU fallback).");
+                }
             }
         }
     }
@@ -523,6 +670,9 @@ fn find_vanity_wallet_parallel(
     drop(tx);
 
     let mut last_progress_printed = 0u64;
+    let progress_started = Instant::now();
+    let mut last_progress_instant = progress_started;
+    let mut last_progress_attempts = 0u64;
     let mut found: Option<VanityMatch> = None;
     loop {
         match rx.recv_timeout(Duration::from_millis(250)) {
@@ -534,8 +684,26 @@ fn find_vanity_wallet_parallel(
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 let current = attempts_claimed.load(Ordering::Relaxed).min(tries_limit);
                 if current >= last_progress_printed.saturating_add(10_000) {
-                    println!("Vanity search attempts: {}", current);
+                    let now = Instant::now();
+                    let interval_attempts = current.saturating_sub(last_progress_attempts);
+                    let interval_secs = now
+                        .duration_since(last_progress_instant)
+                        .as_secs_f64()
+                        .max(f64::EPSILON);
+                    let total_secs = now
+                        .duration_since(progress_started)
+                        .as_secs_f64()
+                        .max(f64::EPSILON);
+                    println!(
+                        "Vanity search attempts: {} | rate={} | avg={} | elapsed={:.1}s",
+                        current,
+                        format_attempt_rate_per_sec(interval_attempts as f64 / interval_secs),
+                        format_attempt_rate_per_sec(current as f64 / total_secs),
+                        total_secs
+                    );
                     last_progress_printed = current;
+                    last_progress_instant = now;
+                    last_progress_attempts = current;
                 }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -561,6 +729,9 @@ fn find_vanity_wallet_gpu_hybrid(
     let hkdf_salt = hkdf_salt_for_wallet_derivation();
     let mut attempts = 0u64;
     let mut last_progress_printed = 0u64;
+    let progress_started = Instant::now();
+    let mut last_progress_instant = progress_started;
+    let mut last_progress_attempts = 0u64;
     let target_batch = requested_workers
         .clamp(1, 256)
         .saturating_mul(128)
@@ -611,12 +782,27 @@ fn find_vanity_wallet_gpu_hybrid(
         }
 
         if attempts >= last_progress_printed.saturating_add(10_000) {
+            let now = Instant::now();
+            let interval_attempts = attempts.saturating_sub(last_progress_attempts);
+            let interval_secs = now
+                .duration_since(last_progress_instant)
+                .as_secs_f64()
+                .max(f64::EPSILON);
+            let total_secs = now
+                .duration_since(progress_started)
+                .as_secs_f64()
+                .max(f64::EPSILON);
             println!(
-                "Vanity search attempts: {} (gpu-hybrid, current batch={})",
+                "Vanity search attempts: {} | rate={} | avg={} | elapsed={:.1}s (gpu-hybrid, current batch={})",
                 attempts,
+                format_attempt_rate_per_sec(interval_attempts as f64 / interval_secs),
+                format_attempt_rate_per_sec(attempts as f64 / total_secs),
+                total_secs,
                 candidates.len()
             );
             last_progress_printed = attempts;
+            last_progress_instant = now;
+            last_progress_attempts = attempts;
         }
 
         let candidate_count = pubkeys.len() as u32;
