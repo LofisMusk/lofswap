@@ -2,6 +2,9 @@
 //! Wallet CLI - relies only on `peers.json` + `BOOTSTRAP_NODES`.
 //! All legacy `nodes.txt` paths have been removed.
 
+mod gpu;
+mod vanity;
+
 use blockchain_core::{
     Block, CHAIN_ID, Transaction, TxKind, pubkey_to_address,
     wallet_keystore::{
@@ -22,10 +25,17 @@ use std::io::{self, IsTerminal, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, mpsc};
-use std::thread;
 use std::time::{Duration, Instant};
+
+use crate::gpu::{
+    GpuPipelineProbeConfig, GpuVanityJobPipelineConfig, GpuVanityProbeConfig,
+    gpu_hash_pubkey_batch, gpu_pipeline_test, gpu_smoke_test, gpu_vanity_job_pipeline_test,
+    gpu_vanity_probe, print_gpu_info,
+};
+use crate::vanity::{
+    VanityComputeMode, VanitySearchBackend, VanitySearchRequest, address_matches_vanity,
+    default_cpu_workers, parse_vanity_args, run_vanity_search,
+};
 
 static BOOTSTRAP_NODES: &[&str] = &["89.168.107.239:6000", "79.76.116.108:6000"];
 
@@ -39,7 +49,6 @@ const MIN_BROADCAST_PEERS: usize = 2;
 const WHOAMI_TIMEOUT: Duration = Duration::from_millis(800);
 const DEFAULT_TX_FEE: u64 = 1;
 const DEFAULT_VANITY_MAX_ATTEMPTS: u64 = 500_000_000;
-const BASE58_ALPHABET: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
 // ---------- Default wallet ----------
 const LEGACY_WALLET: &str = ".default_wallet";
@@ -152,244 +161,6 @@ fn vanity_max_attempts() -> u64 {
         .and_then(|v| v.trim().parse::<u64>().ok())
         .filter(|v| *v > 0)
         .unwrap_or(DEFAULT_VANITY_MAX_ATTEMPTS)
-}
-
-fn valid_vanity_pattern(pattern: &str) -> bool {
-    !pattern.is_empty() && pattern.chars().all(|c| BASE58_ALPHABET.contains(c))
-}
-
-fn address_matches_vanity(
-    address: &str,
-    starts_with: Option<&str>,
-    ends_with: Option<&str>,
-) -> bool {
-    let payload = address.strip_prefix("LFS").unwrap_or(address);
-    if let Some(prefix) = starts_with {
-        if !payload.starts_with(prefix) {
-            return false;
-        }
-    }
-    if let Some(suffix) = ends_with {
-        if !payload.ends_with(suffix) {
-            return false;
-        }
-    }
-    true
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum VanityComputeMode {
-    Cpu,
-    Gpu,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CreateWalletOptions {
-    starts_with: Option<String>,
-    ends_with: Option<String>,
-    compute_mode: VanityComputeMode,
-    worker_count: Option<usize>,
-}
-
-impl Default for CreateWalletOptions {
-    fn default() -> Self {
-        Self {
-            starts_with: None,
-            ends_with: None,
-            compute_mode: VanityComputeMode::Cpu,
-            worker_count: None,
-        }
-    }
-}
-
-fn parse_vanity_args(args: &[&str]) -> Result<CreateWalletOptions, String> {
-    if args.is_empty() {
-        return Ok(CreateWalletOptions::default());
-    }
-    if args.len() % 2 != 0 {
-        return Err(
-            "Expected key/value pairs: startswith <prefix> endswith <suffix> cpu|gpu <workers>"
-                .to_string(),
-        );
-    }
-
-    let mut parsed = CreateWalletOptions::default();
-    let mut i = 0usize;
-    while i < args.len() {
-        let key = args[i].to_ascii_lowercase();
-        let value = args[i + 1].trim();
-        if value.is_empty() {
-            return Err("Vanity value cannot be empty".to_string());
-        }
-        match key.as_str() {
-            "startswith" => {
-                if parsed.starts_with.is_some() {
-                    return Err("Duplicate startswith argument".to_string());
-                }
-                if !valid_vanity_pattern(value) {
-                    return Err(format!(
-                        "Invalid vanity pattern '{}'. Use Base58 chars only.",
-                        value
-                    ));
-                }
-                parsed.starts_with = Some(value.to_string());
-            }
-            "endswith" => {
-                if parsed.ends_with.is_some() {
-                    return Err("Duplicate endswith argument".to_string());
-                }
-                if !valid_vanity_pattern(value) {
-                    return Err(format!(
-                        "Invalid vanity pattern '{}'. Use Base58 chars only.",
-                        value
-                    ));
-                }
-                parsed.ends_with = Some(value.to_string());
-            }
-            "cpu" | "gpu" => {
-                if parsed.worker_count.is_some() {
-                    return Err("Duplicate compute mode/worker-count argument".to_string());
-                }
-                let workers = value
-                    .parse::<usize>()
-                    .ok()
-                    .filter(|n| *n > 0)
-                    .ok_or_else(|| "Worker count must be a positive integer".to_string())?;
-                parsed.compute_mode = if key == "gpu" {
-                    VanityComputeMode::Gpu
-                } else {
-                    VanityComputeMode::Cpu
-                };
-                parsed.worker_count = Some(workers);
-            }
-            _ => {
-                return Err(format!(
-                    "Unknown argument '{}'. Use startswith/endswith/cpu/gpu.",
-                    args[i]
-                ));
-            }
-        }
-        i += 2;
-    }
-    Ok(parsed)
-}
-
-fn default_cpu_workers() -> usize {
-    thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
-        .max(1)
-}
-
-#[derive(Debug)]
-struct VanityMatch {
-    sk: SecretKey,
-    mnemonic: String,
-    public_key: String,
-    address: String,
-    attempts: u64,
-}
-
-fn find_vanity_wallet_parallel(
-    starts_with: Option<&str>,
-    ends_with: Option<&str>,
-    tries_limit: u64,
-    mnemonic_pwd: &str,
-    worker_count: usize,
-) -> Result<Option<VanityMatch>, String> {
-    let workers = worker_count.max(1);
-    let stop = Arc::new(AtomicBool::new(false));
-    let attempts = Arc::new(AtomicU64::new(0));
-    let (tx, rx) = mpsc::channel::<VanityMatch>();
-
-    let starts_owned = starts_with.map(|s| s.to_string());
-    let ends_owned = ends_with.map(|s| s.to_string());
-    let mnemonic_pwd = Arc::new(mnemonic_pwd.to_string());
-
-    let mut handles = Vec::with_capacity(workers);
-    for _ in 0..workers {
-        let tx = tx.clone();
-        let stop = Arc::clone(&stop);
-        let attempts = Arc::clone(&attempts);
-        let starts_owned = starts_owned.clone();
-        let ends_owned = ends_owned.clone();
-        let mnemonic_pwd = Arc::clone(&mnemonic_pwd);
-
-        handles.push(thread::spawn(move || {
-            let secp = Secp256k1::new();
-            loop {
-                if stop.load(Ordering::Relaxed) {
-                    break;
-                }
-
-                let attempt = attempts.fetch_add(1, Ordering::Relaxed) + 1;
-                if attempt > tries_limit {
-                    break;
-                }
-
-                let Ok(mnemonic) = generate_mnemonic_12() else {
-                    continue;
-                };
-                let Ok(derived) =
-                    derive_secret_key_from_mnemonic(&mnemonic, &mnemonic_pwd, DEFAULT_DERIVATION_PATH)
-                else {
-                    continue;
-                };
-                let Ok(sk) = SecretKey::from_byte_array(derived) else {
-                    continue;
-                };
-
-                let pk = PublicKey::from_secret_key(&secp, &sk);
-                let public_key = pk.to_string();
-                let address = pubkey_to_address(&public_key);
-
-                if !address_matches_vanity(&address, starts_owned.as_deref(), ends_owned.as_deref()) {
-                    continue;
-                }
-
-                if stop
-                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                    .is_ok()
-                {
-                    let _ = tx.send(VanityMatch {
-                        sk,
-                        mnemonic,
-                        public_key,
-                        address,
-                        attempts: attempt,
-                    });
-                }
-                break;
-            }
-        }));
-    }
-    drop(tx);
-
-    let mut last_progress_printed = 0u64;
-    let mut found: Option<VanityMatch> = None;
-    loop {
-        match rx.recv_timeout(Duration::from_millis(250)) {
-            Ok(result) => {
-                found = Some(result);
-                stop.store(true, Ordering::SeqCst);
-                break;
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                let current = attempts.load(Ordering::Relaxed).min(tries_limit);
-                if current >= last_progress_printed.saturating_add(10_000) {
-                    println!("Vanity search attempts: {}", current);
-                    last_progress_printed = current;
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-        }
-    }
-
-    for handle in handles {
-        let _ = handle.join();
-    }
-
-    Ok(found)
 }
 
 // ---------- Peers ----------
@@ -1058,38 +829,69 @@ fn export_dat(path: &str) {
 // ---------- CLI ----------
 fn help() {
     println!(
-        "Commands:\n  help\n  create-wallet [startswith <prefix>] [endswith <suffix>] [cpu <workers>|gpu <workers>]\n                              (prefix/suffix applies after LFS; vanity uses all CPU cores by default)\n  recover-mnemonic <seed words...>\n  import-priv <hex>\n  import-dat <file>\n  export-dat <file>\n  export-priv               (requires strong confirmation)\n  default-wallet\n  send <to?> <amount> [n=2]   (defaults to your address)\n  send-priv <priv> <to> <amount> [n=2]\n  sign-raw <to> <amount>      (sign only; save locally)\n  sign-raw-priv <priv> <to> <amount>\n  send-raw <sig|txid> [n=2]   (broadcast a stored raw tx)\n  raw_tx                      (list stored raw-signed txs)\n  force-send <signature>     (resend a pending tx even if only one peer is reachable)\n  balance [address]          (defaults to your address)\n  faucet [address]           (disabled in v2; coinbase-only emission)\n  tx-history [address]       (defaults to your address)\n  tx-info <txid|signature>\n  list-peers\n  print-mempool\n  exit"
+        "Commands:\n  help\n  create-wallet [startswith <prefix>] [endswith <suffix>] [cpu <workers>|gpu <workers>]\n                              (prefix/suffix applies after LFS; vanity uses all CPU cores by default)\n  gpu-info                    (list detected GPU adapters/backends via wgpu)\n  gpu-test [adapter_index]    (run a small compute shader smoke test)\n  gpu-pubkey-hash-test [adapter_index] [count]\n                              (GPU SHA-256 over compressed pubkey hex strings with CPU verification)\n  gpu-pipeline-test [adapter_index] [chunks] [workgroups]\n                              (chunked compute dispatch test for future GPU vanity pipeline)\n  gpu-vanity-probe [adapter_index] [chunks] [workgroups] [prefix|-] [suffix|-]\n                              (vanity-like GPU probe: params+pattern buffers+hit counters; no real crypto yet)\n  gpu-vanity-job-test [adapter_index] [chunks] [workgroups] [prefix|-] [suffix|-] [max_hits] [stop_after_hits]\n                              (work-item + hit-buffer + stop-flag GPU pipeline test, closer to final vanity backend)\n  recover-mnemonic <seed words...>\n  import-priv <hex>\n  import-dat <file>\n  export-dat <file>\n  export-priv               (requires strong confirmation)\n  default-wallet\n  send <to?> <amount> [n=2]   (defaults to your address)\n  send-priv <priv> <to> <amount> [n=2]\n  sign-raw <to> <amount>      (sign only; save locally)\n  sign-raw-priv <priv> <to> <amount>\n  send-raw <sig|txid> [n=2]   (broadcast a stored raw tx)\n  raw_tx                      (list stored raw-signed txs)\n  force-send <signature>     (resend a pending tx even if only one peer is reachable)\n  balance [address]          (defaults to your address)\n  faucet [address]           (disabled in v2; coinbase-only emission)\n  tx-history [address]       (defaults to your address)\n  tx-info <txid|signature>\n  list-peers\n  print-mempool\n  exit"
     );
 }
 
+fn deterministic_pubkey_batch_for_gpu_hash_test(count: usize) -> Vec<String> {
+    let target = count.clamp(1, 4096);
+    let secp = Secp256k1::new();
+    let mut out = Vec::with_capacity(target);
+    let mut counter = 1u64;
+    while out.len() < target {
+        let mut hasher = Sha256::new();
+        hasher.update(b"lofswap-gpu-pubkey-hash-test");
+        hasher.update(counter.to_le_bytes());
+        let digest = hasher.finalize();
+        let mut sk_bytes = [0u8; 32];
+        sk_bytes.copy_from_slice(&digest);
+        counter = counter.wrapping_add(1);
+
+        let Ok(sk) = SecretKey::from_byte_array(sk_bytes) else {
+            continue;
+        };
+        let pk = PublicKey::from_secret_key(&secp, &sk).to_string();
+        if pk.is_ascii() {
+            out.push(pk);
+        }
+    }
+    out
+}
+
 // Create a new wallet and set it as default
-fn create_wallet(starts_with: Option<&str>, ends_with: Option<&str>, mode: VanityComputeMode, workers: Option<usize>) {
+fn create_wallet(
+    starts_with: Option<&str>,
+    ends_with: Option<&str>,
+    mode: VanityComputeMode,
+    workers: Option<usize>,
+) {
     let tries_limit = vanity_max_attempts();
     let mnemonic_pwd = mnemonic_passphrase();
     let vanity_enabled = starts_with.is_some() || ends_with.is_some();
     if vanity_enabled {
-        let requested_workers = workers.unwrap_or_else(default_cpu_workers);
-        let effective_mode = match mode {
-            VanityComputeMode::Cpu => "cpu",
-            VanityComputeMode::Gpu => "gpu (fallback to cpu in this build)",
+        let requested_workers = workers.unwrap_or_else(default_cpu_workers).max(1);
+        let backend = VanitySearchBackend::prepare(mode, requested_workers);
+        let request = VanitySearchRequest {
+            starts_with: starts_with.map(str::to_string),
+            ends_with: ends_with.map(str::to_string),
+            tries_limit,
+            mnemonic_pwd,
+            cpu_workers: requested_workers,
         };
         println!(
             "Generating vanity wallet (startswith={:?}, endswith={:?}, mode={}, workers={}, max_attempts={})",
-            starts_with, ends_with, effective_mode, requested_workers, tries_limit
+            request.starts_with.as_deref(),
+            request.ends_with.as_deref(),
+            backend.mode_label(),
+            request.cpu_workers,
+            tries_limit
         );
-        if mode == VanityComputeMode::Gpu {
-            println!("GPU vanity search backend is not enabled in this build; using CPU workers.");
-        }
+        backend.print_preflight();
 
-        match find_vanity_wallet_parallel(
-            starts_with,
-            ends_with,
-            tries_limit,
-            &mnemonic_pwd,
-            requested_workers,
-        ) {
+        match run_vanity_search(&request, &backend) {
             Ok(Some(found)) => {
-                if let Err(e) = save_default_wallet_with_mnemonic(&found.sk, Some(&found.mnemonic)) {
+                if let Err(e) = save_default_wallet_with_mnemonic(&found.sk, Some(&found.mnemonic))
+                {
                     println!("Failed to save wallet: {}", e);
                     return;
                 }
@@ -1114,6 +916,12 @@ fn create_wallet(starts_with: Option<&str>, ends_with: Option<&str>, mode: Vanit
                 return;
             }
         }
+    }
+
+    if workers.is_some() || mode == VanityComputeMode::Gpu {
+        println!(
+            "Note: compute mode/worker count options are used only for vanity search (startswith/endswith)."
+        );
     }
 
     for attempt in 1..=tries_limit {
@@ -1657,138 +1465,395 @@ fn handle_command_line(peers: &mut PeerStore, line: &str) -> bool {
         return true;
     }
     match a[0] {
-            "help" => help(),
-            "create-wallet" => match parse_vanity_args(&a[1..]) {
-                Ok(opts) => {
-                    create_wallet(
-                        opts.starts_with.as_deref(),
-                        opts.ends_with.as_deref(),
-                        opts.compute_mode,
-                        opts.worker_count,
-                    )
+        "help" => help(),
+        "gpu-info" => print_gpu_info(),
+        "gpu-test" => {
+            let adapter_index = match a.get(1) {
+                None => None,
+                Some(raw) => match raw.parse::<usize>() {
+                    Ok(idx) => Some(idx),
+                    Err(_) => {
+                        println!("Usage: gpu-test [adapter_index]");
+                        return true;
+                    }
+                },
+            };
+            if let Err(e) = gpu_smoke_test(adapter_index) {
+                println!("GPU smoke test failed: {}", e);
+            }
+        }
+        "gpu-pubkey-hash-test" => {
+            let usage = "Usage: gpu-pubkey-hash-test [adapter_index] [count]";
+            let adapter_index = match a.get(1) {
+                None => None,
+                Some(raw) => match raw.parse::<usize>() {
+                    Ok(idx) => Some(idx),
+                    Err(_) => {
+                        println!("{usage}");
+                        return true;
+                    }
+                },
+            };
+            let count = match a.get(2) {
+                None => 512usize,
+                Some(raw) => match raw.parse::<usize>() {
+                    Ok(v) if v > 0 => v,
+                    _ => {
+                        println!("{usage}");
+                        return true;
+                    }
+                },
+            };
+            let pubkeys = deterministic_pubkey_batch_for_gpu_hash_test(count);
+            if pubkeys.is_empty() {
+                println!("No deterministic pubkeys generated for test");
+                return true;
+            }
+            match gpu_hash_pubkey_batch(adapter_index, &pubkeys, true) {
+                Ok(result) => {
+                    let first_prefix = result
+                        .digests
+                        .first()
+                        .map(|d| hex::encode(&d[..8]))
+                        .unwrap_or_default();
+                    println!(
+                        "GPU pubkey SHA-256 summary: count={} verified={} mismatches={} verify={} elapsed={:.3}s rate={:.2} Khash/s first_digest_prefix={}",
+                        result.candidate_count,
+                        result.verified_digests,
+                        result.verification_mismatches,
+                        result.verification_performed,
+                        result.elapsed.as_secs_f64(),
+                        (result.candidate_count as f64 / result.elapsed.as_secs_f64().max(1e-9))
+                            / 1_000.0,
+                        first_prefix
+                    );
                 }
-                Err(e) => println!(
-                    "{}\nUsage: create-wallet [startswith <prefix>] [endswith <suffix>] [cpu <workers>|gpu <workers>]",
-                    e
+                Err(e) => println!("GPU pubkey SHA-256 test failed: {}", e),
+            }
+        }
+        "gpu-pipeline-test" => {
+            let adapter_index = match a.get(1) {
+                None => None,
+                Some(raw) => match raw.parse::<usize>() {
+                    Ok(idx) => Some(idx),
+                    Err(_) => {
+                        println!("Usage: gpu-pipeline-test [adapter_index] [chunks] [workgroups]");
+                        return true;
+                    }
+                },
+            };
+            let chunks = match a.get(2) {
+                None => 8,
+                Some(raw) => match raw.parse::<u32>() {
+                    Ok(v) => v,
+                    Err(_) => {
+                        println!("Usage: gpu-pipeline-test [adapter_index] [chunks] [workgroups]");
+                        return true;
+                    }
+                },
+            };
+            let workgroups_per_chunk = match a.get(3) {
+                None => 1024,
+                Some(raw) => match raw.parse::<u32>() {
+                    Ok(v) => v,
+                    Err(_) => {
+                        println!("Usage: gpu-pipeline-test [adapter_index] [chunks] [workgroups]");
+                        return true;
+                    }
+                },
+            };
+            let config = GpuPipelineProbeConfig {
+                chunks,
+                workgroups_per_chunk,
+            };
+            match gpu_pipeline_test(adapter_index, config) {
+                Ok(result) => {
+                    println!(
+                        "Pipeline summary: chunks={}, workgroups/chunk={}, wg_size={}, total_invocations={}, elapsed={:.3}s",
+                        result.chunks_executed,
+                        result.workgroups_per_chunk,
+                        result.workgroup_size,
+                        result.total_invocations,
+                        result.elapsed.as_secs_f64()
+                    );
+                }
+                Err(e) => println!("GPU pipeline test failed: {}", e),
+            }
+        }
+        "gpu-vanity-probe" => {
+            let usage = "Usage: gpu-vanity-probe [adapter_index] [chunks] [workgroups] [prefix|-] [suffix|-]";
+            let adapter_index = match a.get(1) {
+                None => None,
+                Some(raw) => match raw.parse::<usize>() {
+                    Ok(idx) => Some(idx),
+                    Err(_) => {
+                        println!("{usage}");
+                        return true;
+                    }
+                },
+            };
+            let chunks = match a.get(2) {
+                None => 2,
+                Some(raw) => match raw.parse::<u32>() {
+                    Ok(v) => v,
+                    Err(_) => {
+                        println!("{usage}");
+                        return true;
+                    }
+                },
+            };
+            let workgroups_per_chunk = match a.get(3) {
+                None => 512,
+                Some(raw) => match raw.parse::<u32>() {
+                    Ok(v) => v,
+                    Err(_) => {
+                        println!("{usage}");
+                        return true;
+                    }
+                },
+            };
+            let prefix = match a.get(4).copied() {
+                Some("-") | None => None,
+                Some(v) => Some(v.to_string()),
+            };
+            let suffix = match a.get(5).copied() {
+                Some("-") | None => None,
+                Some(v) => Some(v.to_string()),
+            };
+            let config = GpuVanityProbeConfig {
+                chunks,
+                workgroups_per_chunk,
+                prefix,
+                suffix,
+            };
+            match gpu_vanity_probe(adapter_index, &config) {
+                Ok(result) => println!(
+                    "Vanity probe summary: candidates={} prefix_hits={} suffix_hits={} combined_hits={} first_hit={:?} elapsed={:.3}s",
+                    result.total_candidates,
+                    result.prefix_hits,
+                    result.suffix_hits,
+                    result.combined_hits,
+                    result.first_hit_index,
+                    result.elapsed.as_secs_f64()
                 ),
-            },
-            "recover-mnemonic" if a.len() >= 2 => recover_wallet_from_mnemonic(&a[1..].join(" ")),
-            "import-priv" if a.len() == 2 => import_priv(a[1]),
-            "import-dat" if a.len() == 2 => import_dat(a[1]),
-            "export-dat" if a.len() == 2 => export_dat(a[1]),
-            "export-priv" => export_private_key(),
-            "default-wallet" => {
-                if let Some(sk) = load_default_wallet() {
-                    let pk = PublicKey::from_secret_key(&Secp256k1::new(), &sk);
-                    println!("Public : {}", pk);
-                    println!("Address: {}", pubkey_to_address(&pk.to_string()));
-                    println!("Private key is hidden by default.");
-                } else {
-                    println!("No default wallet");
-                }
+                Err(e) => println!("GPU vanity probe failed: {}", e),
             }
-            "send" => {
-                // send <to> <amount> [n], or if <to> missing, use default address
-                match (a.get(1), a.get(2)) {
-                    (Some(to), Some(amt)) => {
-                        if let Ok(amount) = amt.parse() {
-                            let n = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(2);
-                            send_default(peers, to, amount, n);
-                        } else {
-                            println!("Invalid amount");
-                        }
+        }
+        "gpu-vanity-job-test" => {
+            let usage = "Usage: gpu-vanity-job-test [adapter_index] [chunks] [workgroups] [prefix|-] [suffix|-] [max_hits] [stop_after_hits]";
+            let adapter_index = match a.get(1) {
+                None => None,
+                Some(raw) => match raw.parse::<usize>() {
+                    Ok(idx) => Some(idx),
+                    Err(_) => {
+                        println!("{usage}");
+                        return true;
                     }
-                    (None, Some(amt)) => {
-                        if let Some(def_to) = default_address() {
-                            if let Ok(amount) = amt.parse() {
-                                let n = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(2);
-                                send_default(peers, &def_to, amount, n);
-                            } else {
-                                println!("Invalid amount");
-                            }
-                        } else {
-                            println!("No default wallet and no destination address");
-                        }
+                },
+            };
+            let chunks = match a.get(2) {
+                None => 4,
+                Some(raw) => match raw.parse::<u32>() {
+                    Ok(v) => v,
+                    Err(_) => {
+                        println!("{usage}");
+                        return true;
                     }
-                    _ => println!("Usage: send <to?> <amount> [n_peers]"),
-                }
+                },
+            };
+            let workgroups_per_chunk = match a.get(3) {
+                None => 512,
+                Some(raw) => match raw.parse::<u32>() {
+                    Ok(v) => v,
+                    Err(_) => {
+                        println!("{usage}");
+                        return true;
+                    }
+                },
+            };
+            let prefix = match a.get(4).copied() {
+                Some("-") | None => None,
+                Some(v) => Some(v.to_string()),
+            };
+            let suffix = match a.get(5).copied() {
+                Some("-") | None => None,
+                Some(v) => Some(v.to_string()),
+            };
+            let max_hits = match a.get(6) {
+                None => 16,
+                Some(raw) => match raw.parse::<u32>() {
+                    Ok(v) => v,
+                    Err(_) => {
+                        println!("{usage}");
+                        return true;
+                    }
+                },
+            };
+            let stop_after_hits = match a.get(7) {
+                None => 4,
+                Some(raw) => match raw.parse::<u32>() {
+                    Ok(v) => v,
+                    Err(_) => {
+                        println!("{usage}");
+                        return true;
+                    }
+                },
+            };
+            let config = GpuVanityJobPipelineConfig {
+                chunks,
+                workgroups_per_chunk,
+                prefix,
+                suffix,
+                max_hits,
+                stop_after_hits,
+            };
+            match gpu_vanity_job_pipeline_test(adapter_index, &config) {
+                Ok(result) => println!(
+                    "Vanity job test summary: attempts={}/{} prefix_hits={} suffix_hits={} combined_hits={} hit_count={} stop_flag={} stored_hits={} verified_hits={} mismatches={} elapsed={:.3}s",
+                    result.attempts,
+                    result.total_candidates,
+                    result.prefix_hits,
+                    result.suffix_hits,
+                    result.combined_hits,
+                    result.hit_count,
+                    result.stop_flag_triggered,
+                    result.stored_hit_indices.len(),
+                    result.verified_stored_hits,
+                    result.verification_mismatches,
+                    result.elapsed.as_secs_f64()
+                ),
+                Err(e) => println!("GPU vanity job test failed: {}", e),
             }
-            "send-priv" if a.len() >= 4 => {
-                if let Ok(amount) = a[3].parse() {
-                    let n = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(2);
-                    send_priv(peers, a[1], a[2], amount, n);
-                } else {
-                    println!("Invalid amount");
-                }
+        }
+        "create-wallet" => match parse_vanity_args(&a[1..]) {
+            Ok(opts) => create_wallet(
+                opts.starts_with.as_deref(),
+                opts.ends_with.as_deref(),
+                opts.compute_mode,
+                opts.worker_count,
+            ),
+            Err(e) => println!(
+                "{}\nUsage: create-wallet [startswith <prefix>] [endswith <suffix>] [cpu <workers>|gpu <workers>]",
+                e
+            ),
+        },
+        "recover-mnemonic" if a.len() >= 2 => recover_wallet_from_mnemonic(&a[1..].join(" ")),
+        "import-priv" if a.len() == 2 => import_priv(a[1]),
+        "import-dat" if a.len() == 2 => import_dat(a[1]),
+        "export-dat" if a.len() == 2 => export_dat(a[1]),
+        "export-priv" => export_private_key(),
+        "default-wallet" => {
+            if let Some(sk) = load_default_wallet() {
+                let pk = PublicKey::from_secret_key(&Secp256k1::new(), &sk);
+                println!("Public : {}", pk);
+                println!("Address: {}", pubkey_to_address(&pk.to_string()));
+                println!("Private key is hidden by default.");
+            } else {
+                println!("No default wallet");
             }
-            "sign-raw" => match (a.get(1), a.get(2)) {
+        }
+        "send" => {
+            // send <to> <amount> [n], or if <to> missing, use default address
+            match (a.get(1), a.get(2)) {
                 (Some(to), Some(amt)) => {
                     if let Ok(amount) = amt.parse() {
-                        sign_raw_default(peers, to, amount);
+                        let n = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(2);
+                        send_default(peers, to, amount, n);
                     } else {
                         println!("Invalid amount");
                     }
                 }
-                _ => println!("Usage: sign-raw <to> <amount>"),
-            },
-            "sign-raw-priv" if a.len() >= 4 => {
-                if let Ok(amount) = a[3].parse() {
-                    sign_raw_priv(peers, a[1], a[2], amount);
+                (None, Some(amt)) => {
+                    if let Some(def_to) = default_address() {
+                        if let Ok(amount) = amt.parse() {
+                            let n = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(2);
+                            send_default(peers, &def_to, amount, n);
+                        } else {
+                            println!("Invalid amount");
+                        }
+                    } else {
+                        println!("No default wallet and no destination address");
+                    }
+                }
+                _ => println!("Usage: send <to?> <amount> [n_peers]"),
+            }
+        }
+        "send-priv" if a.len() >= 4 => {
+            if let Ok(amount) = a[3].parse() {
+                let n = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(2);
+                send_priv(peers, a[1], a[2], amount, n);
+            } else {
+                println!("Invalid amount");
+            }
+        }
+        "sign-raw" => match (a.get(1), a.get(2)) {
+            (Some(to), Some(amt)) => {
+                if let Ok(amount) = amt.parse() {
+                    sign_raw_default(peers, to, amount);
                 } else {
                     println!("Invalid amount");
                 }
             }
-            "send-raw" => match a.get(1) {
-                Some(sig) => {
-                    let n = a
-                        .get(2)
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(MIN_BROADCAST_PEERS);
-                    send_raw(peers, sig, n);
-                }
-                None => println!("Usage: send-raw <sig|txid> [n_peers]"),
-            },
-            "raw_tx" => show_raw_signed(),
-            "force-send" if a.len() == 2 => {
-                force_send(peers, a[1]);
+            _ => println!("Usage: sign-raw <to> <amount>"),
+        },
+        "sign-raw-priv" if a.len() >= 4 => {
+            if let Ok(amount) = a[3].parse() {
+                sign_raw_priv(peers, a[1], a[2], amount);
+            } else {
+                println!("Invalid amount");
             }
-            "balance" => {
-                if a.len() == 2 {
-                    balance(peers, a[1]);
-                } else if let Some(addr) = default_address() {
-                    balance(peers, &addr);
-                } else {
-                    println!("No default wallet");
-                }
+        }
+        "send-raw" => match a.get(1) {
+            Some(sig) => {
+                let n = a
+                    .get(2)
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(MIN_BROADCAST_PEERS);
+                send_raw(peers, sig, n);
             }
-            "faucet" => {
-                if a.len() == 2 {
-                    faucet(peers, a[1]);
-                } else if let Some(addr) = default_address() {
-                    faucet(peers, &addr);
-                } else {
-                    println!("No default wallet or address");
-                }
+            None => println!("Usage: send-raw <sig|txid> [n_peers]"),
+        },
+        "raw_tx" => show_raw_signed(),
+        "force-send" if a.len() == 2 => {
+            force_send(peers, a[1]);
+        }
+        "balance" => {
+            if a.len() == 2 {
+                balance(peers, a[1]);
+            } else if let Some(addr) = default_address() {
+                balance(peers, &addr);
+            } else {
+                println!("No default wallet");
             }
-            "tx-history" => {
-                if a.len() == 2 {
-                    print_history(peers, a[1]);
-                } else if let Some(addr) = default_address() {
-                    print_history(peers, &addr);
-                } else {
-                    println!("No default wallet");
-                }
+        }
+        "faucet" => {
+            if a.len() == 2 {
+                faucet(peers, a[1]);
+            } else if let Some(addr) = default_address() {
+                faucet(peers, &addr);
+            } else {
+                println!("No default wallet or address");
             }
-            "tx-info" if a.len() == 2 => {
-                tx_info(peers, a[1]);
+        }
+        "tx-history" => {
+            if a.len() == 2 {
+                print_history(peers, a[1]);
+            } else if let Some(addr) = default_address() {
+                print_history(peers, &addr);
+            } else {
+                println!("No default wallet");
             }
-            "list-peers" => list_peers(peers),
-            "print-mempool" => show_mempool(),
-            "exit" => {
-                peers.save();
-                return false;
-            }
-            _ => println!("Unknown command - type 'help'"),
+        }
+        "tx-info" if a.len() == 2 => {
+            tx_info(peers, a[1]);
+        }
+        "list-peers" => list_peers(peers),
+        "print-mempool" => show_mempool(),
+        "exit" => {
+            peers.save();
+            return false;
+        }
+        _ => println!("Unknown command - type 'help'"),
     }
     true
 }
