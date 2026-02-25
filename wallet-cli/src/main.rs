@@ -1,7 +1,3 @@
-// === /wallet-cli/src/main.rs ===
-//! Wallet CLI - relies only on `peers.json` + `BOOTSTRAP_NODES`.
-//! All legacy `nodes.txt` paths have been removed.
-
 mod gpu;
 mod vanity;
 
