@@ -1,52 +1,33 @@
-# Lofswap
+# LofSwap
 
 ![LofSwap logo](lofswap-logo.png)
 
-Lofswap is a Proof-of-Work blockchain designed to enable cross-chain swaps (e.g., BTC -> SOL) via a secure protocol and supporting infrastructure. This repo contains the core node, wallet CLI, and desktop wallet GUI.
+LofSwap is a Proof-of-Work blockchain project with a node, CLI wallet, desktop wallet GUI, and explorer stack.
 
-## What is in this repo
-- `blockchain-core/` Core data structures and hashing logic
-- `node-cli/` P2P node (TCP 6000)
-- `wallet-cli/` Wallet CLI for creating/sending transactions
-- `wallet-gui/` Desktop UI client (Rust + WRY + React frontend)
-- `docs/` Notes, TODOs, changelog
+## Documentation
 
-## Quick start (local)
-Build the workspace:
-```
+- [Docs Index](docs/README.md)
+- [Getting Started](docs/getting-started.md)
+- [Architecture](docs/architecture.md)
+- [Node CLI](docs/node-cli.md)
+- [Wallet CLI](docs/wallet-cli.md)
+- [Wallet GUI](docs/wallet-gui.md)
+- [Explorer](docs/explorer.md)
+
+## Workspace
+
+- `blockchain-core/` shared chain and transaction types
+- `node-cli/` P2P node and miner
+- `wallet-cli/` interactive wallet CLI
+- `wallet-gui/` desktop wallet application
+- `explorer/` static explorer UI
+- `explorer-api/` explorer HTTP API
+
+## Quick Start
+
+```bash
 cargo build -r
+cargo run -p node-cli
 ```
 
-Run the node:
-```
-./target/release/node-cli
-```
-
-Run the desktop app (one-click build + start on macOS):
-```
-./Start-LofSwap-Wallet.command
-```
-
-Run the desktop app directly from Cargo:
-```
-cargo run -p wallet-gui
-```
-
-Build frontend only:
-```
-cd wallet-gui/frontend
-npm install
-npm run build
-```
-
-## Consensus and safety behavior
-- **Block validation**: index, previous hash, timestamp monotonicity, hash correctness, and PoW difficulty are verified before acceptance.
-- **Transaction validation**: ECDSA signatures are verified; balances are checked (including pending mempool for new txs); duplicate signatures/txids across the chain are rejected.
-- **Reorg policy**: on sync, the node replaces the local chain only when a **longer, fully valid** chain is received. Invalid chains are rejected. The node logs reorg height changes.
-- **Proof-of-work**: hashes must match the block header and satisfy the difficulty target (leading zeros).
-- **Debug logging**: `[DEBUG]` and `[MAINT]` messages are compiled only in debug builds. Release builds do not print these logs.
-
-## Operational safety notes
-- `node-cli` listens on TCP `6000`
-- Use systemd to supervise and restart on failure
-- Keep `DATA_DIR` on persistent storage to avoid chain loss
+For full setup and component guides, use the docs links above.
