@@ -31,8 +31,8 @@ use crate::gpu::{
 };
 use crate::opencl::print_opencl_info;
 use crate::vanity::{
-    VanityComputeMode, VanitySearchBackend, VanitySearchRequest, address_matches_vanity,
-    default_cpu_workers, parse_vanity_args, run_vanity_search,
+    VanityComputeMode, VanitySearchBackend, VanitySearchRequest, VanitySource,
+    address_matches_vanity, default_cpu_workers, parse_vanity_args, run_vanity_search,
 };
 
 static BOOTSTRAP_NODES: &[&str] = &["89.168.107.239:6000", "79.76.116.108:6000"];
@@ -827,7 +827,7 @@ fn export_dat(path: &str) {
 // ---------- CLI ----------
 fn help() {
     println!(
-        "Commands:\n  help\n  create-wallet [startswith <prefix>] [endswith <suffix>] [cpu [workers]|gpu [workers]|opencl [workers]]\n                              (prefix/suffix applies after LFS; omitted workers auto-selects a system default)\n  gpu-info                    (list detected GPU adapters/backends via wgpu)\n  opencl-info                 (list detected OpenCL devices; OpenCL backend is feature-gated)\n  gpu-test [adapter_index]    (run a small compute shader smoke test)\n  gpu-pubkey-hash-test [adapter_index] [count]\n                              (GPU SHA-256 over compressed pubkey hex strings with CPU verification)\n  gpu-pipeline-test [adapter_index] [chunks] [workgroups]\n                              (chunked compute dispatch test for future GPU vanity pipeline)\n  gpu-vanity-probe [adapter_index] [chunks] [workgroups] [prefix|-] [suffix|-]\n                              (vanity-like GPU probe: params+pattern buffers+hit counters; no real crypto yet)\n  gpu-vanity-job-test [adapter_index] [chunks] [workgroups] [prefix|-] [suffix|-] [max_hits] [stop_after_hits]\n                              (work-item + hit-buffer + stop-flag GPU pipeline test, closer to final vanity backend)\n  recover-mnemonic <seed words...>\n  import-priv <hex>\n  import-dat <file>\n  export-dat <file>\n  export-priv               (requires strong confirmation)\n  default-wallet\n  send <to?> <amount> [n=2]   (defaults to your address)\n  send-priv <priv> <to> <amount> [n=2]\n  sign-raw <to> <amount>      (sign only; save locally)\n  sign-raw-priv <priv> <to> <amount>\n  send-raw <sig|txid> [n=2]   (broadcast a stored raw tx)\n  raw_tx                      (list stored raw-signed txs)\n  force-send <signature>     (resend a pending tx even if only one peer is reachable)\n  balance [address]          (defaults to your address)\n  faucet [address]           (disabled in v2; coinbase-only emission)\n  tx-history [address]       (defaults to your address)\n  tx-info <txid|signature>\n  list-peers\n  print-mempool\n  exit"
+        "Commands:\n  help\n  create-wallet [startswith <prefix>] [endswith <suffix>] [cpu [workers]|gpu [workers]|opencl [workers]] [--vanity-source raw|mnemonic] [--generate-mnemonic-after-hit]\n                              (prefix/suffix applies after LFS; omitted workers auto-selects a system default)\n  gpu-info                    (list detected GPU adapters/backends via wgpu)\n  opencl-info                 (list detected OpenCL devices; OpenCL backend is feature-gated)\n  gpu-test [adapter_index]    (run a small compute shader smoke test)\n  gpu-pubkey-hash-test [adapter_index] [count]\n                              (GPU SHA-256 over compressed pubkey hex strings with CPU verification)\n  gpu-pipeline-test [adapter_index] [chunks] [workgroups]\n                              (chunked compute dispatch test for future GPU vanity pipeline)\n  gpu-vanity-probe [adapter_index] [chunks] [workgroups] [prefix|-] [suffix|-]\n                              (vanity-like GPU probe: params+pattern buffers+hit counters; no real crypto yet)\n  gpu-vanity-job-test [adapter_index] [chunks] [workgroups] [prefix|-] [suffix|-] [max_hits] [stop_after_hits]\n                              (work-item + hit-buffer + stop-flag GPU pipeline test, closer to final vanity backend)\n  recover-mnemonic <seed words...>\n  import-priv <hex>\n  import-dat <file>\n  export-dat <file>\n  export-priv               (requires strong confirmation)\n  default-wallet\n  send <to?> <amount> [n=2]   (defaults to your address)\n  send-priv <priv> <to> <amount> [n=2]\n  sign-raw <to> <amount>      (sign only; save locally)\n  sign-raw-priv <priv> <to> <amount>\n  send-raw <sig|txid> [n=2]   (broadcast a stored raw tx)\n  raw_tx                      (list stored raw-signed txs)\n  force-send <signature>     (resend a pending tx even if only one peer is reachable)\n  balance [address]          (defaults to your address)\n  faucet [address]           (disabled in v2; coinbase-only emission)\n  tx-history [address]       (defaults to your address)\n  tx-info <txid|signature>\n  list-peers\n  print-mempool\n  exit"
     );
 }
 
@@ -862,6 +862,8 @@ fn create_wallet(
     ends_with: Option<&str>,
     mode: VanityComputeMode,
     workers: Option<usize>,
+    vanity_source: VanitySource,
+    generate_mnemonic_after_hit: bool,
 ) {
     let tries_limit = vanity_max_attempts();
     let mnemonic_pwd = mnemonic_passphrase();
@@ -875,12 +877,14 @@ fn create_wallet(
             tries_limit,
             mnemonic_pwd,
             cpu_workers: requested_workers,
+            vanity_source,
         };
         println!(
-            "Generating vanity wallet (startswith={:?}, endswith={:?}, mode={}, workers={}, max_attempts={})",
+            "Generating vanity wallet (startswith={:?}, endswith={:?}, mode={}, source={}, workers={}, max_attempts={})",
             request.starts_with.as_deref(),
             request.ends_with.as_deref(),
             backend.mode_label(),
+            request.vanity_source.as_str(),
             request.cpu_workers,
             tries_limit
         );
@@ -888,7 +892,9 @@ fn create_wallet(
 
         match run_vanity_search(&request, &backend) {
             Ok(Some(found)) => {
-                if let Err(e) = save_default_wallet_with_mnemonic(&found.sk, Some(&found.mnemonic))
+                let mnemonic_for_keystore = found.mnemonic.clone();
+                if let Err(e) =
+                    save_default_wallet_with_mnemonic(&found.sk, mnemonic_for_keystore.as_deref())
                 {
                     println!("Failed to save wallet: {}", e);
                     return;
@@ -897,8 +903,31 @@ fn create_wallet(
                 println!("Vanity matched after {} attempts.", found.attempts);
                 println!("Public : {}", found.public_key);
                 println!("Address: {}", found.address);
-                println!("Recovery phrase (store offline, never share):");
-                println!("  {}", found.mnemonic);
+                match mnemonic_for_keystore {
+                    Some(mnemonic) => {
+                        println!("Recovery phrase (store offline, never share):");
+                        println!("  {}", mnemonic);
+                    }
+                    None => {
+                        println!(
+                            "Mnemonic: none (RAW vanity source stores private key directly in keystore)."
+                        );
+                        if generate_mnemonic_after_hit {
+                            match generate_mnemonic_12() {
+                                Ok(phrase) => {
+                                    println!("Generated mnemonic after hit:");
+                                    println!("  {}", phrase);
+                                    println!(
+                                        "Note: this mnemonic is informational and is not linked to the saved RAW private key."
+                                    );
+                                }
+                                Err(e) => {
+                                    println!("Failed to generate post-hit mnemonic: {}", e);
+                                }
+                            }
+                        }
+                    }
+                }
                 println!("Derivation path: {}", DEFAULT_DERIVATION_PATH);
                 return;
             }
@@ -916,9 +945,13 @@ fn create_wallet(
         }
     }
 
-    if workers.is_some() || mode != VanityComputeMode::Cpu {
+    if workers.is_some()
+        || mode != VanityComputeMode::Cpu
+        || vanity_source != VanitySource::Mnemonic
+        || generate_mnemonic_after_hit
+    {
         println!(
-            "Note: compute mode/worker count options are used only for vanity search (startswith/endswith)."
+            "Note: compute mode/worker count/vanity-source options are used only for vanity search (startswith/endswith)."
         );
     }
 
@@ -1730,9 +1763,11 @@ fn handle_command_line(peers: &mut PeerStore, line: &str) -> bool {
                 opts.ends_with.as_deref(),
                 opts.compute_mode,
                 opts.worker_count,
+                opts.vanity_source,
+                opts.generate_mnemonic_after_hit,
             ),
             Err(e) => println!(
-                "{}\nUsage: create-wallet [startswith <prefix>] [endswith <suffix>] [cpu [workers]|gpu [workers]|opencl [workers]]",
+                "{}\nUsage: create-wallet [startswith <prefix>] [endswith <suffix>] [cpu [workers]|gpu [workers]|opencl [workers]] [--vanity-source raw|mnemonic] [--generate-mnemonic-after-hit]",
                 e
             ),
         },
@@ -1887,6 +1922,7 @@ mod tests {
         assert_eq!(parsed.starts_with.as_deref(), Some("abc"));
         assert_eq!(parsed.compute_mode, VanityComputeMode::Gpu);
         assert_eq!(parsed.worker_count, Some(8));
+        assert_eq!(parsed.vanity_source, VanitySource::Raw);
     }
 
     #[test]
@@ -1895,6 +1931,7 @@ mod tests {
         assert_eq!(parsed.starts_with.as_deref(), Some("abc"));
         assert_eq!(parsed.compute_mode, VanityComputeMode::Gpu);
         assert_eq!(parsed.worker_count, None);
+        assert_eq!(parsed.vanity_source, VanitySource::Raw);
     }
 
     #[test]
@@ -1911,6 +1948,7 @@ mod tests {
         assert_eq!(parsed.starts_with.as_deref(), Some("abc"));
         assert_eq!(parsed.compute_mode, VanityComputeMode::OpenCl);
         assert_eq!(parsed.worker_count, None);
+        assert_eq!(parsed.vanity_source, VanitySource::Mnemonic);
     }
 
     #[test]
@@ -1919,6 +1957,21 @@ mod tests {
         assert_eq!(parsed.compute_mode, VanityComputeMode::OpenCl);
         assert_eq!(parsed.worker_count, Some(12));
         assert_eq!(parsed.ends_with.as_deref(), Some("9"));
+        assert_eq!(parsed.vanity_source, VanitySource::Mnemonic);
+    }
+
+    #[test]
+    fn parse_vanity_args_accepts_explicit_vanity_source() {
+        let parsed = parse_vanity_args(&["gpu", "--vanity-source", "mnemonic"]).unwrap();
+        assert_eq!(parsed.compute_mode, VanityComputeMode::Gpu);
+        assert_eq!(parsed.vanity_source, VanitySource::Mnemonic);
+    }
+
+    #[test]
+    fn parse_vanity_args_accepts_generate_mnemonic_after_hit_flag() {
+        let parsed =
+            parse_vanity_args(&["startswith", "abc", "--generate-mnemonic-after-hit"]).unwrap();
+        assert!(parsed.generate_mnemonic_after_hit);
     }
 
     #[test]

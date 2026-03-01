@@ -217,16 +217,14 @@ fn request_compute_device(
     required_limits.max_storage_buffers_per_shader_stage =
         adapter.limits().max_storage_buffers_per_shader_stage;
 
-    simple_block_on(adapter.request_device(
-        &wgpu::DeviceDescriptor {
-            label: Some(label),
-            required_features: wgpu::Features::empty(),
-            required_limits,
-            experimental_features: wgpu::ExperimentalFeatures::disabled(),
-            memory_hints: wgpu::MemoryHints::Performance,
-            trace: wgpu::Trace::Off,
-        },
-    ))
+    simple_block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some(label),
+        required_features: wgpu::Features::empty(),
+        required_limits,
+        experimental_features: wgpu::ExperimentalFeatures::disabled(),
+        memory_hints: wgpu::MemoryHints::Performance,
+        trace: wgpu::Trace::Off,
+    }))
     .map_err(|e| format!("request_device failed: {}", e))
 }
 
@@ -610,6 +608,8 @@ const BASE58_ALPHABET_BYTES: &[u8; 58] =
 const GPU_FILTER_BATCH_MAX_PAYLOAD_LEN: usize = 64;
 pub(crate) const GPU_PUBKEY_SHA256_ASCII_LEN: usize = 66;
 const GPU_PUBKEY_SHA256_WORKGROUP_SIZE: u32 = 64;
+const GPU_RAW_VANITY_WORKGROUP_SIZE: u32 = 64;
+const GPU_RAW_VANITY_STORAGE_BUFFERS_PER_SHADER_STAGE: u32 = 5;
 
 fn sha256_ascii_host(input: &str) -> [u8; 32] {
     let mut hasher = Sha256::new();
@@ -1131,6 +1131,14 @@ fn u32_slice_to_le_bytes(words: &[u32]) -> Vec<u8> {
         out.extend_from_slice(&word.to_le_bytes());
     }
     out
+}
+
+fn encode_u32_slice_le_into(words: &[u32], out: &mut Vec<u8>) {
+    out.clear();
+    out.reserve(words.len() * 4);
+    for word in words {
+        out.extend_from_slice(&word.to_le_bytes());
+    }
 }
 
 fn parse_vanity_probe_pattern(label: &str, pattern: Option<&str>) -> Result<Vec<u32>, String> {
@@ -2963,4 +2971,468 @@ pub(crate) fn gpu_filter_payload_batch(
     let mut session =
         GpuPayloadBatchFilterSession::new(requested_index, first.len(), payloads.len() as u32)?;
     session.filter_batch(payloads, config)
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct GpuRawVanityBatchConfig {
+    pub(crate) base_seed: [u8; 32],
+    pub(crate) start_counter: u64,
+    pub(crate) candidate_count: u32,
+    pub(crate) filter_bits: u32,
+    pub(crate) filter_value: u32,
+    pub(crate) max_hits: u32,
+    pub(crate) stop_after_hits: u32,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct GpuRawVanityBatchResult {
+    pub(crate) candidate_count: u32,
+    pub(crate) attempts: u64,
+    pub(crate) hit_count: u64,
+    pub(crate) stop_flag_triggered: bool,
+    pub(crate) stored_hit_indices: Vec<u32>,
+    pub(crate) elapsed: Duration,
+}
+
+pub(crate) struct GpuRawVanitySession {
+    max_candidates: u32,
+    max_hits: u32,
+    device: Arc<wgpu::Device>,
+    queue: Arc<wgpu::Queue>,
+    params_buffer: wgpu::Buffer,
+    base_seed_buffer: wgpu::Buffer,
+    counters_buffer: wgpu::Buffer,
+    stop_flag_buffer: wgpu::Buffer,
+    hit_indices_buffer: wgpu::Buffer,
+    counters_readback: wgpu::Buffer,
+    stop_readback: wgpu::Buffer,
+    hits_readback: wgpu::Buffer,
+    pipeline: wgpu::ComputePipeline,
+    bind_group: wgpu::BindGroup,
+    scratch_u8: Vec<u8>,
+    zero_hit_bytes: Vec<u8>,
+}
+
+impl GpuRawVanitySession {
+    pub(crate) fn new_with_runtime(
+        runtime: &GpuComputeRuntime,
+        max_candidates: u32,
+        max_hits: u32,
+    ) -> Result<Self, String> {
+        if max_candidates == 0 {
+            return Err("max_candidates must be > 0".to_string());
+        }
+        if max_hits == 0 {
+            return Err("max_hits must be > 0".to_string());
+        }
+
+        let device = Arc::clone(&runtime.device);
+        let queue = Arc::clone(&runtime.queue);
+        let limits = device.limits();
+        if limits.max_storage_buffers_per_shader_stage
+            < GPU_RAW_VANITY_STORAGE_BUFFERS_PER_SHADER_STAGE
+        {
+            return Err(format!(
+                "GPU raw vanity filter requires at least {} storage buffers per compute shader stage, but device limit is {}",
+                GPU_RAW_VANITY_STORAGE_BUFFERS_PER_SHADER_STAGE,
+                limits.max_storage_buffers_per_shader_stage
+            ));
+        }
+
+        let shader_src = include_str!("shaders/raw_vanity_filter.wgsl");
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("wallet-cli-gpu-raw-vanity-shader"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(shader_src)),
+        });
+
+        let params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("wallet-cli-gpu-raw-vanity-params"),
+            size: (7 * std::mem::size_of::<u32>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let base_seed_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("wallet-cli-gpu-raw-vanity-seed"),
+            size: (32 * std::mem::size_of::<u32>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let counters_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("wallet-cli-gpu-raw-vanity-counters"),
+            size: (2 * std::mem::size_of::<u32>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let stop_flag_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("wallet-cli-gpu-raw-vanity-stop"),
+            size: std::mem::size_of::<u32>() as u64,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let hit_indices_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("wallet-cli-gpu-raw-vanity-hit-indices"),
+            size: (max_hits as u64 * std::mem::size_of::<u32>() as u64),
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let counters_readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("wallet-cli-gpu-raw-vanity-counters-readback"),
+            size: (2 * std::mem::size_of::<u32>()) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let stop_readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("wallet-cli-gpu-raw-vanity-stop-readback"),
+            size: std::mem::size_of::<u32>() as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let hits_readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("wallet-cli-gpu-raw-vanity-hits-readback"),
+            size: (max_hits as u64 * std::mem::size_of::<u32>() as u64),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("wallet-cli-gpu-raw-vanity-bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("wallet-cli-gpu-raw-vanity-pipeline-layout"),
+            bind_group_layouts: &[&bind_group_layout],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("wallet-cli-gpu-raw-vanity-pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: Some("main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            cache: None,
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("wallet-cli-gpu-raw-vanity-bind-group"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: base_seed_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: counters_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: stop_flag_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: hit_indices_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        Ok(Self {
+            max_candidates,
+            max_hits,
+            device,
+            queue,
+            params_buffer,
+            base_seed_buffer,
+            counters_buffer,
+            stop_flag_buffer,
+            hit_indices_buffer,
+            counters_readback,
+            stop_readback,
+            hits_readback,
+            pipeline,
+            bind_group,
+            scratch_u8: Vec::with_capacity((32 * std::mem::size_of::<u32>()).max(256)),
+            zero_hit_bytes: vec![0u8; max_hits as usize * std::mem::size_of::<u32>()],
+        })
+    }
+
+    pub(crate) fn max_hits(&self) -> u32 {
+        self.max_hits
+    }
+
+    pub(crate) fn scan_batch(
+        &mut self,
+        config: &GpuRawVanityBatchConfig,
+    ) -> Result<GpuRawVanityBatchResult, String> {
+        if config.candidate_count == 0 {
+            return Err("candidate_count must be > 0".to_string());
+        }
+        if config.candidate_count > self.max_candidates {
+            return Err(format!(
+                "candidate_count {} exceeds session max_candidates {}",
+                config.candidate_count, self.max_candidates
+            ));
+        }
+        if config.max_hits == 0 {
+            return Err("max_hits must be > 0".to_string());
+        }
+        if config.max_hits > self.max_hits {
+            return Err(format!(
+                "max_hits {} exceeds session max_hits {}",
+                config.max_hits, self.max_hits
+            ));
+        }
+        if config.filter_bits > 32 {
+            return Err("filter_bits must be <= 32".to_string());
+        }
+
+        let mut base_seed_words = [0u32; 32];
+        for (idx, b) in config.base_seed.iter().enumerate() {
+            base_seed_words[idx] = *b as u32;
+        }
+
+        let params_words = [
+            config.start_counter as u32,
+            (config.start_counter >> 32) as u32,
+            config.candidate_count,
+            config.filter_bits,
+            config.filter_value,
+            config.max_hits,
+            config.stop_after_hits,
+        ];
+
+        encode_u32_slice_le_into(&base_seed_words, &mut self.scratch_u8);
+        self.queue
+            .write_buffer(&self.base_seed_buffer, 0, &self.scratch_u8);
+
+        encode_u32_slice_le_into(&params_words, &mut self.scratch_u8);
+        self.queue
+            .write_buffer(&self.params_buffer, 0, &self.scratch_u8);
+
+        encode_u32_slice_le_into(&[0u32, 0u32], &mut self.scratch_u8);
+        self.queue
+            .write_buffer(&self.counters_buffer, 0, &self.scratch_u8);
+        self.queue
+            .write_buffer(&self.stop_flag_buffer, 0, &0u32.to_le_bytes());
+        let hit_clear_len = config.max_hits as usize * std::mem::size_of::<u32>();
+        self.queue.write_buffer(
+            &self.hit_indices_buffer,
+            0,
+            &self.zero_hit_bytes[..hit_clear_len],
+        );
+
+        let dispatch_workgroups = config
+            .candidate_count
+            .div_ceil(GPU_RAW_VANITY_WORKGROUP_SIZE);
+        let start = Instant::now();
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("wallet-cli-gpu-raw-vanity-encoder"),
+            });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("wallet-cli-gpu-raw-vanity-pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &self.bind_group, &[]);
+            pass.dispatch_workgroups(dispatch_workgroups, 1, 1);
+        }
+        self.queue.submit(Some(encoder.finish()));
+        let _ = self.device.poll(wgpu::PollType::Poll);
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("wallet-cli-gpu-raw-vanity-readback-encoder"),
+            });
+        encoder.copy_buffer_to_buffer(
+            &self.counters_buffer,
+            0,
+            &self.counters_readback,
+            0,
+            (2 * std::mem::size_of::<u32>()) as u64,
+        );
+        encoder.copy_buffer_to_buffer(
+            &self.stop_flag_buffer,
+            0,
+            &self.stop_readback,
+            0,
+            std::mem::size_of::<u32>() as u64,
+        );
+        let hits_copy_size = config.max_hits as u64 * std::mem::size_of::<u32>() as u64;
+        encoder.copy_buffer_to_buffer(
+            &self.hit_indices_buffer,
+            0,
+            &self.hits_readback,
+            0,
+            hits_copy_size,
+        );
+        self.queue.submit(Some(encoder.finish()));
+
+        let (tx_c, rx_c) = mpsc::channel();
+        self.counters_readback
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |res| {
+                let _ = tx_c.send(res);
+            });
+        let (tx_s, rx_s) = mpsc::channel();
+        self.stop_readback
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |res| {
+                let _ = tx_s.send(res);
+            });
+        let (tx_h, rx_h) = mpsc::channel();
+        self.hits_readback
+            .slice(..hits_copy_size)
+            .map_async(wgpu::MapMode::Read, move |res| {
+                let _ = tx_h.send(res);
+            });
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+
+        match rx_c.recv_timeout(Duration::from_secs(10)) {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(format!("raw vanity counters readback map failed: {}", e)),
+            Err(_) => return Err("Timed out waiting for raw vanity counters readback".to_string()),
+        }
+        match rx_s.recv_timeout(Duration::from_secs(10)) {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(format!("raw vanity stop readback map failed: {}", e)),
+            Err(_) => return Err("Timed out waiting for raw vanity stop readback".to_string()),
+        }
+        match rx_h.recv_timeout(Duration::from_secs(10)) {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(format!("raw vanity hits readback map failed: {}", e)),
+            Err(_) => return Err("Timed out waiting for raw vanity hits readback".to_string()),
+        }
+
+        let counters_words = {
+            let mapped = self.counters_readback.slice(..).get_mapped_range();
+            let words = parse_u32_vec_le(&mapped);
+            drop(mapped);
+            self.counters_readback.unmap();
+            words
+        };
+        let stop_words = {
+            let mapped = self.stop_readback.slice(..).get_mapped_range();
+            let words = parse_u32_vec_le(&mapped);
+            drop(mapped);
+            self.stop_readback.unmap();
+            words
+        };
+        let hit_words = {
+            let mapped = self
+                .hits_readback
+                .slice(..hits_copy_size)
+                .get_mapped_range();
+            let words = parse_u32_vec_le(&mapped);
+            drop(mapped);
+            self.hits_readback.unmap();
+            words
+        };
+
+        if counters_words.len() < 2 {
+            return Err(format!(
+                "Unexpected raw vanity counters size: {} words",
+                counters_words.len()
+            ));
+        }
+        if hit_words.len() != config.max_hits as usize {
+            return Err(format!(
+                "Unexpected raw vanity hit buffer size: {} words (expected {})",
+                hit_words.len(),
+                config.max_hits
+            ));
+        }
+
+        let attempts = counters_words[0] as u64;
+        let hit_count = counters_words[1] as u64;
+        if attempts > config.candidate_count as u64 {
+            return Err(format!(
+                "GPU raw vanity attempts {} exceeded candidate count {}",
+                attempts, config.candidate_count
+            ));
+        }
+
+        let stored_count = hit_count.min(config.max_hits as u64) as usize;
+        let mut stored_hit_indices = Vec::with_capacity(stored_count);
+        for idx in hit_words.iter().take(stored_count) {
+            if *idx >= config.candidate_count {
+                return Err(format!(
+                    "GPU raw vanity returned out-of-range hit index {} (candidate_count={})",
+                    idx, config.candidate_count
+                ));
+            }
+            stored_hit_indices.push(*idx);
+        }
+
+        Ok(GpuRawVanityBatchResult {
+            candidate_count: config.candidate_count,
+            attempts,
+            hit_count,
+            stop_flag_triggered: stop_words.first().copied().unwrap_or_default() != 0,
+            stored_hit_indices,
+            elapsed: start.elapsed(),
+        })
+    }
 }
