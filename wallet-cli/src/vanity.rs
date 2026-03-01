@@ -695,8 +695,15 @@ fn run_vanity_search_raw(
             ends_with,
         ),
     };
+    // Address-head filtering is only safe for suffix-only searches.
+    // For prefix vanity, constraining high address bits can bias or exclude leading Base58 chars.
+    let cpu_address_filter_bits = if starts_with.is_some() {
+        0
+    } else {
+        RAW_CPU_ADDRESS_FILTER_BITS
+    };
     let cpu_address_filter = RawFastFilter {
-        bits: RAW_CPU_ADDRESS_FILTER_BITS,
+        bits: cpu_address_filter_bits,
         value: raw_filter_value_from_context(
             b"lofswap-raw-cpu-address-filter-v1",
             &base_seed,
