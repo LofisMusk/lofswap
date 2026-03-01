@@ -169,13 +169,20 @@ pub(crate) fn parse_vanity_args(args: &[&str]) -> Result<CreateWalletOptions, St
                 if parsed.starts_with.is_some() {
                     return Err("Duplicate startswith argument".to_string());
                 }
-                if !valid_vanity_pattern(value) {
+                // Vanity matching is done on the payload after the fixed "LFS" address prefix.
+                // Treat user-provided startswith=LFS... as startswith=... to avoid useless work.
+                let normalized = value.strip_prefix("LFS").unwrap_or(value);
+                if !normalized.is_empty() && !valid_vanity_pattern(normalized) {
                     return Err(format!(
                         "Invalid vanity pattern '{}'. Use Base58 chars only.",
-                        value
+                        normalized
                     ));
                 }
-                parsed.starts_with = Some(value.to_string());
+                parsed.starts_with = if normalized.is_empty() {
+                    None
+                } else {
+                    Some(normalized.to_string())
+                };
                 i += 2;
             }
             "endswith" => {

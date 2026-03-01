@@ -1904,6 +1904,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_vanity_args_strips_lfs_from_startswith() {
+        let parsed = parse_vanity_args(&["startswith", "LFSabc"]).unwrap();
+        assert_eq!(parsed.starts_with.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn parse_vanity_args_treats_startswith_lfs_as_no_filter() {
+        let parsed = parse_vanity_args(&["startswith", "LFS"]).unwrap();
+        assert_eq!(parsed.starts_with, None);
+    }
+
+    #[test]
     fn parse_vanity_args_supports_gpu_and_worker_count() {
         let parsed = parse_vanity_args(&["startswith", "abc", "gpu", "8"]).unwrap();
         assert_eq!(parsed.starts_with.as_deref(), Some("abc"));
