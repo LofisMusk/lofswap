@@ -191,17 +191,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     );
     state = sha256_compress(state, &w);
 
-    var pass = true;
+    var filter_ok = true;
     let filter_bits = min(filter_bits_raw, 32u);
     if (filter_bits > 0u) {
         var mask = 0xffffffffu;
         if (filter_bits < 32u) {
             mask = 0xffffffffu << (32u - filter_bits);
         }
-        pass = (state[0] & mask) == (filter_value & mask);
+        filter_ok = (state[0] & mask) == (filter_value & mask);
     }
 
-    if (!pass) {
+    if (!filter_ok) {
         return;
     }
 
