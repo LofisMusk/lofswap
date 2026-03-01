@@ -46,7 +46,6 @@ const OFFLINE_GRACE: Duration = Duration::from_secs(10);
 const MIN_BROADCAST_PEERS: usize = 2;
 const WHOAMI_TIMEOUT: Duration = Duration::from_millis(800);
 const DEFAULT_TX_FEE: u64 = 1;
-const DEFAULT_VANITY_MAX_ATTEMPTS: u64 = 500_000_000;
 
 // ---------- Default wallet ----------
 const LEGACY_WALLET: &str = ".default_wallet";
@@ -151,14 +150,6 @@ fn default_address() -> Option<String> {
         let pk = PublicKey::from_secret_key(&Secp256k1::new(), &sk);
         pubkey_to_address(&pk.to_string())
     })
-}
-
-fn vanity_max_attempts() -> u64 {
-    env::var("LOFSWAP_VANITY_MAX_ATTEMPTS")
-        .ok()
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .filter(|v| *v > 0)
-        .unwrap_or(DEFAULT_VANITY_MAX_ATTEMPTS)
 }
 
 // ---------- Peers ----------
@@ -865,7 +856,7 @@ fn create_wallet(
     vanity_source: VanitySource,
     generate_mnemonic_after_hit: bool,
 ) {
-    let tries_limit = vanity_max_attempts();
+    let tries_limit = u64::MAX;
     let mnemonic_pwd = mnemonic_passphrase();
     let vanity_enabled = starts_with.is_some() || ends_with.is_some();
     if vanity_enabled {
@@ -880,13 +871,12 @@ fn create_wallet(
             vanity_source,
         };
         println!(
-            "Generating vanity wallet (startswith={:?}, endswith={:?}, mode={}, source={}, workers={}, max_attempts={})",
+            "Generating vanity wallet (startswith={:?}, endswith={:?}, mode={}, source={}, workers={}, max_attempts=unbounded)",
             request.starts_with.as_deref(),
             request.ends_with.as_deref(),
             backend.mode_label(),
             request.vanity_source.as_str(),
-            request.cpu_workers,
-            tries_limit
+            request.cpu_workers
         );
         backend.print_preflight();
 
@@ -932,10 +922,7 @@ fn create_wallet(
                 return;
             }
             Ok(None) => {
-                println!(
-                    "Vanity pattern not found in {} attempts. Try shorter prefix/suffix or increase LOFSWAP_VANITY_MAX_ATTEMPTS.",
-                    tries_limit
-                );
+                println!("Vanity search exited without finding a match.");
                 return;
             }
             Err(e) => {

@@ -16,8 +16,6 @@ The wallet runs as an interactive REPL.
   Optional BIP39 passphrase used with mnemonic recovery/derivation.
 - `LOFSWAP_ALLOW_PRIVATE_KEY_EXPORT`
   Must equal `YES_I_UNDERSTAND` to allow `export-priv`.
-- `LOFSWAP_VANITY_MAX_ATTEMPTS`
-  Max attempts for vanity address generation.
 - `WALLET_LOCAL_PORT`
   Local node port hint (default `6000`).
 - `WALLET_LOCAL_NODE`
