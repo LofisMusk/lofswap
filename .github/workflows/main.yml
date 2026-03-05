@@ -3,7 +3,6 @@ name: Deploy Node-CLI to Server 2
 on:
   push:
     branches: [ main ]
-    # paths: ['node-cli/**', 'blockchain-core/**']   # odkomentuj, jeśli chcesz uruchamiać tylko przy zmianach w tych folderach
 
 jobs:
   build:
