@@ -1,6 +1,6 @@
 use axum::{
     extract::State,
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
     Json, Router,
@@ -13,7 +13,7 @@ use std::{
     io::{Read, Write},
     net::{SocketAddr, TcpStream, UdpSocket},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, RwLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -22,16 +22,20 @@ struct AppState {
     data_dir: PathBuf,
     peer_timeout: Duration,
     max_peers: usize,
-    cache_ttl: Duration,
-    cache: Arc<Mutex<Cache>>,
+    refresh_interval: Duration,
     self_peer: Option<String>,
+    cache: Arc<RwLock<Cache>>,
 }
 
-#[derive(Default)]
+/// Single shared cache — written by the background refresh task,
+/// read (zero-copy Arc clone) by every handler.
+/// Using RwLock so concurrent reads never block each other.
+#[derive(Default, Clone)]
 struct Cache {
-    ts: Option<Instant>,
     chain: Vec<Value>,
-    meta: Telemetry,
+    telemetry: Telemetry,
+    peer_status: Vec<Value>, // pre-computed, includes rtt/height/status
+    ready: bool,             // false until first refresh completes
 }
 
 #[derive(Serialize, Default, Clone)]
@@ -49,6 +53,10 @@ struct Telemetry {
     height_local: usize,
 }
 
+// ──────────────────────────────────────────────
+// Env helpers
+// ──────────────────────────────────────────────
+
 fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
     env::var(key)
         .ok()
@@ -59,6 +67,10 @@ fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
 fn env_or_string(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())
 }
+
+// ──────────────────────────────────────────────
+// Filesystem helpers
+// ──────────────────────────────────────────────
 
 fn data_path(dir: &Path, name: &str) -> PathBuf {
     dir.join(name)
@@ -94,106 +106,243 @@ fn load_peers(dir: &Path, self_peer: Option<&str>) -> Vec<String> {
         Value::Array(list) => list
             .into_iter()
             .filter_map(|v| v.as_str().map(|s| s.to_string()))
-            .collect(),
+            .collect::<Vec<_>>(),
         _ => vec![],
     };
-    if let Some(self_peer) = self_peer {
-        if !self_peer.is_empty() && !peers.iter().any(|p| p == self_peer) {
-            peers.insert(0, self_peer.to_string());
+    if let Some(sp) = self_peer {
+        if !sp.is_empty() && !peers.iter().any(|p| p == sp) {
+            peers.insert(0, sp.to_string());
         }
     }
     peers
 }
 
+// ──────────────────────────────────────────────
+// TCP helpers
+// ──────────────────────────────────────────────
+
 fn tcp_request(peer: &str, payload: &str, timeout: Duration) -> Option<String> {
     let mut parts = peer.rsplitn(2, ':');
     let port = parts.next()?.parse::<u16>().ok()?;
     let host = parts.next()?;
-    let addr = format!("{}:{}", host, port);
-    let sock = addr.parse::<SocketAddr>().ok()?;
-    let mut stream = TcpStream::connect_timeout(&sock, timeout).ok()?;
+    let addr: SocketAddr = format!("{}:{}", host, port).parse().ok()?;
+    let mut stream = TcpStream::connect_timeout(&addr, timeout).ok()?;
     let _ = stream.set_read_timeout(Some(timeout));
     let _ = stream.set_write_timeout(Some(timeout));
-    if stream.write_all(payload.as_bytes()).is_err() {
-        return None;
-    }
+    stream.write_all(payload.as_bytes()).ok()?;
     let mut buf = Vec::new();
-    if stream.read_to_end(&mut buf).is_err() {
-        return None;
-    }
+    stream.read_to_end(&mut buf).ok()?;
     if buf.is_empty() {
         return None;
     }
     Some(String::from_utf8_lossy(&buf).to_string())
 }
 
-fn tcp_request_timed(peer: &str, payload: &str, timeout: Duration) -> Option<(String, Duration)> {
+fn tcp_request_timed(
+    peer: &str,
+    payload: &str,
+    timeout: Duration,
+) -> Option<(String, Duration)> {
     let mut parts = peer.rsplitn(2, ':');
     let port = parts.next()?.parse::<u16>().ok()?;
     let host = parts.next()?;
-    let addr = format!("{}:{}", host, port);
-    let sock = addr.parse::<SocketAddr>().ok()?;
+    let addr: SocketAddr = format!("{}:{}", host, port).parse().ok()?;
     let start = Instant::now();
-    let mut stream = TcpStream::connect_timeout(&sock, timeout).ok()?;
+    let mut stream = TcpStream::connect_timeout(&addr, timeout).ok()?;
     let _ = stream.set_read_timeout(Some(timeout));
     let _ = stream.set_write_timeout(Some(timeout));
-    if stream.write_all(payload.as_bytes()).is_err() {
-        return None;
-    }
+    stream.write_all(payload.as_bytes()).ok()?;
     let mut buf = Vec::new();
-    if stream.read_to_end(&mut buf).is_err() {
-        return None;
-    }
+    stream.read_to_end(&mut buf).ok()?;
     if buf.is_empty() {
         return None;
     }
     Some((String::from_utf8_lossy(&buf).to_string(), start.elapsed()))
 }
 
-fn ping_peer(peer: &str, timeout: Duration) -> bool {
-    tcp_request(peer, "/ping", timeout)
-        .map(|s| s.trim() == "pong")
-        .unwrap_or(false)
-}
-
 fn ping_peer_timed(peer: &str, timeout: Duration) -> Option<Duration> {
-    tcp_request_timed(peer, "/ping", timeout).and_then(|(s, dur)| {
-        if s.trim() == "pong" {
-            Some(dur)
-        } else {
-            None
-        }
-    })
+    tcp_request_timed(peer, "/ping", timeout)
+        .and_then(|(s, dur)| if s.trim() == "pong" { Some(dur) } else { None })
 }
 
 fn chain_from_peer(peer: &str, timeout: Duration) -> Option<Vec<Value>> {
     let resp = tcp_request(peer, "/chain", timeout)?;
-    let parsed = serde_json::from_str::<Value>(&resp).ok()?;
-    if let Value::Array(arr) = parsed {
-        return Some(arr);
+    match serde_json::from_str::<Value>(&resp).ok()? {
+        Value::Array(arr) => Some(arr),
+        _ => None,
     }
-    None
 }
+
+// ──────────────────────────────────────────────
+// Consensus logic  (runs in spawn_blocking)
+// ──────────────────────────────────────────────
 
 fn chain_hash(chain: &[Value]) -> String {
     let json = serde_json::to_string(chain).unwrap_or_default();
-    let mut hasher = Sha256::new();
-    hasher.update(json.as_bytes());
-    hex::encode(hasher.finalize())
+    let mut h = Sha256::new();
+    h.update(json.as_bytes());
+    hex::encode(h.finalize())
 }
 
-fn median(mut values: Vec<usize>) -> usize {
-    if values.is_empty() {
+fn median(mut v: Vec<usize>) -> usize {
+    if v.is_empty() {
         return 0;
     }
-    values.sort_unstable();
-    let mid = values.len() / 2;
-    if values.len() % 2 == 1 {
-        values[mid]
+    v.sort_unstable();
+    let m = v.len() / 2;
+    if v.len() % 2 == 1 { v[m] } else { (v[m - 1] + v[m]) / 2 }
+}
+
+/// Full refresh: contacts all peers, picks consensus chain.
+/// This is the **only** place that does I/O — called exclusively from the
+/// background task inside spawn_blocking.
+fn do_full_refresh(
+    data_dir: &Path,
+    self_peer: Option<&str>,
+    peer_timeout: Duration,
+    max_peers: usize,
+) -> (Vec<Value>, Telemetry, Vec<Value>) {
+    // ── local chain ──────────────────────────────────
+    let local_val = read_json_file(
+        &data_path(data_dir, "blockchain.json"),
+        Value::Array(vec![]),
+    );
+    let local_chain: Vec<Value> = match local_val {
+        Value::Array(list) => list,
+        _ => vec![],
+    };
+
+    // ── peer list ────────────────────────────────────
+    let peers_all = load_peers(data_dir, self_peer);
+    let peers: Vec<String> = peers_all.iter().take(max_peers).cloned().collect();
+
+    // ── probe peers ──────────────────────────────────
+    let mut chains: Vec<(String, Vec<Value>)> = vec![("local".into(), local_chain.clone())];
+    let mut heights: Vec<usize> = vec![local_chain.len()];
+    let mut ping_ok = 0usize;
+    let mut chain_ok = 0usize;
+    let mut peer_status_list: Vec<Value> = Vec::new();
+    let now_ts = now_ms();
+
+    for peer in &peers {
+        let mut status = "offline".to_string();
+        let mut online = false;
+        let mut rtt_ms: Option<i64> = None;
+        let mut last_seen: Option<i64> = None;
+        let mut peer_height: Option<usize> = None;
+
+        if let Some(rtt) = ping_peer_timed(peer, peer_timeout) {
+            online = true;
+            ping_ok += 1;
+            rtt_ms = Some(rtt.as_millis() as i64);
+            last_seen = Some(now_ts);
+            status = "online".to_string();
+        }
+
+        if online {
+            if let Some(peer_chain) = chain_from_peer(peer, peer_timeout) {
+                chain_ok += 1;
+                peer_height = Some(peer_chain.len());
+                heights.push(peer_chain.len());
+                chains.push((peer.clone(), peer_chain));
+            }
+        }
+
+        peer_status_list.push(serde_json::json!({
+            "peer": peer,
+            "status": status,
+            "online": online,
+            "rtt_ms": rtt_ms,
+            "last_seen": last_seen,
+            "height": peer_height,
+        }));
+    }
+
+    // ── consensus chain ───────────────────────────────
+    let consensus = if chains.is_empty() {
+        vec![]
     } else {
-        (values[mid - 1] + values[mid]) / 2
+        let max_len = chains.iter().map(|c| c.1.len()).max().unwrap_or(0);
+        let candidates: Vec<_> = chains.iter().filter(|c| c.1.len() == max_len).collect();
+        if candidates.len() == 1 {
+            candidates[0].1.clone()
+        } else {
+            let mut counts = std::collections::HashMap::<String, usize>::new();
+            for c in &candidates {
+                *counts.entry(chain_hash(&c.1)).or_insert(0) += 1;
+            }
+            let best = counts.iter().max_by_key(|(_, v)| *v).map(|(k, _)| k.clone()).unwrap_or_default();
+            candidates.iter().find(|c| chain_hash(&c.1) == best).map(|c| c.1.clone()).unwrap_or_default()
+        }
+    };
+
+    let consensus_hash = if consensus.is_empty() { None } else { Some(chain_hash(&consensus)) };
+
+    // update peer statuses with consensus info
+    let c_height = consensus.len();
+    for p in peer_status_list.iter_mut() {
+        if let Some(h) = p.get("height").and_then(|v| v.as_u64()) {
+            if c_height > 0 && (h as usize) + 1 < c_height {
+                if p.get("online").and_then(|v| v.as_bool()) == Some(true) {
+                    p["status"] = Value::String("syncing".into());
+                }
+            }
+        }
+    }
+
+    let telemetry = Telemetry {
+        peers_total: peers_all.len(),
+        peers_sampled: peers.len(),
+        ping_ok,
+        chain_ok,
+        candidates: chains.iter().filter(|c| c.1.len() == chains.iter().map(|x| x.1.len()).max().unwrap_or(0)).count(),
+        consensus_height: c_height,
+        consensus_hash,
+        height_min: heights.iter().copied().min().unwrap_or(0),
+        height_max: heights.iter().copied().max().unwrap_or(0),
+        height_median: median(heights.clone()),
+        height_local: local_chain.len(),
+    };
+
+    (consensus, telemetry, peer_status_list)
+}
+
+// ──────────────────────────────────────────────
+// Background refresh task
+// ──────────────────────────────────────────────
+
+async fn start_background_refresh(state: Arc<AppState>) {
+    loop {
+        let data_dir = state.data_dir.clone();
+        let self_peer = state.self_peer.clone();
+        let peer_timeout = state.peer_timeout;
+        let max_peers = state.max_peers;
+
+        let result = tokio::task::spawn_blocking(move || {
+            do_full_refresh(&data_dir, self_peer.as_deref(), peer_timeout, max_peers)
+        })
+        .await;
+
+        match result {
+            Ok((chain, telemetry, peer_status)) => {
+                let mut cache = state.cache.write().unwrap();
+                cache.chain = chain;
+                cache.telemetry = telemetry;
+                cache.peer_status = peer_status;
+                cache.ready = true;
+            }
+            Err(e) => {
+                eprintln!("[refresh] spawn_blocking panicked: {:?}", e);
+            }
+        }
+
+        tokio::time::sleep(state.refresh_interval).await;
     }
 }
+
+// ──────────────────────────────────────────────
+// Shared helpers
+// ──────────────────────────────────────────────
 
 fn now_ms() -> i64 {
     SystemTime::now()
@@ -202,173 +351,61 @@ fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
+fn cors_headers() -> HeaderMap {
+    let mut h = HeaderMap::new();
+    h.insert("Access-Control-Allow-Origin", HeaderValue::from_static("*"));
+    h.insert("Access-Control-Allow-Methods", HeaderValue::from_static("GET, OPTIONS"));
+    h.insert("Access-Control-Allow-Headers", HeaderValue::from_static("Content-Type"));
+    h.insert("Cache-Control", HeaderValue::from_static("no-store"));
+    h
+}
+
+fn json_response<T: Serialize>(status: StatusCode, payload: T) -> Response {
+    (status, cors_headers(), Json(payload)).into_response()
+}
+
 fn average_block_time_sec(chain: &[Value], sample: usize) -> Option<f64> {
-    let mut ts = Vec::new();
-    for block in chain.iter().rev().take(sample) {
-        if let Some(t) = block.get("timestamp").and_then(|v| v.as_i64()) {
-            ts.push(t);
-        }
-    }
+    let ts: Vec<i64> = chain
+        .iter()
+        .rev()
+        .take(sample)
+        .filter_map(|b| b.get("timestamp").and_then(|v| v.as_i64()))
+        .collect();
     if ts.len() < 2 {
         return None;
     }
-    let mut diffs = Vec::new();
-    for w in ts.windows(2) {
-        let d = (w[0] - w[1]).abs();
-        if d > 0 {
-            diffs.push(d as f64);
-        }
-    }
+    let diffs: Vec<f64> = ts.windows(2).map(|w| (w[0] - w[1]).abs() as f64).filter(|d| *d > 0.0).collect();
     if diffs.is_empty() {
         return None;
     }
-    let sum: f64 = diffs.iter().sum();
-    Some((sum / diffs.len() as f64) / 1000.0)
+    Some(diffs.iter().sum::<f64>() / diffs.len() as f64 / 1000.0)
 }
 
 fn estimate_hashrate(difficulty: i64, avg_block_time_sec: Option<f64>) -> Option<String> {
     let avg = avg_block_time_sec?;
-    if avg <= 0.0 || difficulty < 0 {
-        return None;
-    }
-    let trials = 16f64.powi(difficulty as i32);
-    let rate = trials / avg;
-    let (value, unit) = if rate >= 1e12 {
-        (rate / 1e12, "TH/s")
-    } else if rate >= 1e9 {
-        (rate / 1e9, "GH/s")
-    } else if rate >= 1e6 {
-        (rate / 1e6, "MH/s")
-    } else if rate >= 1e3 {
-        (rate / 1e3, "KH/s")
-    } else {
-        (rate, "H/s")
-    };
-    Some(format!("{:.2} {}", value, unit))
+    if avg <= 0.0 || difficulty < 0 { return None; }
+    let rate = 16f64.powi(difficulty as i32) / avg;
+    let (v, u) = if rate >= 1e12 { (rate / 1e12, "TH/s") }
+        else if rate >= 1e9 { (rate / 1e9, "GH/s") }
+        else if rate >= 1e6 { (rate / 1e6, "MH/s") }
+        else if rate >= 1e3 { (rate / 1e3, "KH/s") }
+        else { (rate, "H/s") };
+    Some(format!("{:.2} {}", v, u))
 }
 
-fn consensus_state(state: &AppState) -> (Vec<Value>, Telemetry) {
-    let now = Instant::now();
-    {
-        let cache = state.cache.lock().unwrap();
-        if let Some(ts) = cache.ts {
-            if now.duration_since(ts) < state.cache_ttl {
-                return (cache.chain.clone(), cache.meta.clone());
-            }
-        }
-    }
-
-    let local_chain_val = read_json_file(
-        &data_path(&state.data_dir, "blockchain.json"),
-        Value::Array(vec![]),
-    );
-    let local_chain = match local_chain_val {
-        Value::Array(list) => list,
-        _ => vec![],
-    };
-
-    let peers_all = load_peers(&state.data_dir, state.self_peer.as_deref());
-    let peers = peers_all
-        .iter()
-        .take(state.max_peers)
-        .cloned()
-        .collect::<Vec<_>>();
-
-    let mut chains = vec![("local".to_string(), local_chain.clone())];
-    let mut chain_ok = 0;
-    let mut ping_ok = 0;
-    let mut heights = vec![local_chain.len()];
-
-    for peer in &peers {
-        if ping_peer(peer, state.peer_timeout) {
-            ping_ok += 1;
-        }
-        if let Some(chain) = chain_from_peer(peer, state.peer_timeout) {
-            heights.push(chain.len());
-            chain_ok += 1;
-            chains.push((peer.clone(), chain));
-        }
-    }
-
-    let chosen = if chains.is_empty() {
-        vec![]
-    } else {
-        let max_len = chains.iter().map(|c| c.1.len()).max().unwrap_or(0);
-        let candidates = chains
-            .iter()
-            .filter(|c| c.1.len() == max_len)
-            .collect::<Vec<_>>();
-        if candidates.len() == 1 {
-            candidates[0].1.clone()
-        } else {
-            let mut counts = std::collections::HashMap::<String, usize>::new();
-            for c in &candidates {
-                let h = chain_hash(&c.1);
-                *counts.entry(h).or_insert(0) += 1;
-            }
-            let best_hash = counts
-                .iter()
-                .max_by_key(|(_, v)| *v)
-                .map(|(k, _)| k.clone())
-                .unwrap_or_default();
-            candidates
-                .iter()
-                .find(|c| chain_hash(&c.1) == best_hash)
-                .map(|c| c.1.clone())
-                .unwrap_or_default()
-        }
-    };
-
-    let consensus_hash = if chosen.is_empty() {
-        None
-    } else {
-        Some(chain_hash(&chosen))
-    };
-
-    let telemetry = Telemetry {
-        peers_total: peers_all.len(),
-        peers_sampled: peers.len(),
-        ping_ok,
-        chain_ok,
-        candidates: chains
-            .iter()
-            .map(|c| c.1.len())
-            .max()
-            .map(|max_len| chains.iter().filter(|c| c.1.len() == max_len).count())
-            .unwrap_or(0),
-        consensus_height: chosen.len(),
-        consensus_hash,
-        height_min: heights.iter().copied().min().unwrap_or(0),
-        height_max: heights.iter().copied().max().unwrap_or(0),
-        height_median: median(heights.clone()),
-        height_local: local_chain.len(),
-    };
-
-    let mut cache = state.cache.lock().unwrap();
-    cache.ts = Some(Instant::now());
-    cache.chain = chosen.clone();
-    cache.meta = telemetry.clone();
-
-    (chosen, telemetry)
-}
-
-fn find_tx(chain: &[Value], txid: &str) -> Option<(Value, usize, String)> {
+fn find_tx_in_chain(chain: &[Value], txid: &str) -> Option<Value> {
     for block in chain {
+        let idx = block.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        let bhash = block.get("hash").and_then(|v| v.as_str()).unwrap_or_default().to_string();
         if let Some(Value::Array(txs)) = block.get("transactions") {
             for tx in txs {
-                if tx
-                    .get("txid")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s == txid)
-                    .unwrap_or(false)
-                {
-                    let idx = block.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                    let hash = block
-                        .get("hash")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string();
-                    return Some((tx.clone(), idx, hash));
+                if tx.get("txid").and_then(|v| v.as_str()) == Some(txid) {
+                    let mut obj = tx.clone();
+                    if let Value::Object(ref mut m) = obj {
+                        m.insert("blockIndex".into(), Value::Number(idx.into()));
+                        m.insert("blockHash".into(), Value::String(bhash.clone()));
+                    }
+                    return Some(obj);
                 }
             }
         }
@@ -376,106 +413,44 @@ fn find_tx(chain: &[Value], txid: &str) -> Option<(Value, usize, String)> {
     None
 }
 
-fn confirming_nodes(block_idx: Option<usize>, peers: &[Value], local_height: usize) -> usize {
-    let idx = match block_idx {
-        Some(v) => v,
-        None => return 0,
-    };
-    let mut count = 0usize;
-    if local_height >= idx {
-        count += 1; // local node
-    }
+fn confirming_nodes_for_block(block_idx: usize, peers: &[Value], local_height: usize) -> usize {
+    let mut count = if local_height >= block_idx { 1 } else { 0 };
     for p in peers {
-        let online = p.get("online").and_then(|v| v.as_bool()).unwrap_or(false);
-        let h = p
-            .get("height")
-            .or_else(|| p.get("peer_height"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
-        if online && h >= idx {
-            count += 1;
-        }
+        if p.get("online").and_then(|v| v.as_bool()) != Some(true) { continue; }
+        let h = p.get("height").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        if h >= block_idx { count += 1; }
     }
     count
 }
 
-fn peer_status_list(state: &AppState, consensus_height: usize) -> Vec<Value> {
-    let peers = load_peers(&state.data_dir, state.self_peer.as_deref());
-    let mut list = Vec::new();
-    for peer in peers.iter().take(state.max_peers) {
-        let mut status = "offline".to_string();
-        let mut online = false;
-        let mut rtt_ms: Option<i64> = None;
-        let mut last_seen: Option<i64> = None;
-        let mut peer_height: Option<usize> = None;
-
-        if let Some(rtt) = ping_peer_timed(peer, state.peer_timeout) {
-            online = true;
-            rtt_ms = Some(rtt.as_millis() as i64);
-            last_seen = Some(now_ms());
-            status = "online".to_string();
-        }
-
-        if online {
-            if let Some(chain) = chain_from_peer(peer, state.peer_timeout) {
-                peer_height = Some(chain.len());
-                if consensus_height > 0 && chain.len() + 1 < consensus_height {
-                    status = "syncing".to_string();
-                }
-            }
-        }
-
-        list.push(serde_json::json!({
-            "peer": peer,
-            "status": status,
-            "online": online,
-            "rtt_ms": rtt_ms,
-            "last_seen": last_seen,
-            "height": peer_height
-        }));
-    }
-    list
-}
-
-fn json_response<T: Serialize>(status: StatusCode, payload: T) -> Response {
-    let mut headers = HeaderMap::new();
-    headers.insert("Access-Control-Allow-Origin", "*".parse().unwrap());
-    (status, headers, Json(payload)).into_response()
-}
-
-fn telemetry_to_map(meta: &Telemetry) -> serde_json::Map<String, Value> {
-    let mut map = serde_json::Map::new();
-    if let Ok(Value::Object(obj)) = serde_json::to_value(meta) {
-        for (k, v) in obj {
-            map.insert(k, v);
-        }
-    }
-    map
+async fn options_handler() -> Response {
+    (StatusCode::NO_CONTENT, cors_headers(), ()).into_response()
 }
 
 async fn health(State(state): State<Arc<AppState>>) -> Response {
-    let (_, meta) = tokio::task::spawn_blocking(move || consensus_state(&state))
-        .await
-        .unwrap_or_else(|_| (Vec::new(), Telemetry::default()));
-    let mut obj = telemetry_to_map(&meta);
-    obj.insert("status".to_string(), Value::String("ok".to_string()));
-    json_response(StatusCode::OK, Value::Object(obj))
+    let cache = state.cache.read().unwrap();
+    let mut obj = serde_json::to_value(&cache.telemetry)
+        .unwrap_or(Value::Object(Default::default()));
+    if let Value::Object(ref mut m) = obj {
+        m.insert("status".into(), Value::String("ok".into()));
+        m.insert("ready".into(), Value::Bool(cache.ready));
+    }
+    json_response(StatusCode::OK, obj)
+}
+
+async fn telemetry(State(state): State<Arc<AppState>>) -> Response {
+    let cache = state.cache.read().unwrap();
+    json_response(StatusCode::OK, cache.telemetry.clone())
 }
 
 async fn peers(State(state): State<Arc<AppState>>) -> Response {
-    json_response(
-        StatusCode::OK,
-        load_peers(&state.data_dir, state.self_peer.as_deref()),
-    )
+    let peers_list = load_peers(&state.data_dir, state.self_peer.as_deref());
+    json_response(StatusCode::OK, peers_list)
 }
 
 async fn peers_status(State(state): State<Arc<AppState>>) -> Response {
-    let state_clone = state.clone();
-    let (_, meta) = tokio::task::spawn_blocking(move || consensus_state(&state_clone))
-        .await
-        .unwrap_or_else(|_| (Vec::new(), Telemetry::default()));
-    let list = peer_status_list(&state, meta.consensus_height);
-    json_response(StatusCode::OK, serde_json::json!({ "list": list }))
+    let cache = state.cache.read().unwrap();
+    json_response(StatusCode::OK, serde_json::json!({ "list": cache.peer_status }))
 }
 
 async fn mempool(State(state): State<Arc<AppState>>) -> Response {
@@ -483,189 +458,101 @@ async fn mempool(State(state): State<Arc<AppState>>) -> Response {
     json_response(StatusCode::OK, read_lines_json(&path))
 }
 
-async fn chain(State(state): State<Arc<AppState>>) -> Response {
-    let (chain, _) = tokio::task::spawn_blocking(move || consensus_state(&state))
-        .await
-        .unwrap_or_else(|_| (Vec::new(), Telemetry::default()));
-    json_response(StatusCode::OK, chain)
-}
-
-async fn latest_tx(State(state): State<Arc<AppState>>) -> Response {
-    let (chain, _) = tokio::task::spawn_blocking(move || consensus_state(&state))
-        .await
-        .unwrap_or_else(|_| (Vec::new(), Telemetry::default()));
-    if let Some(Value::Object(block)) = chain.last() {
-        if let Some(Value::Array(txs)) = block.get("transactions") {
-            if let Some(last) = txs.last() {
-                return json_response(StatusCode::OK, last.clone());
-            }
-        }
-    }
-    json_response(StatusCode::OK, Value::Null)
+async fn chain_handler(State(state): State<Arc<AppState>>) -> Response {
+    let cache = state.cache.read().unwrap();
+    json_response(StatusCode::OK, cache.chain.clone())
 }
 
 async fn height(State(state): State<Arc<AppState>>) -> Response {
-    let (chain, _) = tokio::task::spawn_blocking(move || consensus_state(&state))
-        .await
-        .unwrap_or_else(|_| (Vec::new(), Telemetry::default()));
-    if let Some(Value::Object(block)) = chain.last() {
-        let tip_hash = block.get("hash").and_then(|v| v.as_str()).unwrap_or("");
-        let tip_time = block.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0);
-        return json_response(
-            StatusCode::OK,
-            serde_json::json!({
-                "height": chain.len(),
-                "tip_hash": tip_hash,
-                "tip_time": tip_time,
-            }),
-        );
+    let cache = state.cache.read().unwrap();
+    let chain = &cache.chain;
+    if let Some(last) = chain.last() {
+        let tip_hash = last.get("hash").and_then(|v| v.as_str()).unwrap_or("");
+        let tip_time = last.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0);
+        return json_response(StatusCode::OK, serde_json::json!({
+            "height": chain.len(),
+            "tip_hash": tip_hash,
+            "tip_time": tip_time,
+        }));
     }
-    json_response(
-        StatusCode::OK,
-        serde_json::json!({ "height": 0, "tip_hash": "", "tip_time": 0 }),
-    )
+    json_response(StatusCode::OK, serde_json::json!({ "height": 0, "tip_hash": "", "tip_time": 0 }))
 }
 
-async fn node_ip() -> Response {
-    let private = local_ip();
-    json_response(
-        StatusCode::OK,
-        serde_json::json!({ "public": Value::Null, "private": private }),
-    )
-}
-
-async fn address_balance(
-    State(state): State<Arc<AppState>>,
-    axum::extract::Path(addr): axum::extract::Path<String>,
-) -> Response {
-    let (chain, _) = tokio::task::spawn_blocking(move || consensus_state(&state))
-        .await
-        .unwrap_or_else(|_| (Vec::new(), Telemetry::default()));
-    let bal = calculate_balance(&addr, &chain);
-    json_response(
-        StatusCode::OK,
-        serde_json::json!({ "address": addr, "balance": bal }),
-    )
-}
-
-async fn address_txs(
-    State(state): State<Arc<AppState>>,
-    axum::extract::Path(addr): axum::extract::Path<String>,
-) -> Response {
-    let (chain, _) = tokio::task::spawn_blocking(move || consensus_state(&state))
-        .await
-        .unwrap_or_else(|_| (Vec::new(), Telemetry::default()));
-    let txs = collect_address_txs(&addr, &chain);
-    json_response(StatusCode::OK, txs)
-}
-
-async fn telemetry(State(state): State<Arc<AppState>>) -> Response {
-    let (_, meta) = tokio::task::spawn_blocking(move || consensus_state(&state))
-        .await
-        .unwrap_or_else(|_| (Vec::new(), Telemetry::default()));
-    json_response(StatusCode::OK, meta)
+async fn latest_tx(State(state): State<Arc<AppState>>) -> Response {
+    let cache = state.cache.read().unwrap();
+    let tx = cache.chain.iter().rev().find_map(|b| {
+        b.get("transactions").and_then(|v| v.as_array()).and_then(|arr| arr.last().cloned())
+    });
+    json_response(StatusCode::OK, tx.unwrap_or(Value::Null))
 }
 
 async fn block_by_hash(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(hash): axum::extract::Path<String>,
 ) -> Response {
-    let (chain, _) = tokio::task::spawn_blocking(move || consensus_state(&state))
-        .await
-        .unwrap_or_else(|_| (Vec::new(), Telemetry::default()));
-    for block in chain {
-        if let Value::Object(obj) = &block {
-            if obj.get("hash").and_then(|v| v.as_str()) == Some(hash.as_str()) {
-                return json_response(StatusCode::OK, block);
-            }
-        }
+    let cache = state.cache.read().unwrap();
+    // support lookup by hash OR by block index number
+    let block = cache.chain.iter().find(|b| {
+        b.get("hash").and_then(|v| v.as_str()) == Some(hash.as_str())
+        || b.get("index").and_then(|v| v.as_u64()).map(|i| i.to_string()) == Some(hash.clone())
+    }).cloned();
+    match block {
+        Some(b) => json_response(StatusCode::OK, b),
+        None => json_response(StatusCode::NOT_FOUND, serde_json::json!({ "error": "block not found", "hash": hash })),
     }
-    json_response(StatusCode::OK, Value::Null)
 }
 
-async fn api_network(State(state): State<Arc<AppState>>) -> Response {
-    let state_clone = state.clone();
-    let (chain, meta) = tokio::task::spawn_blocking(move || consensus_state(&state_clone))
-        .await
-        .unwrap_or_else(|_| (Vec::new(), Telemetry::default()));
+async fn api_tx(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(txid): axum::extract::Path<String>,
+) -> Response {
+    let cache = state.cache.read().unwrap();
+    let chain = &cache.chain;
+    let peers = &cache.peer_status;
+    let local_height = cache.telemetry.height_local;
+    let consensus_height = cache.telemetry.consensus_height;
 
-    let consensus_height = meta.consensus_height;
-    let difficulty = chain
-        .last()
-        .and_then(|b| b.get("difficulty"))
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
+    if let Some(tx_with_block) = find_tx_in_chain(chain, &txid) {
+        let block_idx = tx_with_block.get("blockIndex").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        let block_hash = tx_with_block.get("blockHash").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+        let conf_nodes = confirming_nodes_for_block(block_idx, peers, local_height);
+        let confirmations = consensus_height.saturating_sub(block_idx);
 
-    let avg_block_time_sec = average_block_time_sec(&chain, 20);
-    let hash_rate = estimate_hashrate(difficulty, avg_block_time_sec);
+        return json_response(StatusCode::OK, serde_json::json!({
+            "txid": txid,
+            "from": tx_with_block.get("from").cloned().unwrap_or(Value::Null),
+            "to": tx_with_block.get("to").cloned().unwrap_or(Value::Null),
+            "amount": tx_with_block.get("amount").cloned().unwrap_or(Value::Null),
+            "signature": tx_with_block.get("signature").cloned().unwrap_or(Value::Null),
+            "timestamp": tx_with_block.get("timestamp").cloned().unwrap_or(Value::Null),
+            "blockIndex": block_idx,
+            "blockHash": block_hash,
+            "confirmations": confirmations,
+            "confirmingNodes": conf_nodes,
+            "lastChecked": now_ms(),
+        }));
+    }
 
-    let peers_list = peer_status_list(&state, consensus_height);
-    let active_peers = peers_list
-        .iter()
-        .filter(|p| p.get("online").and_then(|v| v.as_bool()) == Some(true))
-        .count();
-
-    json_response(
-        StatusCode::OK,
-        serde_json::json!({
-            "chainHeight": consensus_height,
-            "activePeers": active_peers,
-            "difficulty": difficulty,
-            "hashRate": hash_rate,
-            "avgBlockTimeSec": avg_block_time_sec,
-            "lastUpdated": now_ms(),
-        }),
-    )
-}
-
-async fn api_peers(State(state): State<Arc<AppState>>) -> Response {
-    let state_clone = state.clone();
-    let (_, meta) = tokio::task::spawn_blocking(move || consensus_state(&state_clone))
-        .await
-        .unwrap_or_else(|_| (Vec::new(), Telemetry::default()));
-    let list = peer_status_list(&state, meta.consensus_height);
-    let peers = list
-        .into_iter()
-        .map(|p| {
-            serde_json::json!({
-                "address": p.get("peer").cloned().unwrap_or(Value::Null),
-                "status": p.get("status").cloned().unwrap_or(Value::String("offline".to_string())),
-                "lastSeen": p.get("last_seen").cloned().unwrap_or(Value::Null),
-                "rttMs": p.get("rtt_ms").cloned().unwrap_or(Value::Null),
-                "height": p.get("height").cloned().unwrap_or(Value::Null)
-            })
-        })
-        .collect::<Vec<_>>();
-    json_response(StatusCode::OK, serde_json::json!({ "peers": peers }))
+    json_response(StatusCode::NOT_FOUND, serde_json::json!({ "error": "tx not found", "txid": txid }))
 }
 
 async fn api_tx_recent(State(state): State<Arc<AppState>>) -> Response {
-    let state_clone = state.clone();
-    let (chain, meta) = tokio::task::spawn_blocking(move || consensus_state(&state_clone))
-        .await
-        .unwrap_or_else(|_| (Vec::new(), Telemetry::default()));
-    let peers = peer_status_list(&state, meta.consensus_height);
+    let cache = state.cache.read().unwrap();
+    let chain = &cache.chain;
+    let peers = &cache.peer_status;
+    let local_height = cache.telemetry.height_local;
+    let consensus_height = cache.telemetry.consensus_height;
 
-    // take txs from last ~20 blocks
     let mut list: Vec<Value> = Vec::new();
     for block in chain.iter().rev().take(20) {
         let idx = block.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-        let bhash = block
-            .get("hash")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
+        let bhash = block.get("hash").and_then(|v| v.as_str()).unwrap_or_default().to_string();
         if let Some(Value::Array(txs)) = block.get("transactions") {
             for tx in txs {
-                let txid = tx
-                    .get("txid")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let conf_nodes = confirming_nodes(Some(idx), &peers, meta.height_local);
-                let confirmations = meta.consensus_height.saturating_sub(idx);
+                let conf_nodes = confirming_nodes_for_block(idx, peers, local_height);
+                let confirmations = consensus_height.saturating_sub(idx);
                 list.push(serde_json::json!({
-                    "txid": txid,
+                    "txid": tx.get("txid").cloned().unwrap_or(Value::Null),
                     "from": tx.get("from").cloned().unwrap_or(Value::Null),
                     "to": tx.get("to").cloned().unwrap_or(Value::Null),
                     "amount": tx.get("amount").cloned().unwrap_or(Value::Null),
@@ -675,232 +562,271 @@ async fn api_tx_recent(State(state): State<Arc<AppState>>) -> Response {
                     "blockHash": bhash,
                     "confirmations": confirmations,
                     "confirmingNodes": conf_nodes,
-                    "lastChecked": now_ms(),
                 }));
             }
         }
     }
 
-    list.sort_by_key(|v| v.get("timestamp").and_then(|t| t.as_i64()).unwrap_or(0));
-    list.reverse();
+    // newest first
+    list.sort_by(|a, b| {
+        let ta = a.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0);
+        let tb = b.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0);
+        tb.cmp(&ta)
+    });
 
     json_response(StatusCode::OK, serde_json::json!({ "transactions": list }))
 }
 
-async fn api_tx(
-    State(state): State<Arc<AppState>>,
-    axum::extract::Path(txid): axum::extract::Path<String>,
-) -> Response {
-    let state_clone = state.clone();
-    let (chain, meta) = tokio::task::spawn_blocking(move || consensus_state(&state_clone))
-        .await
-        .unwrap_or_else(|_| (Vec::new(), Telemetry::default()));
-    let peers = peer_status_list(&state, meta.consensus_height);
+async fn api_network(State(state): State<Arc<AppState>>) -> Response {
+    let cache = state.cache.read().unwrap();
+    let chain = &cache.chain;
+    let tele = &cache.telemetry;
 
-    if let Some((tx, idx, hash)) = find_tx(&chain, &txid) {
-        let conf_nodes = confirming_nodes(Some(idx), &peers, meta.height_local);
-        let confirmations = meta.consensus_height.saturating_sub(idx);
-        return json_response(
-            StatusCode::OK,
-            serde_json::json!({
-                "txid": txid,
-                "from": tx.get("from").cloned().unwrap_or(Value::Null),
-                "to": tx.get("to").cloned().unwrap_or(Value::Null),
-                "amount": tx.get("amount").cloned().unwrap_or(Value::Null),
-                "signature": tx.get("signature").cloned().unwrap_or(Value::Null),
-                "timestamp": tx.get("timestamp").cloned().unwrap_or(Value::Null),
-                "blockIndex": idx,
-                "blockHash": hash,
-                "confirmations": confirmations,
-                "confirmingNodes": conf_nodes,
-                "lastChecked": now_ms(),
-            }),
-        );
-    }
+    let difficulty = chain.last()
+        .and_then(|b| b.get("difficulty"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let avg_block_time = average_block_time_sec(chain, 20);
+    let hash_rate = estimate_hashrate(difficulty, avg_block_time);
+    let total_txs: usize = chain.iter()
+        .filter_map(|b| b.get("transactions").and_then(|v| v.as_array()))
+        .map(|arr| arr.len())
+        .sum();
+    let active_peers = cache.peer_status.iter()
+        .filter(|p| p.get("online").and_then(|v| v.as_bool()) == Some(true))
+        .count();
 
-    json_response(
-        StatusCode::NOT_FOUND,
-        serde_json::json!({ "error": "tx not found", "txid": txid }),
-    )
+    json_response(StatusCode::OK, serde_json::json!({
+        "chainHeight": tele.consensus_height,
+        "activePeers": active_peers,
+        "totalPeers": tele.peers_total,
+        "difficulty": difficulty,
+        "hashRate": hash_rate,
+        "avgBlockTimeSec": avg_block_time,
+        "totalTransactions": total_txs,
+        "lastUpdated": now_ms(),
+    }))
+}
+
+async fn api_peers(State(state): State<Arc<AppState>>) -> Response {
+    let cache = state.cache.read().unwrap();
+    let peers = cache.peer_status.iter().map(|p| {
+        serde_json::json!({
+            "address": p.get("peer").cloned().unwrap_or(Value::Null),
+            "status": p.get("status").cloned().unwrap_or(Value::String("offline".into())),
+            "lastSeen": p.get("last_seen").cloned().unwrap_or(Value::Null),
+            "rttMs": p.get("rtt_ms").cloned().unwrap_or(Value::Null),
+            "height": p.get("height").cloned().unwrap_or(Value::Null),
+            "online": p.get("online").cloned().unwrap_or(Value::Bool(false)),
+        })
+    }).collect::<Vec<_>>();
+    json_response(StatusCode::OK, serde_json::json!({ "peers": peers }))
 }
 
 async fn peer_detail(
     State(state): State<Arc<AppState>>,
-    axum::extract::Path(peer): axum::extract::Path<String>,
+    axum::extract::Path(peer_addr): axum::extract::Path<String>,
 ) -> Response {
-    let state_clone = state.clone();
-    let (chain, meta) = tokio::task::spawn_blocking(move || consensus_state(&state_clone))
-        .await
-        .unwrap_or_else(|_| (Vec::new(), Telemetry::default()));
+    let (chain, tele, cached_status) = {
+        let cache = state.cache.read().unwrap();
+        let status = cache.peer_status.iter().find(|p| {
+            p.get("peer").and_then(|v| v.as_str()) == Some(peer_addr.as_str())
+        }).cloned();
+        (cache.chain.clone(), cache.telemetry.clone(), status)
+    };
 
-    let consensus_height = meta.consensus_height;
     let mut blocks_mined = 0usize;
+    let mut mined_blocks: Vec<Value> = Vec::new();
     let mut last_block = Value::Null;
     let mut first_ts: Option<i64> = None;
     let mut last_ts: Option<i64> = None;
-    let now = now_ms();
-    let mut mined_blocks = Vec::new();
 
     for block in &chain {
-        if let Some(miner) = block.get("miner").and_then(|v| v.as_str()) {
-            if miner == peer {
-                blocks_mined += 1;
-                let idx = block.get("index").and_then(|v| v.as_i64()).unwrap_or(0);
-                let ts = block.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0);
-                if first_ts.is_none() || ts < first_ts.unwrap_or(ts) {
-                    first_ts = Some(ts);
-                }
-                if last_ts.is_none() || ts > last_ts.unwrap_or(ts) {
-                    last_ts = Some(ts);
-                    last_block = block.clone();
-                }
-                mined_blocks.push(serde_json::json!({
-                    "index": idx,
-                    "hash": block.get("hash").cloned().unwrap_or(Value::Null),
-                    "timestamp": ts
-                }));
-            }
+        if block.get("miner").and_then(|v| v.as_str()) == Some(peer_addr.as_str()) {
+            blocks_mined += 1;
+            let idx = block.get("index").and_then(|v| v.as_i64()).unwrap_or(0);
+            let ts = block.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0);
+            first_ts = Some(first_ts.map_or(ts, |f| f.min(ts)));
+            last_ts = Some(last_ts.map_or(ts, |l| l.max(ts)));
+            if last_ts == Some(ts) { last_block = block.clone(); }
+            mined_blocks.push(serde_json::json!({
+                "index": idx,
+                "hash": block.get("hash").cloned().unwrap_or(Value::Null),
+                "timestamp": ts,
+            }));
         }
     }
 
-    let mut status = "offline".to_string();
-    let mut rtt_ms: Option<i64> = None;
-    let mut last_seen: Option<i64> = None;
-    let mut peer_height: Option<usize> = None;
-    let mut online = false;
+    let now = now_ms();
+    // use cached status (no extra I/O)
+    let (status, online, rtt_ms, last_seen, peer_height) = if let Some(p) = cached_status {
+        (
+            p.get("status").and_then(|v| v.as_str()).unwrap_or("offline").to_string(),
+            p.get("online").and_then(|v| v.as_bool()).unwrap_or(false),
+            p.get("rtt_ms").cloned().unwrap_or(Value::Null),
+            p.get("last_seen").cloned().unwrap_or(Value::Null),
+            p.get("height").cloned().unwrap_or(Value::Null),
+        )
+    } else {
+        ("offline".into(), false, Value::Null, Value::Null, Value::Null)
+    };
 
-    if let Some(rtt) = ping_peer_timed(&peer, state.peer_timeout) {
-        online = true;
-        rtt_ms = Some(rtt.as_millis() as i64);
-        last_seen = Some(now_ms());
-        status = "online".to_string();
-    }
-    if online {
-        if let Some(chain) = chain_from_peer(&peer, state.peer_timeout) {
-            peer_height = Some(chain.len());
-            if consensus_height > 0 && chain.len() + 1 < consensus_height {
-                status = "syncing".to_string();
-            }
-        }
-    }
-
-    json_response(
-        StatusCode::OK,
-        serde_json::json!({
-            "peer": peer,
-            "status": status,
-            "online": online,
-            "rtt_ms": rtt_ms,
-            "last_seen": last_seen,
-            "peer_height": peer_height,
-            "consensus_height": consensus_height,
-            "blocks_mined": blocks_mined,
-            "first_mined_ts": first_ts,
-            "last_mined_ts": last_ts,
-            "uptime_sec": first_ts.map(|ts| (now - ts).max(0) / 1000),
-            "last_block": last_block,
-            "mined_blocks": mined_blocks
-        }),
-    )
+    json_response(StatusCode::OK, serde_json::json!({
+        "peer": peer_addr,
+        "status": status,
+        "online": online,
+        "rtt_ms": rtt_ms,
+        "last_seen": last_seen,
+        "peer_height": peer_height,
+        "consensus_height": tele.consensus_height,
+        "blocks_mined": blocks_mined,
+        "first_mined_ts": first_ts,
+        "last_mined_ts": last_ts,
+        "uptime_sec": first_ts.map(|ts| (now - ts).max(0) / 1000),
+        "last_block": last_block,
+        "mined_blocks": mined_blocks,
+    }))
 }
-fn calculate_balance(addr: &str, chain: &[Value]) -> i64 {
+
+async fn address_balance(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(addr): axum::extract::Path<String>,
+) -> Response {
+    let cache = state.cache.read().unwrap();
     let mut bal = 0i64;
-    for block in chain {
-        let txs = block.get("transactions");
-        if let Some(Value::Array(list)) = txs {
-            for tx in list {
+    for block in &cache.chain {
+        if let Some(Value::Array(txs)) = block.get("transactions") {
+            for tx in txs {
                 if let Some(obj) = tx.as_object() {
-                    if obj.get("from").and_then(|v| v.as_str()) == Some(addr) {
-                        if let Some(amount) = obj.get("amount").and_then(|v| v.as_i64()) {
-                            bal -= amount;
-                        }
-                    }
-                    if obj.get("to").and_then(|v| v.as_str()) == Some(addr) {
-                        if let Some(amount) = obj.get("amount").and_then(|v| v.as_i64()) {
-                            bal += amount;
-                        }
-                    }
+                    let amount = obj.get("amount").and_then(|v| v.as_i64()).unwrap_or(0);
+                    if obj.get("from").and_then(|v| v.as_str()) == Some(addr.as_str()) { bal -= amount; }
+                    if obj.get("to").and_then(|v| v.as_str()) == Some(addr.as_str()) { bal += amount; }
                 }
             }
         }
     }
-    bal
+    json_response(StatusCode::OK, serde_json::json!({ "address": addr, "balance": bal }))
 }
 
-fn collect_address_txs(addr: &str, chain: &[Value]) -> Vec<Value> {
-    let mut out = Vec::new();
-    for block in chain {
-        let txs = block.get("transactions");
-        if let Some(Value::Array(list)) = txs {
-            for tx in list {
-                if let Some(obj) = tx.as_object() {
-                    let from = obj.get("from").and_then(|v| v.as_str());
-                    let to = obj.get("to").and_then(|v| v.as_str());
-                    if from == Some(addr) || to == Some(addr) {
-                        out.push(tx.clone());
-                    }
-                }
-            }
-        }
-    }
-    out
+async fn address_txs(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(addr): axum::extract::Path<String>,
+) -> Response {
+    let cache = state.cache.read().unwrap();
+    let addr = addr.as_str();
+    let txs: Vec<Value> = cache
+        .chain
+        .iter()
+        .flat_map(|block| {
+            block
+                .get("transactions")
+                .and_then(|v| v.as_array())
+                .into_iter()
+                .flatten()
+        })
+        .filter(|tx| {
+            tx.get("from").and_then(|v| v.as_str()) == Some(addr)
+                || tx.get("to").and_then(|v| v.as_str()) == Some(addr)
+        })
+        .cloned()
+        .collect();
+    json_response(StatusCode::OK, txs)
 }
 
-fn local_ip() -> Value {
-    if let Ok(sock) = UdpSocket::bind("0.0.0.0:0") {
+async fn node_ip() -> Response {
+    let ip = if let Ok(sock) = UdpSocket::bind("0.0.0.0:0") {
         if sock.connect("8.8.8.8:80").is_ok() {
-            if let Ok(addr) = sock.local_addr() {
-                return Value::String(addr.ip().to_string());
-            }
-        }
-    }
-    Value::Null
+            sock.local_addr().ok().map(|a| Value::String(a.ip().to_string())).unwrap_or(Value::Null)
+        } else { Value::Null }
+    } else { Value::Null };
+    json_response(StatusCode::OK, serde_json::json!({ "public": Value::Null, "private": ip }))
 }
+
+// ──────────────────────────────────────────────
+// Main
+// ──────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() {
     let data_dir = env_or_string("DATA_DIR", "data");
-    let bind = env_or_string("EXPLORER_API_BIND", "127.0.0.1");
+    let bind = env_or_string("EXPLORER_API_BIND", "0.0.0.0");
     let port = env_or("EXPLORER_API_PORT", 7000u16);
+    // How long to wait for a single peer TCP operation
     let peer_timeout = Duration::from_secs_f32(env_or("PEER_TIMEOUT", 2.0f32));
+    // How many peers to probe per refresh cycle
     let max_peers = env_or("MAX_PEERS", 8usize);
-    let cache_ttl = Duration::from_secs_f32(env_or("CONSENSUS_TTL", 5.0f32));
+    // How often the background task refreshes the cache (seconds)
+    // Default 10s — you can set it lower (e.g. 5) for more freshness
+    // at the cost of more TCP connections per minute.
+    let refresh_interval = Duration::from_secs_f32(env_or("REFRESH_INTERVAL", 10.0f32));
 
     let state = Arc::new(AppState {
         data_dir: PathBuf::from(data_dir),
         peer_timeout,
         max_peers,
-        cache_ttl,
-        cache: Arc::new(Mutex::new(Cache::default())),
-        self_peer: env::var("EXPLORER_SELF_PEER")
-            .ok()
-            .filter(|v| !v.trim().is_empty()),
+        refresh_interval,
+        self_peer: env::var("EXPLORER_SELF_PEER").ok().filter(|v| !v.trim().is_empty()),
+        cache: Arc::new(RwLock::new(Cache::default())),
     });
 
+    // ── kick off background refresh immediately ──
+    {
+        // do first refresh synchronously before we start serving,
+        // so the very first HTTP request never hits an empty cache.
+        let data_dir = state.data_dir.clone();
+        let sp = state.self_peer.clone();
+        let pt = state.peer_timeout;
+        let mp = state.max_peers;
+        println!("Explorer API: initial cache fill (connecting to peers)...");
+        let (chain, telemetry, peer_status) = tokio::task::spawn_blocking(move || {
+            do_full_refresh(&data_dir, sp.as_deref(), pt, mp)
+        })
+        .await
+        .unwrap_or_default();
+        {
+            let mut cache = state.cache.write().unwrap();
+            cache.chain = chain;
+            cache.telemetry = telemetry;
+            cache.peer_status = peer_status;
+            cache.ready = true;
+        }
+        println!("Explorer API: initial cache fill complete.");
+    }
+
+    // ── start periodic background refresh ───────
+    tokio::spawn(start_background_refresh(state.clone()));
+
+    // ── build router ────────────────────────────
     let app = Router::new()
-        .route("/health", get(health))
-        .route("/telemetry", get(telemetry))
-        .route("/peers", get(peers))
-        .route("/peers/status", get(peers_status))
-        .route("/peer/:peer", get(peer_detail))
-        .route("/api/peer/:peer", get(peer_detail))
-        .route("/api/network", get(api_network))
-        .route("/api/peers", get(api_peers))
-        .route("/api/transactions/recent", get(api_tx_recent))
-        .route("/api/tx/:txid", get(api_tx))
-        .route("/chain", get(chain))
-        .route("/chain/latest-tx", get(latest_tx))
-        .route("/block/:hash", get(block_by_hash))
-        .route("/api/block/:hash", get(block_by_hash))
-        .route("/height", get(height))
-        .route("/mempool", get(mempool))
-        .route("/node/ip", get(node_ip))
-        .route("/address/:addr/balance", get(address_balance))
-        .route("/address/:addr/txs", get(address_txs))
+        // legacy / compat routes
+        .route("/health",               get(health).options(options_handler))
+        .route("/telemetry",            get(telemetry).options(options_handler))
+        .route("/peers",                get(peers).options(options_handler))
+        .route("/peers/status",         get(peers_status).options(options_handler))
+        .route("/mempool",              get(mempool).options(options_handler))
+        .route("/chain",                get(chain_handler).options(options_handler))
+        .route("/chain/latest-tx",      get(latest_tx).options(options_handler))
+        .route("/height",               get(height).options(options_handler))
+        .route("/block/:hash",          get(block_by_hash).options(options_handler))
+        .route("/node/ip",              get(node_ip).options(options_handler))
+        // api/v1 routes (used by new explorer)
+        .route("/api/block/:hash",      get(block_by_hash).options(options_handler))
+        .route("/api/tx/:txid",         get(api_tx).options(options_handler))
+        .route("/api/transactions/recent", get(api_tx_recent).options(options_handler))
+        .route("/api/peers",            get(api_peers).options(options_handler))
+        .route("/api/peer/:peer",       get(peer_detail).options(options_handler))
+        .route("/peer/:peer",           get(peer_detail).options(options_handler))
+        .route("/api/network",          get(api_network).options(options_handler))
+        // address endpoints
+        .route("/address/:addr/balance", get(address_balance).options(options_handler))
+        .route("/address/:addr/txs",     get(address_txs).options(options_handler))
         .with_state(state);
 
     let addr: SocketAddr = format!("{}:{}", bind, port).parse().unwrap();
-    println!("Explorer API listening on {}", addr);
+    println!("Explorer API listening on http://{}", addr);
+    println!("  PEER_TIMEOUT={}s  MAX_PEERS={}  REFRESH_INTERVAL={}s",
+        peer_timeout.as_secs_f32(), max_peers, refresh_interval.as_secs_f32());
+
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }
