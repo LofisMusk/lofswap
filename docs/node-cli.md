@@ -18,8 +18,8 @@ Release binary:
   Skip UPnP port mapping.
 - `--no-peer-exchange`
   Skip bootstrap peer exchange and public IP discovery.
-- `--miner`
-  Currently parsed; reserved behavior.
+- `--miner <LFS_ADDRESS>` (or `--miner=LFS_ADDRESS`)
+  Enable auto-mining to the provided reward address (one block attempt every ~60s).
 - `--fullnode`
   Currently parsed; reserved behavior.
 
@@ -38,7 +38,7 @@ Release binary:
 
 When running, node CLI supports:
 
-- `mine`
+- `mine <LFS_ADDRESS>`
 - `sync`
 - `print-chain`
 - `list-peers`
@@ -54,15 +54,15 @@ When running, node CLI supports:
 
 ## Mining Behavior
 
-- Auto-miner loop runs every ~10s.
-- A block is mined only if there are valid mempool transactions.
-- If mempool has no valid transactions: `No valid transactions to mine`.
+- Auto-miner loop runs every ~60s only when started with `--miner <LFS_ADDRESS>`.
+- Manual mining requires explicit reward address: `mine <LFS_ADDRESS>`.
+- Mining works even with empty mempool (coinbase-only block).
 - Coinbase amount = `block_subsidy(height) + fees_sum`.
+- Target minimum block interval: `60s`.
 
 Subsidy parameters:
 
-- Initial subsidy: `1000`
-- Halving interval: `100_000` blocks
+- Block subsidy: `10`
 
 ## P2P Request Paths
 

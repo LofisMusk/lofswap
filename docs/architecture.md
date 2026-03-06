@@ -35,13 +35,13 @@
 - PoW difficulty target: leading zeroes (`DEFAULT_DIFFICULTY_ZEROS` in `blockchain-core`).
 - Block validation checks:
   - index and previous hash linkage
-  - monotonic/median-time-based timestamp rules
+  - minimum 60s block interval + median-time-based timestamp rules
   - hash and difficulty validity
   - coinbase at tx index 0
   - per-tx validity and state transitions
+- Fork tie-break (equal work/height): lower block timestamp wins (then hash as deterministic fallback).
 - Subsidy schedule (node implementation):
-  - initial block subsidy: `1000`
-  - halving interval: every `100_000` blocks
+  - block subsidy: `10`
 
 ## Mempool Model (Node)
 

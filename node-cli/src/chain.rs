@@ -19,9 +19,8 @@ use crate::{
     storage::{data_path, read_data_file, remove_data_file, write_data_file},
 };
 
-const INITIAL_SUBSIDY: u64 = 1000;
-const HALVING_INTERVAL: u64 = 100_000;
 const MAX_FUTURE_DRIFT_SECS: i64 = 2 * 60 * 60;
+pub const TARGET_BLOCK_TIME_SECS: i64 = 60;
 const MIN_TX_FEE: u64 = 1;
 const CHAIN_SNAPSHOT_FILE: &str = "blockchain.json";
 const CHAIN_DB_DIR: &str = "chain_db";
@@ -47,13 +46,8 @@ struct StateSnapshot {
     balances: HashMap<String, i128>,
 }
 
-pub fn block_subsidy(height: u64) -> u64 {
-    let halvings = height / HALVING_INTERVAL;
-    if halvings >= 63 {
-        0
-    } else {
-        INITIAL_SUBSIDY >> halvings
-    }
+pub fn block_subsidy(_height: u64) -> u64 {
+    10
 }
 
 fn is_coinbase_tx(tx: &Transaction) -> bool {
@@ -136,7 +130,7 @@ fn same_tx(a: &Transaction, b: &Transaction) -> bool {
     a.signature == b.signature || (!a.txid.is_empty() && !b.txid.is_empty() && a.txid == b.txid)
 }
 
-fn is_valid_lfs_address(addr: &str) -> bool {
+pub fn is_valid_lfs_address(addr: &str) -> bool {
     if !addr.starts_with("LFS") {
         return false;
     }
@@ -165,7 +159,7 @@ fn validate_tx_common(tx: &Transaction) -> Result<(), NodeError> {
     if tx.to.is_empty() {
         return Err(NodeError::ValidationError("Missing recipient".to_string()));
     }
-    // Coinbase output can use miner identifier if reward address is not configured yet.
+    // Recipient syntax is enforced for transfers; coinbase policy is validated at block level.
     if !tx.from.is_empty() && !is_valid_recipient(&tx.to) {
         return Err(NodeError::ValidationError(
             "Invalid recipient address".to_string(),
@@ -411,6 +405,13 @@ pub fn validate_block(
             return Err(NodeError::ValidationError(
                 "Block timestamp regressed".to_string(),
             ));
+        }
+        let min_allowed = prev.timestamp.saturating_add(TARGET_BLOCK_TIME_SECS);
+        if block.timestamp < min_allowed {
+            return Err(NodeError::ValidationError(format!(
+                "Block timestamp below target interval (min {}s)",
+                TARGET_BLOCK_TIME_SECS
+            )));
         }
         let mtp = median_time_past(chain, 11);
         if block.timestamp < mtp {

@@ -21,7 +21,7 @@ const SELF_PEER_NOTE: &str = "Note: if peers.json contains this node's own addre
 pub async fn run_cli(blockchain: Arc<Mutex<Vec<Block>>>, peers: Arc<Mutex<Vec<String>>>) {
     let interactive = io::stdin().is_terminal();
     println!(
-        "Commands: mine | sync | print-chain | list-peers | add-peer | remove-peer | remove-offline-peers | clear-chain | print-mempool | get-publicip | print-my-addr | debug-peers | exit"
+        "Commands: mine <LFS_ADDRESS> | sync | print-chain | list-peers | add-peer | remove-peer | remove-offline-peers | clear-chain | print-mempool | get-publicip | print-my-addr | debug-peers | exit"
     );
 
     if interactive {
@@ -86,7 +86,7 @@ async fn handle_command(
             }
         }
         "debug-peers" => debug_peers(peers).await,
-        "mine" => mine_block(blockchain).await,
+        "mine" => println!("Usage: mine <LFS_ADDRESS>"),
         "sync" => sync_chain(blockchain, peers, false, true).await,
         "print-chain" => print_chain(blockchain).await,
         "list-peers" => list_peers(peers).await,
@@ -95,11 +95,21 @@ async fn handle_command(
         "print-mempool" => print_mempool(),
         "get-publicip" => get_public_ip().await,
         "exit" => return false,
+        line if line.starts_with("mine ") => mine_command(line, blockchain).await,
         line if line.starts_with("add-peer ") => add_peer_command(line, peers).await,
         line if line.starts_with("remove-peer ") => remove_peer_command(line, peers).await,
         _ => println!("Unknown command"),
     }
     true
+}
+
+async fn mine_command(line: &str, blockchain: &Arc<Mutex<Vec<Block>>>) {
+    let parts: Vec<&str> = line.trim().split_whitespace().collect();
+    if parts.len() != 2 {
+        println!("Usage: mine <LFS_ADDRESS>");
+        return;
+    }
+    mine_block(blockchain, Some(parts[1])).await;
 }
 
 async fn print_chain(blockchain: &Arc<Mutex<Vec<Block>>>) {

@@ -9,23 +9,78 @@ use tokio::{
 };
 
 use crate::{
-    chain::{block_subsidy, load_valid_transactions, prune_mempool, save_chain},
+    chain::{
+        TARGET_BLOCK_TIME_SECS, block_subsidy, is_valid_lfs_address, load_valid_transactions,
+        prune_mempool, save_chain, validate_block,
+    },
     mempool::mempool_len,
     p2p::{broadcast_to_known_nodes, get_my_address},
     wallet::wallet_load_default,
 };
 
-pub async fn mine_block(blockchain: &Arc<Mutex<Vec<Block>>>) {
-    let (transactions, prev_hash, target_index) = {
+fn now_unix_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+fn resolve_reward_address(explicit: Option<&str>) -> Option<String> {
+    if let Some(addr) = explicit.map(str::trim) {
+        if is_valid_lfs_address(addr) {
+            return Some(addr.to_string());
+        }
+        println!("[mining] invalid reward address: {}", addr);
+        return None;
+    }
+
+    if let Some(addr) = std::env::var("MINER_REWARD_ADDRESS")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        if is_valid_lfs_address(&addr) {
+            return Some(addr);
+        }
+        println!("[mining] MINER_REWARD_ADDRESS is invalid, ignoring");
+    }
+
+    wallet_load_default().map(|sk| {
+        let pk = PublicKey::from_secret_key(&Secp256k1::new(), &sk);
+        pubkey_to_address(&pk.to_string())
+    })
+}
+
+pub async fn mine_block(blockchain: &Arc<Mutex<Vec<Block>>>, explicit_reward_addr: Option<&str>) {
+    let Some(miner_reward_addr) = resolve_reward_address(explicit_reward_addr) else {
+        if explicit_reward_addr.is_some() {
+            println!("Usage: mine <LFS_ADDRESS>");
+        } else {
+            println!(
+                "[mining] reward address not configured (set MINER_REWARD_ADDRESS or create local wallet)"
+            );
+        }
+        return;
+    };
+
+    let (transactions, prev_hash, target_index, min_next_block_time) = {
         let chain = blockchain.lock().await;
         let txs = load_valid_transactions(&chain);
         let prev_hash = chain.last().map(|b| b.hash.clone()).unwrap_or_default();
         let target_index = chain.len() as u64;
-        (txs, prev_hash, target_index)
+        let min_next_block_time = chain
+            .last()
+            .map(|b| b.timestamp.saturating_add(TARGET_BLOCK_TIME_SECS))
+            .unwrap_or(0);
+        (txs, prev_hash, target_index, min_next_block_time)
     };
 
-    if transactions.is_empty() {
-        println!("No valid transactions to mine");
+    let now = now_unix_secs();
+    if now < min_next_block_time {
+        println!(
+            "[mining] too early for next block: wait {}s",
+            min_next_block_time.saturating_sub(now)
+        );
         return;
     }
 
@@ -35,26 +90,17 @@ pub async fn mine_block(blockchain: &Arc<Mutex<Vec<Block>>>) {
         transactions.len(),
         pending_len
     );
+    if transactions.is_empty() {
+        println!("[mining] mining coinbase-only block");
+    }
 
     let miner = get_my_address()
         .await
         .unwrap_or_else(|| "unknown".to_string());
-    let miner_reward_addr = std::env::var("MINER_REWARD_ADDRESS")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| {
-            wallet_load_default().map(|sk| {
-                let pk = PublicKey::from_secret_key(&Secp256k1::new(), &sk);
-                pubkey_to_address(&pk.to_string())
-            })
-        })
-        .unwrap_or_else(|| miner.clone());
+
     let mut block_txs = Vec::with_capacity(transactions.len() + 1);
     let fees_sum: u64 = transactions.iter().map(|tx| tx.fee).sum();
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
+    let ts = now_unix_secs();
     let mut coinbase = Transaction {
         version: 3,
         chain_id: CHAIN_ID.to_string(),
@@ -88,6 +134,10 @@ pub async fn mine_block(blockchain: &Arc<Mutex<Vec<Block>>>) {
             );
             return;
         }
+        if let Err(e) = validate_block(&block, chain.last(), &chain) {
+            println!("[mining] solved block failed local validation: {}", e);
+            return;
+        }
 
         chain.push(block.clone());
 
@@ -106,17 +156,10 @@ pub async fn mine_block(blockchain: &Arc<Mutex<Vec<Block>>>) {
     sleep(Duration::from_secs(1)).await;
 }
 
-pub async fn miner_loop(blockchain: Arc<Mutex<Vec<Block>>>) {
+pub async fn miner_loop(blockchain: Arc<Mutex<Vec<Block>>>, reward_address: &str) {
     loop {
-        {
-            let chain = blockchain.lock().await;
-            let has_any_valid = !load_valid_transactions(&chain).is_empty();
-            drop(chain);
-            if has_any_valid {
-                mine_block(&blockchain).await;
-            }
-        }
-        // target ~1 block every 10s when transactions are present
-        sleep(Duration::from_secs(10)).await;
+        mine_block(&blockchain, Some(reward_address)).await;
+        // target ~1 block every 60s
+        sleep(Duration::from_secs(60)).await;
     }
 }

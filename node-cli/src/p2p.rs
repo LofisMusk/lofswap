@@ -25,8 +25,8 @@ use crate::{
     ACTIVE_CONNECTIONS, BOOTSTRAP_NODES, BUFFER_SIZE, LISTEN_PORT, MAX_CONNECTIONS, NODE_ID,
     NODE_PUBKEY, NODE_VERSION, OBSERVED_IP,
     chain::{
-        calculate_balance, is_tx_valid, load_peers, next_nonce_for_address, prune_mempool,
-        save_chain, save_peers, validate_block, validate_chain,
+        TARGET_BLOCK_TIME_SECS, calculate_balance, is_tx_valid, load_peers, next_nonce_for_address,
+        prune_mempool, save_chain, save_peers, validate_block, validate_chain,
     },
     errors::NodeError,
     identity::{node_id_from_pubkey_hex, pin_matches_or_insert, sign_message, verify_signature},
@@ -976,6 +976,10 @@ fn headers_tip_hash(headers: &[BlockHeader]) -> &str {
     headers.last().map(|h| h.hash.as_str()).unwrap_or("")
 }
 
+fn headers_tip_timestamp(headers: &[BlockHeader]) -> i64 {
+    headers.last().map(|h| h.timestamp).unwrap_or(i64::MAX)
+}
+
 fn prefer_headers(candidate: &[BlockHeader], current: &[BlockHeader]) -> bool {
     if candidate.is_empty() {
         return false;
@@ -987,6 +991,11 @@ fn prefer_headers(candidate: &[BlockHeader], current: &[BlockHeader]) -> bool {
     }
     if candidate.len() != current.len() {
         return candidate.len() > current.len();
+    }
+    let cand_ts = headers_tip_timestamp(candidate);
+    let curr_ts = headers_tip_timestamp(current);
+    if cand_ts != curr_ts {
+        return cand_ts < curr_ts;
     }
     let cand_tip = headers_tip_hash(candidate);
     let curr_tip = headers_tip_hash(current);
@@ -1030,8 +1039,12 @@ fn validate_headers_basic(headers: &[BlockHeader]) -> Result<(), String> {
         if curr.previous_hash != prev.hash {
             return Err(format!("previous hash mismatch at {}", curr.index));
         }
-        if curr.timestamp < prev.timestamp {
-            return Err(format!("header timestamp regressed at {}", curr.index));
+        let min_allowed = prev.timestamp.saturating_add(TARGET_BLOCK_TIME_SECS);
+        if curr.timestamp < min_allowed {
+            return Err(format!(
+                "header timestamp below target interval ({}s) at {}",
+                TARGET_BLOCK_TIME_SECS, curr.index
+            ));
         }
         if !header_pow_valid(curr) {
             return Err(format!("invalid PoW at {}", curr.index));
@@ -2099,6 +2112,12 @@ async fn handle_block(
         println!("Rejected block {}: {}", block.hash, e);
         register_infraction(remote_ip, SCORE_INVALID_BLOCK, &e.to_string());
         send_message(stream, wire, MessageKind::Error, b"invalid block").await?;
+        drop(chain);
+        let bc = blockchain.clone();
+        let peers_for_sync = peers.clone();
+        tokio::spawn(async move {
+            sync_chain(&bc, &peers_for_sync, false, false).await;
+        });
         return Ok(());
     }
 
@@ -2620,6 +2639,10 @@ fn chain_tip_hash(chain: &[Block]) -> &str {
     chain.last().map(|b| b.hash.as_str()).unwrap_or("")
 }
 
+fn chain_tip_timestamp(chain: &[Block]) -> i64 {
+    chain.last().map(|b| b.timestamp).unwrap_or(i64::MAX)
+}
+
 fn prefer_chain(candidate: &[Block], current: &[Block]) -> bool {
     if candidate.is_empty() {
         return false;
@@ -2632,12 +2655,17 @@ fn prefer_chain(candidate: &[Block], current: &[Block]) -> bool {
     if candidate.len() != current.len() {
         return candidate.len() > current.len();
     }
+    let cand_ts = chain_tip_timestamp(candidate);
+    let curr_ts = chain_tip_timestamp(current);
+    if cand_ts != curr_ts {
+        return cand_ts < curr_ts;
+    }
     let cand_tip = chain_tip_hash(candidate);
     let curr_tip = chain_tip_hash(current);
     if curr_tip.is_empty() {
         return !cand_tip.is_empty();
     }
-    // Deterministic equal-work tie-break: lower tip hash wins.
+    // Deterministic equal-work tie-break after timestamp: lower tip hash wins.
     cand_tip < curr_tip
 }
 

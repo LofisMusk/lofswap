@@ -34,7 +34,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let mut no_upnp = false;
     let mut no_peer_exchange = false;
-    let mut _miner_mode = false;
+    let mut miner_reward_arg: Option<String> = None;
     let mut _fullnode_mode = false;
 
     let mut i = 1;
@@ -42,11 +42,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match args[i].as_str() {
             "--no-upnp" => no_upnp = true,
             "--no-peer-exchange" => no_peer_exchange = true,
-            "--miner" => _miner_mode = true,
+            "--miner" => {
+                let Some(addr) = args.get(i + 1) else {
+                    return Err("Usage: node-cli --miner <LFS_ADDRESS>".into());
+                };
+                if addr.starts_with("--") {
+                    return Err("Usage: node-cli --miner <LFS_ADDRESS>".into());
+                }
+                miner_reward_arg = Some(addr.clone());
+                i += 1;
+            }
+            flag if flag.starts_with("--miner=") => {
+                let addr = flag.trim_start_matches("--miner=").trim().to_string();
+                if addr.is_empty() {
+                    return Err("Usage: node-cli --miner <LFS_ADDRESS>".into());
+                }
+                miner_reward_arg = Some(addr);
+            }
             "--fullnode" => _fullnode_mode = true,
             _ => {}
         }
         i += 1;
+    }
+
+    if let Some(addr) = miner_reward_arg.as_ref() {
+        if !chain::is_valid_lfs_address(addr) {
+            return Err(format!("Invalid miner reward address: {}", addr).into());
+        }
     }
 
     println!("[STARTUP] Starting blockchain node...");
@@ -94,11 +116,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         p2p::start_tcp_server(blockchain.clone(), peers.clone()).await?;
 
         tokio::spawn(p2p::maintenance_loop(blockchain.clone(), peers.clone()));
-        println!("[STARTUP] Auto-miner enabled (10s cadence when mempool has txs)...");
-        let bc = blockchain.clone();
-        tokio::spawn(async move {
-            miner::miner_loop(bc).await;
-        });
+        if let Some(miner_reward_addr) = miner_reward_arg.clone() {
+            println!(
+                "[STARTUP] Auto-miner enabled (60s cadence) reward={}",
+                miner_reward_addr
+            );
+            let bc = blockchain.clone();
+            tokio::spawn(async move {
+                miner::miner_loop(bc, &miner_reward_addr).await;
+            });
+        } else {
+            println!("[STARTUP] Auto-miner disabled (use `mine <LFS_ADDRESS>` or `--miner <LFS_ADDRESS>`)");
+        }
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -183,6 +212,60 @@ mod tests {
         };
         tx.txid = tx.compute_txid();
         tx
+    }
+
+    #[test]
+    fn block_subsidy_is_fixed_at_ten() {
+        assert_eq!(chain::block_subsidy(0), 10);
+        assert_eq!(chain::block_subsidy(100_000), 10);
+        assert_eq!(chain::block_subsidy(u64::MAX), 10);
+    }
+
+    #[test]
+    fn block_interval_min_60_seconds_is_enforced() {
+        let _guard = test_guard();
+        tmp_clean_files();
+
+        let sk = SecretKey::from_byte_array([9u8; 32]).unwrap();
+        let pk = PublicKey::from_secret_key(&Secp256k1::new(), &sk).to_string();
+        let to_addr = pubkey_to_address(&pk);
+        let genesis = Block::genesis();
+        let chain = vec![genesis.clone()];
+
+        let mut coinbase = Transaction {
+            version: 3,
+            chain_id: CHAIN_ID.to_string(),
+            kind: TxKind::Coinbase,
+            timestamp: genesis.timestamp + 30,
+            from: String::new(),
+            to: to_addr,
+            amount: chain::block_subsidy(1),
+            fee: 0,
+            signature: "coinbase:1:miner".into(),
+            pubkey: String::new(),
+            nonce: 0,
+            txid: String::new(),
+        };
+        coinbase.txid = coinbase.compute_txid();
+
+        let mut block = Block {
+            version: 1,
+            index: 1,
+            timestamp: genesis.timestamp + 30,
+            transactions: vec![coinbase],
+            previous_hash: genesis.hash.clone(),
+            nonce: 0,
+            hash: String::new(),
+            miner: "miner".into(),
+            difficulty: 4,
+        };
+        block.mine(block.difficulty as usize);
+
+        let err = chain::validate_block(&block, Some(&genesis), &chain).unwrap_err();
+        match err {
+            NodeError::ValidationError(msg) => assert!(msg.contains("target interval")),
+            _ => panic!("unexpected error"),
+        }
     }
 
     #[test]
