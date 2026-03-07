@@ -10,7 +10,7 @@ use tokio::{
 
 use crate::{
     chain::{
-        TARGET_BLOCK_TIME_SECS, block_subsidy, is_valid_lfs_address, load_valid_transactions,
+        block_subsidy, expected_next_difficulty, is_valid_lfs_address, load_valid_transactions,
         prune_mempool, save_chain, validate_block,
     },
     mempool::mempool_len,
@@ -63,32 +63,21 @@ pub async fn mine_block(blockchain: &Arc<Mutex<Vec<Block>>>, explicit_reward_add
         return;
     };
 
-    let (transactions, prev_hash, target_index, min_next_block_time) = {
+    let (transactions, prev_hash, target_index, target_difficulty) = {
         let chain = blockchain.lock().await;
         let txs = load_valid_transactions(&chain);
         let prev_hash = chain.last().map(|b| b.hash.clone()).unwrap_or_default();
         let target_index = chain.len() as u64;
-        let min_next_block_time = chain
-            .last()
-            .map(|b| b.timestamp.saturating_add(TARGET_BLOCK_TIME_SECS))
-            .unwrap_or(0);
-        (txs, prev_hash, target_index, min_next_block_time)
+        let target_difficulty = expected_next_difficulty(&chain);
+        (txs, prev_hash, target_index, target_difficulty)
     };
-
-    let now = now_unix_secs();
-    if now < min_next_block_time {
-        println!(
-            "[mining] too early for next block: wait {}s",
-            min_next_block_time.saturating_sub(now)
-        );
-        return;
-    }
 
     let pending_len = mempool_len();
     println!(
-        "[mining] starting... txs_in_block={} mempool_pending={}",
+        "[mining] starting... txs_in_block={} mempool_pending={} target_difficulty={}",
         transactions.len(),
-        pending_len
+        pending_len,
+        target_difficulty
     );
     if transactions.is_empty() {
         println!("[mining] mining coinbase-only block");
@@ -119,7 +108,18 @@ pub async fn mine_block(blockchain: &Arc<Mutex<Vec<Block>>>, explicit_reward_add
     block_txs.push(coinbase);
     block_txs.extend(transactions);
 
-    let block = Block::new(target_index, block_txs, prev_hash.clone(), miner);
+    let mut block = Block {
+        version: 1,
+        index: target_index,
+        timestamp: now_unix_secs(),
+        transactions: block_txs,
+        previous_hash: prev_hash.clone(),
+        nonce: 0,
+        hash: String::new(),
+        miner,
+        difficulty: target_difficulty,
+    };
+    block.mine(target_difficulty as usize);
 
     println!("[mining] solved block: {}", block.hash);
     {
@@ -159,7 +159,7 @@ pub async fn mine_block(blockchain: &Arc<Mutex<Vec<Block>>>, explicit_reward_add
 pub async fn miner_loop(blockchain: Arc<Mutex<Vec<Block>>>, reward_address: &str) {
     loop {
         mine_block(&blockchain, Some(reward_address)).await;
-        // target ~1 block every 60s
-        sleep(Duration::from_secs(60)).await;
+        // No fixed block timer; difficulty targets ~60s average block time.
+        sleep(Duration::from_secs(1)).await;
     }
 }

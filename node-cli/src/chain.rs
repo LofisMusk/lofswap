@@ -21,6 +21,9 @@ use crate::{
 
 const MAX_FUTURE_DRIFT_SECS: i64 = 2 * 60 * 60;
 pub const TARGET_BLOCK_TIME_SECS: i64 = 60;
+pub const DIFFICULTY_ADJUSTMENT_INTERVAL: u64 = 10;
+pub const DIFFICULTY_MIN_ZEROS: u32 = 1;
+pub const DIFFICULTY_MAX_ZEROS: u32 = 32;
 const MIN_TX_FEE: u64 = 1;
 const CHAIN_SNAPSHOT_FILE: &str = "blockchain.json";
 const CHAIN_DB_DIR: &str = "chain_db";
@@ -48,6 +51,47 @@ struct StateSnapshot {
 
 pub fn block_subsidy(_height: u64) -> u64 {
     10
+}
+
+pub fn expected_next_difficulty(chain: &[Block]) -> u32 {
+    if chain.is_empty() {
+        return DEFAULT_DIFFICULTY_ZEROS
+            .max(DIFFICULTY_MIN_ZEROS)
+            .min(DIFFICULTY_MAX_ZEROS);
+    }
+
+    let prev = match chain.last() {
+        Some(b) => b,
+        None => return DEFAULT_DIFFICULTY_ZEROS,
+    };
+    let next_index = prev.index.saturating_add(1);
+    let mut next = prev
+        .difficulty
+        .max(DIFFICULTY_MIN_ZEROS)
+        .min(DIFFICULTY_MAX_ZEROS);
+
+    if DIFFICULTY_ADJUSTMENT_INTERVAL == 0 || next_index % DIFFICULTY_ADJUSTMENT_INTERVAL != 0 {
+        return next;
+    }
+
+    let window = DIFFICULTY_ADJUSTMENT_INTERVAL as usize;
+    if chain.len() < window {
+        return next;
+    }
+    let start = &chain[chain.len() - window];
+    let end = prev;
+    let actual_span = end.timestamp.saturating_sub(start.timestamp).max(1);
+    let target_span = TARGET_BLOCK_TIME_SECS
+        .saturating_mul(DIFFICULTY_ADJUSTMENT_INTERVAL as i64)
+        .max(1);
+
+    if actual_span < target_span / 2 {
+        next = next.saturating_add(1);
+    } else if actual_span > target_span.saturating_mul(2) {
+        next = next.saturating_sub(1);
+    }
+
+    next.max(DIFFICULTY_MIN_ZEROS).min(DIFFICULTY_MAX_ZEROS)
 }
 
 fn is_coinbase_tx(tx: &Transaction) -> bool {
@@ -406,13 +450,6 @@ pub fn validate_block(
                 "Block timestamp regressed".to_string(),
             ));
         }
-        let min_allowed = prev.timestamp.saturating_add(TARGET_BLOCK_TIME_SECS);
-        if block.timestamp < min_allowed {
-            return Err(NodeError::ValidationError(format!(
-                "Block timestamp below target interval (min {}s)",
-                TARGET_BLOCK_TIME_SECS
-            )));
-        }
         let mtp = median_time_past(chain, 11);
         if block.timestamp < mtp {
             return Err(NodeError::ValidationError(
@@ -436,9 +473,21 @@ pub fn validate_block(
     }
 
     let difficulty = block.difficulty as usize;
-    let min_diff = DEFAULT_DIFFICULTY_ZEROS as usize;
-    if difficulty == 0 || difficulty < min_diff {
+    if difficulty == 0 {
         return Err(NodeError::ValidationError("Invalid difficulty".to_string()));
+    }
+    let expected_difficulty = if block.index == 0 {
+        DEFAULT_DIFFICULTY_ZEROS
+            .max(DIFFICULTY_MIN_ZEROS)
+            .min(DIFFICULTY_MAX_ZEROS)
+    } else {
+        expected_next_difficulty(chain)
+    };
+    if block.difficulty != expected_difficulty {
+        return Err(NodeError::ValidationError(format!(
+            "Invalid difficulty (expected {}, got {})",
+            expected_difficulty, block.difficulty
+        )));
     }
     if !block.hash.starts_with(&"0".repeat(difficulty)) {
         return Err(NodeError::ValidationError(

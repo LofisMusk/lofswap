@@ -35,7 +35,8 @@
 - PoW difficulty target: leading zeroes (`DEFAULT_DIFFICULTY_ZEROS` in `blockchain-core`).
 - Block validation checks:
   - index and previous hash linkage
-  - minimum 60s block interval + median-time-based timestamp rules
+  - timestamp monotonicity + median-time-based rules
+  - expected per-height difficulty (retarget toward ~60s average block time)
   - hash and difficulty validity
   - coinbase at tx index 0
   - per-tx validity and state transitions

@@ -25,6 +25,7 @@ use crate::{
     ACTIVE_CONNECTIONS, BOOTSTRAP_NODES, BUFFER_SIZE, LISTEN_PORT, MAX_CONNECTIONS, NODE_ID,
     NODE_PUBKEY, NODE_VERSION, OBSERVED_IP,
     chain::{
+        DIFFICULTY_ADJUSTMENT_INTERVAL, DIFFICULTY_MAX_ZEROS, DIFFICULTY_MIN_ZEROS,
         TARGET_BLOCK_TIME_SECS, calculate_balance, is_tx_valid, load_peers, next_nonce_for_address,
         prune_mempool, save_chain, save_peers, validate_block, validate_chain,
     },
@@ -1006,11 +1007,52 @@ fn prefer_headers(candidate: &[BlockHeader], current: &[BlockHeader]) -> bool {
 }
 
 fn header_pow_valid(header: &BlockHeader) -> bool {
-    let difficulty = header.difficulty as usize;
-    if difficulty == 0 || difficulty < DEFAULT_DIFFICULTY_ZEROS as usize {
+    let difficulty = header.difficulty;
+    if difficulty == 0 || difficulty < DIFFICULTY_MIN_ZEROS || difficulty > DIFFICULTY_MAX_ZEROS {
         return false;
     }
-    header.hash.starts_with(&"0".repeat(difficulty))
+    header.hash.starts_with(&"0".repeat(difficulty as usize))
+}
+
+fn expected_next_header_difficulty(headers: &[BlockHeader]) -> u32 {
+    if headers.is_empty() {
+        return DEFAULT_DIFFICULTY_ZEROS
+            .max(DIFFICULTY_MIN_ZEROS)
+            .min(DIFFICULTY_MAX_ZEROS);
+    }
+
+    let prev = match headers.last() {
+        Some(h) => h,
+        None => return DEFAULT_DIFFICULTY_ZEROS,
+    };
+    let next_index = prev.index.saturating_add(1);
+    let mut next = prev
+        .difficulty
+        .max(DIFFICULTY_MIN_ZEROS)
+        .min(DIFFICULTY_MAX_ZEROS);
+
+    if DIFFICULTY_ADJUSTMENT_INTERVAL == 0 || next_index % DIFFICULTY_ADJUSTMENT_INTERVAL != 0 {
+        return next;
+    }
+
+    let window = DIFFICULTY_ADJUSTMENT_INTERVAL as usize;
+    if headers.len() < window {
+        return next;
+    }
+    let start = &headers[headers.len() - window];
+    let end = prev;
+    let actual_span = end.timestamp.saturating_sub(start.timestamp).max(1);
+    let target_span = TARGET_BLOCK_TIME_SECS
+        .saturating_mul(DIFFICULTY_ADJUSTMENT_INTERVAL as i64)
+        .max(1);
+
+    if actual_span < target_span / 2 {
+        next = next.saturating_add(1);
+    } else if actual_span > target_span.saturating_mul(2) {
+        next = next.saturating_sub(1);
+    }
+
+    next.max(DIFFICULTY_MIN_ZEROS).min(DIFFICULTY_MAX_ZEROS)
 }
 
 fn validate_headers_basic(headers: &[BlockHeader]) -> Result<(), String> {
@@ -1026,6 +1068,15 @@ fn validate_headers_basic(headers: &[BlockHeader]) -> Result<(), String> {
     if first.hash != genesis.hash {
         return Err("genesis hash mismatch".to_string());
     }
+    let expected_genesis_diff = DEFAULT_DIFFICULTY_ZEROS
+        .max(DIFFICULTY_MIN_ZEROS)
+        .min(DIFFICULTY_MAX_ZEROS);
+    if first.difficulty != expected_genesis_diff {
+        return Err(format!(
+            "invalid genesis difficulty (expected {}, got {})",
+            expected_genesis_diff, first.difficulty
+        ));
+    }
     if !header_pow_valid(first) {
         return Err("invalid genesis PoW".to_string());
     }
@@ -1039,11 +1090,14 @@ fn validate_headers_basic(headers: &[BlockHeader]) -> Result<(), String> {
         if curr.previous_hash != prev.hash {
             return Err(format!("previous hash mismatch at {}", curr.index));
         }
-        let min_allowed = prev.timestamp.saturating_add(TARGET_BLOCK_TIME_SECS);
-        if curr.timestamp < min_allowed {
+        if curr.timestamp < prev.timestamp {
+            return Err(format!("header timestamp regressed at {}", curr.index));
+        }
+        let expected_difficulty = expected_next_header_difficulty(&headers[..i]);
+        if curr.difficulty != expected_difficulty {
             return Err(format!(
-                "header timestamp below target interval ({}s) at {}",
-                TARGET_BLOCK_TIME_SECS, curr.index
+                "invalid difficulty at {} (expected {}, got {})",
+                curr.index, expected_difficulty, curr.difficulty
             ));
         }
         if !header_pow_valid(curr) {

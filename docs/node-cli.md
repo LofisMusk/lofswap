@@ -19,7 +19,7 @@ Release binary:
 - `--no-peer-exchange`
   Skip bootstrap peer exchange and public IP discovery.
 - `--miner <LFS_ADDRESS>` (or `--miner=LFS_ADDRESS`)
-  Enable auto-mining to the provided reward address (one block attempt every ~60s).
+  Enable continuous auto-mining to the provided reward address.
 - `--fullnode`
   Currently parsed; reserved behavior.
 
@@ -54,11 +54,11 @@ When running, node CLI supports:
 
 ## Mining Behavior
 
-- Auto-miner loop runs every ~60s only when started with `--miner <LFS_ADDRESS>`.
+- Auto-miner runs continuously only when started with `--miner <LFS_ADDRESS>`.
 - Manual mining requires explicit reward address: `mine <LFS_ADDRESS>`.
 - Mining works even with empty mempool (coinbase-only block).
 - Coinbase amount = `block_subsidy(height) + fees_sum`.
-- Target minimum block interval: `60s`.
+- Difficulty retarget keeps average block time near `60s` (no fixed 60s sleep timer).
 
 Subsidy parameters:
 

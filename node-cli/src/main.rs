@@ -118,7 +118,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::spawn(p2p::maintenance_loop(blockchain.clone(), peers.clone()));
         if let Some(miner_reward_addr) = miner_reward_arg.clone() {
             println!(
-                "[STARTUP] Auto-miner enabled (60s cadence) reward={}",
+                "[STARTUP] Auto-miner enabled (dynamic difficulty target=60s) reward={}",
                 miner_reward_addr
             );
             let bc = blockchain.clone();
@@ -222,50 +222,28 @@ mod tests {
     }
 
     #[test]
-    fn block_interval_min_60_seconds_is_enforced() {
-        let _guard = test_guard();
-        tmp_clean_files();
-
-        let sk = SecretKey::from_byte_array([9u8; 32]).unwrap();
-        let pk = PublicKey::from_secret_key(&Secp256k1::new(), &sk).to_string();
-        let to_addr = pubkey_to_address(&pk);
+    fn difficulty_retarget_increases_when_blocks_are_too_fast() {
         let genesis = Block::genesis();
-        let chain = vec![genesis.clone()];
+        let mut chain = vec![genesis.clone()];
 
-        let mut coinbase = Transaction {
-            version: 3,
-            chain_id: CHAIN_ID.to_string(),
-            kind: TxKind::Coinbase,
-            timestamp: genesis.timestamp + 30,
-            from: String::new(),
-            to: to_addr,
-            amount: chain::block_subsidy(1),
-            fee: 0,
-            signature: "coinbase:1:miner".into(),
-            pubkey: String::new(),
-            nonce: 0,
-            txid: String::new(),
-        };
-        coinbase.txid = coinbase.compute_txid();
-
-        let mut block = Block {
-            version: 1,
-            index: 1,
-            timestamp: genesis.timestamp + 30,
-            transactions: vec![coinbase],
-            previous_hash: genesis.hash.clone(),
-            nonce: 0,
-            hash: String::new(),
-            miner: "miner".into(),
-            difficulty: 4,
-        };
-        block.mine(block.difficulty as usize);
-
-        let err = chain::validate_block(&block, Some(&genesis), &chain).unwrap_err();
-        match err {
-            NodeError::ValidationError(msg) => assert!(msg.contains("target interval")),
-            _ => panic!("unexpected error"),
+        for i in 1..10u64 {
+            chain.push(Block {
+                version: 1,
+                index: i,
+                timestamp: genesis.timestamp + i as i64,
+                transactions: Vec::new(),
+                previous_hash: chain
+                    .last()
+                    .map(|b| b.hash.clone())
+                    .unwrap_or_else(|| "0".to_string()),
+                nonce: 0,
+                hash: format!("0000dummy{}", i),
+                miner: "test".into(),
+                difficulty: 4,
+            });
         }
+
+        assert_eq!(chain::expected_next_difficulty(&chain), 5);
     }
 
     #[test]
