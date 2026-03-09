@@ -523,7 +523,7 @@ async fn api_tx(
             "from": tx_with_block.get("from").cloned().unwrap_or(Value::Null),
             "to": tx_with_block.get("to").cloned().unwrap_or(Value::Null),
             "amount": tx_with_block.get("amount").cloned().unwrap_or(Value::Null),
-            "signature": tx_with_block.get("signature").cloned().unwrap_or(Value::Null),
+            // C-01: raw ECDSA signature NIE jest zwracana przez API (private key recovery risk)
             "timestamp": tx_with_block.get("timestamp").cloned().unwrap_or(Value::Null),
             "blockIndex": block_idx,
             "blockHash": block_hash,
@@ -556,7 +556,7 @@ async fn api_tx_recent(State(state): State<Arc<AppState>>) -> Response {
                     "from": tx.get("from").cloned().unwrap_or(Value::Null),
                     "to": tx.get("to").cloned().unwrap_or(Value::Null),
                     "amount": tx.get("amount").cloned().unwrap_or(Value::Null),
-                    "signature": tx.get("signature").cloned().unwrap_or(Value::Null),
+                    // C-01: signature pominięta (private key recovery risk)
                     "timestamp": tx.get("timestamp").cloned().unwrap_or(Value::Null),
                     "blockIndex": idx,
                     "blockHash": bhash,
@@ -743,6 +743,131 @@ async fn node_ip() -> Response {
 }
 
 // ──────────────────────────────────────────────
+// L2 handlers
+// ──────────────────────────────────────────────
+// L2 handlers
+// ──────────────────────────────────────────────
+
+/// Odczytuje plik JSON z data_dir lub zwraca pusty array/null
+fn read_l2_file(dir: &Path, name: &str) -> Value {
+    let path = dir.join(name);
+    match fs::read_to_string(&path) {
+        Ok(s) => serde_json::from_str(&s).unwrap_or(Value::Array(vec![])),
+        Err(_) => Value::Array(vec![]),
+    }
+}
+
+/// GET /api/l2/status — skrócone podsumowanie L2
+async fn api_l2_status(State(state): State<Arc<AppState>>) -> Response {
+    let commitments = read_l2_file(&state.data_dir, "l2_commitments.json");
+    let bridge = read_l2_file(&state.data_dir, "l2_bridge_outputs.json");
+    let bonds = read_l2_file(&state.data_dir, "l2_sequencer_bonds.json");
+    let l2_state = read_l2_file(&state.data_dir, "l2_state.json");
+
+    let total_commitments = commitments.as_array().map(|a| a.len()).unwrap_or(0);
+    let soft_count = commitments.as_array().map(|a| {
+        a.iter().filter(|c| c.get("state").and_then(|v| v.as_str()) == Some("soft")).count()
+    }).unwrap_or(0);
+    let hard_count = commitments.as_array().map(|a| {
+        a.iter().filter(|c| c.get("state").and_then(|v| v.as_str()) == Some("hard")).count()
+    }).unwrap_or(0);
+    let fraud_count = commitments.as_array().map(|a| {
+        a.iter().filter(|c| c.get("state").and_then(|v| v.as_str()) == Some("fraud")).count()
+    }).unwrap_or(0);
+    let locked_outputs = bridge.as_array().map(|a| {
+        a.iter().filter(|o| o.get("state").and_then(|v| v.as_str()) == Some("locked")).count()
+    }).unwrap_or(0);
+    let unlocked_outputs = bridge.as_array().map(|a| {
+        a.iter().filter(|o| o.get("state").and_then(|v| v.as_str()) == Some("unlocked")).count()
+    }).unwrap_or(0);
+
+    json_response(StatusCode::OK, serde_json::json!({
+        "l2_height": l2_state.get("height").cloned().unwrap_or(Value::Number(0.into())),
+        "state_root": l2_state.get("state_root").cloned().unwrap_or(Value::Null),
+        "tip_hash": l2_state.get("tip_hash").cloned().unwrap_or(Value::Null),
+        "commitments": {
+            "total": total_commitments,
+            "soft": soft_count,
+            "hard": hard_count,
+            "fraud": fraud_count,
+        },
+        "bridge_outputs": {
+            "locked": locked_outputs,
+            "unlocked": unlocked_outputs,
+        },
+        "sequencer_bonds": bonds.as_array().map(|a| a.len()).unwrap_or(0),
+        "last_updated": now_ms(),
+    }))
+}
+
+/// GET /api/l2/commitments — lista wszystkich commitmentów
+async fn api_l2_commitments(State(state): State<Arc<AppState>>) -> Response {
+    let commitments = read_l2_file(&state.data_dir, "l2_commitments.json");
+    json_response(StatusCode::OK, serde_json::json!({ "commitments": commitments }))
+}
+
+/// GET /api/l2/commitment/:height
+async fn api_l2_commitment_by_height(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(height): axum::extract::Path<u64>,
+) -> Response {
+    let commitments = read_l2_file(&state.data_dir, "l2_commitments.json");
+    let found = commitments.as_array().and_then(|arr| {
+        arr.iter().find(|c| {
+            c.get("l2_height").and_then(|v| v.as_u64()) == Some(height)
+        }).cloned()
+    });
+    match found {
+        Some(c) => json_response(StatusCode::OK, c),
+        None => json_response(StatusCode::NOT_FOUND, serde_json::json!({
+            "error": "commitment not found", "l2_height": height
+        })),
+    }
+}
+
+/// GET /api/l2/bridge — wszystkie bridge outputs
+async fn api_l2_bridge(State(state): State<Arc<AppState>>) -> Response {
+    let outputs = read_l2_file(&state.data_dir, "l2_bridge_outputs.json");
+    json_response(StatusCode::OK, serde_json::json!({ "outputs": outputs }))
+}
+
+/// GET /api/l2/bridge/:id — konkretny bridge output
+async fn api_l2_bridge_output(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    let outputs = read_l2_file(&state.data_dir, "l2_bridge_outputs.json");
+    let found = outputs.as_array().and_then(|arr| {
+        arr.iter().find(|o| {
+            o.get("id").and_then(|v| v.as_str()) == Some(id.as_str())
+        }).cloned()
+    });
+    match found {
+        Some(o) => json_response(StatusCode::OK, o),
+        None => json_response(StatusCode::NOT_FOUND, serde_json::json!({
+            "error": "output not found", "id": id
+        })),
+    }
+}
+
+/// GET /api/l2/chain — lista bloków L2
+async fn api_l2_chain(State(state): State<Arc<AppState>>) -> Response {
+    let chain = read_l2_file(&state.data_dir, "l2_chain.json");
+    json_response(StatusCode::OK, serde_json::json!({ "blocks": chain }))
+}
+
+/// GET /api/l2/balances — salda kont L2
+async fn api_l2_balances(State(state): State<Arc<AppState>>) -> Response {
+    let l2_state = read_l2_file(&state.data_dir, "l2_state.json");
+    let balances = l2_state.get("balances").cloned().unwrap_or(Value::Object(Default::default()));
+    json_response(StatusCode::OK, serde_json::json!({
+        "balances": balances,
+        "height": l2_state.get("height").cloned().unwrap_or(Value::Number(0.into())),
+        "state_root": l2_state.get("state_root").cloned().unwrap_or(Value::Null),
+    }))
+}
+
+// ──────────────────────────────────────────────
 // Main
 // ──────────────────────────────────────────────
 
@@ -820,6 +945,14 @@ async fn main() {
         // address endpoints
         .route("/address/:addr/balance", get(address_balance).options(options_handler))
         .route("/address/:addr/txs",     get(address_txs).options(options_handler))
+        // ── L2 endpoints ──────────────────────────────────────────────────────
+        .route("/api/l2/status",                    get(api_l2_status).options(options_handler))
+        .route("/api/l2/commitments",               get(api_l2_commitments).options(options_handler))
+        .route("/api/l2/commitment/:height",        get(api_l2_commitment_by_height).options(options_handler))
+        .route("/api/l2/bridge",                    get(api_l2_bridge).options(options_handler))
+        .route("/api/l2/bridge/:id",                get(api_l2_bridge_output).options(options_handler))
+        .route("/api/l2/chain",                     get(api_l2_chain).options(options_handler))
+        .route("/api/l2/balances",                  get(api_l2_balances).options(options_handler))
         .with_state(state);
 
     let addr: SocketAddr = format!("{}:{}", bind, port).parse().unwrap();

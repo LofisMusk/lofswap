@@ -5,16 +5,22 @@ use once_cell::sync::Lazy;
 use rand::rand_core::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use zeroize::Zeroize;
 
-use crate::storage::{read_data_file, write_data_file};
+use crate::storage::{read_data_file, write_secret_file};
 
 const IDENTITY_KEY_FILE: &str = "node_identity_ed25519.key";
 
-#[derive(Clone)]
 pub struct NodeIdentity {
     secret_key: [u8; 32],
     pub public_key_hex: String,
     pub node_id: String,
+}
+
+impl Drop for NodeIdentity {
+    fn drop(&mut self) {
+        self.secret_key.zeroize();
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -74,7 +80,8 @@ fn load_or_create_identity() -> NodeIdentity {
     };
 
     if let Ok(serialized) = serde_json::to_string_pretty(&payload) {
-        if let Err(e) = write_data_file(IDENTITY_KEY_FILE, &serialized) {
+        // Use write_secret_file to ensure 0o600 permissions for this sensitive key.
+        if let Err(e) = write_secret_file(IDENTITY_KEY_FILE, &serialized) {
             eprintln!("[STARTUP] Failed to persist node identity key: {}", e);
         }
     }

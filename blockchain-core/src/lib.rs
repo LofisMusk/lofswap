@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub mod wallet_keystore;
+pub mod l2;
 
 // spec_v0.9 constants
 pub const SPEC_VERSION: &str = "0.9";

@@ -75,15 +75,23 @@ pub fn expected_next_difficulty(chain: &[Block]) -> u32 {
     }
 
     let window = DIFFICULTY_ADJUSTMENT_INTERVAL as usize;
-    if chain.len() < window {
+    if chain.len() < 3 {
         return next;
     }
-    let start = &chain[chain.len() - window];
-    let end = prev;
+    let end_idx = chain.len().saturating_sub(1);
+    let mut start_idx = end_idx.saturating_sub(window);
+    // Ignore ancient genesis timestamp when network starts long after genesis.
+    if start_idx == 0 && end_idx > 1 {
+        start_idx = 1;
+    }
+    if end_idx <= start_idx {
+        return next;
+    }
+    let start = &chain[start_idx];
+    let end = &chain[end_idx];
+    let intervals = (end_idx - start_idx) as i64;
     let actual_span = end.timestamp.saturating_sub(start.timestamp).max(1);
-    let target_span = TARGET_BLOCK_TIME_SECS
-        .saturating_mul(DIFFICULTY_ADJUSTMENT_INTERVAL as i64)
-        .max(1);
+    let target_span = TARGET_BLOCK_TIME_SECS.saturating_mul(intervals).max(1);
 
     if actual_span < target_span / 2 {
         next = next.saturating_add(1);

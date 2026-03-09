@@ -8,14 +8,30 @@ mod chain;
 mod cli;
 mod errors;
 mod identity;
+mod l2_anchor;
+mod l2_mempool;
 mod mempool;
 mod miner;
 mod p2p;
+mod sequencer;
 mod storage;
 mod upnp;
 mod wallet;
 
+use blockchain_core::Block;
 use storage::ensure_data_dir;
+
+/// Safety-net task: co 60s re-sprawdza finalizację niezależnie od event hooków.
+async fn l2_finalization_loop(blockchain: Arc<Mutex<Vec<Block>>>) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        let l1_index = {
+            let chain: tokio::sync::MutexGuard<Vec<Block>> = blockchain.lock().await;
+            chain.last().map(|b| b.index).unwrap_or(0)
+        };
+        l2_anchor::on_new_block(l1_index);
+    }
+}
 
 pub use errors::NodeError;
 
@@ -35,6 +51,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut no_upnp = false;
     let mut no_peer_exchange = false;
     let mut miner_reward_arg: Option<String> = None;
+    let mut sequencer_arg: Option<String> = None;
     let mut _fullnode_mode = false;
 
     let mut i = 1;
@@ -58,6 +75,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return Err("Usage: node-cli --miner <LFS_ADDRESS>".into());
                 }
                 miner_reward_arg = Some(addr);
+            }
+            "--sequencer" => {
+                let Some(addr) = args.get(i + 1) else {
+                    return Err("Usage: node-cli --sequencer <LFS_ADDRESS>".into());
+                };
+                if addr.starts_with("--") {
+                    return Err("Usage: node-cli --sequencer <LFS_ADDRESS>".into());
+                }
+                sequencer_arg = Some(addr.clone());
+                i += 1;
+            }
+            flag if flag.starts_with("--sequencer=") => {
+                let addr = flag.trim_start_matches("--sequencer=").trim().to_string();
+                if addr.is_empty() {
+                    return Err("Usage: node-cli --sequencer <LFS_ADDRESS>".into());
+                }
+                sequencer_arg = Some(addr);
             }
             "--fullnode" => _fullnode_mode = true,
             _ => {}
@@ -116,6 +150,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         p2p::start_tcp_server(blockchain.clone(), peers.clone()).await?;
 
         tokio::spawn(p2p::maintenance_loop(blockchain.clone(), peers.clone()));
+        tokio::spawn(l2_finalization_loop(blockchain.clone()));
         if let Some(miner_reward_addr) = miner_reward_arg.clone() {
             println!(
                 "[STARTUP] Auto-miner enabled (dynamic difficulty target=60s) reward={}",
@@ -127,6 +162,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
         } else {
             println!("[STARTUP] Auto-miner disabled (use `mine <LFS_ADDRESS>` or `--miner <LFS_ADDRESS>`)");
+        }
+        if let Some(seq_addr) = sequencer_arg.clone() {
+            println!("[STARTUP] L2 Sequencer enabled: addr={}", seq_addr);
+            let bc = blockchain.clone();
+            tokio::spawn(async move {
+                sequencer::sequencer_loop(bc, seq_addr).await;
+            });
+        } else {
+            println!("[STARTUP] L2 Sequencer disabled (użyj --sequencer <LFS_ADDRESS>)");
         }
 
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -238,6 +282,32 @@ mod tests {
                     .unwrap_or_else(|| "0".to_string()),
                 nonce: 0,
                 hash: format!("0000dummy{}", i),
+                miner: "test".into(),
+                difficulty: 4,
+            });
+        }
+
+        assert_eq!(chain::expected_next_difficulty(&chain), 5);
+    }
+
+    #[test]
+    fn difficulty_retarget_does_not_drop_due_to_old_genesis_timestamp() {
+        let genesis = Block::genesis();
+        let mut chain = vec![genesis];
+        let base_ts = 1_778_000_000i64;
+
+        for i in 1..10u64 {
+            chain.push(Block {
+                version: 1,
+                index: i,
+                timestamp: base_ts + (i as i64) * 10,
+                transactions: Vec::new(),
+                previous_hash: chain
+                    .last()
+                    .map(|b| b.hash.clone())
+                    .unwrap_or_else(|| "0".to_string()),
+                nonce: 0,
+                hash: format!("0000dummy_gap{}", i),
                 miner: "test".into(),
                 difficulty: 4,
             });

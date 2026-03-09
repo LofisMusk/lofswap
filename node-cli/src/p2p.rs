@@ -31,6 +31,7 @@ use crate::{
     },
     errors::NodeError,
     identity::{node_id_from_pubkey_hex, pin_matches_or_insert, sign_message, verify_signature},
+    l2_anchor::on_new_block,
     mempool::insert_transaction,
     storage::{read_data_file, write_data_file},
 };
@@ -1036,15 +1037,23 @@ fn expected_next_header_difficulty(headers: &[BlockHeader]) -> u32 {
     }
 
     let window = DIFFICULTY_ADJUSTMENT_INTERVAL as usize;
-    if headers.len() < window {
+    if headers.len() < 3 {
         return next;
     }
-    let start = &headers[headers.len() - window];
-    let end = prev;
+    let end_idx = headers.len().saturating_sub(1);
+    let mut start_idx = end_idx.saturating_sub(window);
+    // Ignore ancient genesis timestamp when network starts long after genesis.
+    if start_idx == 0 && end_idx > 1 {
+        start_idx = 1;
+    }
+    if end_idx <= start_idx {
+        return next;
+    }
+    let start = &headers[start_idx];
+    let end = &headers[end_idx];
+    let intervals = (end_idx - start_idx) as i64;
     let actual_span = end.timestamp.saturating_sub(start.timestamp).max(1);
-    let target_span = TARGET_BLOCK_TIME_SECS
-        .saturating_mul(DIFFICULTY_ADJUSTMENT_INTERVAL as i64)
-        .max(1);
+    let target_span = TARGET_BLOCK_TIME_SECS.saturating_mul(intervals).max(1);
 
     if actual_span < target_span / 2 {
         next = next.saturating_add(1);
@@ -1433,17 +1442,17 @@ pub async fn start_tcp_server(
         loop {
             match listener.accept().await {
                 Ok((stream, addr)) => {
-                    if ACTIVE_CONNECTIONS.load(std::sync::atomic::Ordering::Relaxed)
-                        >= MAX_CONNECTIONS
-                    {
+                    // Use fetch_add-then-check to avoid TOCTOU: atomically claim a slot,
+                    // then release it if we were already at the limit.
+                    let active = ACTIVE_CONNECTIONS.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                    if active >= MAX_CONNECTIONS {
+                        ACTIVE_CONNECTIONS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                         debug_log(&format!(
                             "Max connections reached, dropping connection from {}",
                             addr
                         ));
                         continue;
                     }
-
-                    ACTIVE_CONNECTIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
                     if addr.port() == LISTEN_PORT {
                         let ip = addr.ip().to_string();
@@ -2178,10 +2187,13 @@ async fn handle_block(
     println!("Received new block {}", block.hash);
     chain.push(block.clone());
     save_chain(&chain)?;
+    // L2: sprawdź finalizację przy każdym nowym bloku L1 z sieci
+    let l1_index = block.index;
     if let Err(e) = prune_mempool(&chain) {
         eprintln!("Failed to prune mempool after accepting block: {}", e);
     }
     drop(chain);
+    on_new_block(l1_index);
     broadcast_to_known_nodes(&block).await;
     send_message(stream, wire, MessageKind::Response, b"accepted").await?;
     Ok(())

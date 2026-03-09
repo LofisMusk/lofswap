@@ -31,6 +31,26 @@ pub fn write_data_file(file: &str, contents: &str) -> io::Result<()> {
     fs::write(path, contents)
 }
 
+/// Write a sensitive file with restricted permissions (0o600 on Unix).
+/// Use this for private keys and other secret material.
+pub fn write_secret_file(file: &str, contents: &str) -> io::Result<()> {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+
+    let path = data_path(file);
+    ensure_parent_dir(&path)?;
+
+    let mut opts = OpenOptions::new();
+    opts.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(&path)?;
+    f.write_all(contents.as_bytes())
+}
+
 pub fn read_data_file(file: &str) -> io::Result<Option<String>> {
     let path = data_path(file);
     let legacy = Path::new(file);

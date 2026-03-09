@@ -13,6 +13,7 @@ use crate::{
         block_subsidy, expected_next_difficulty, is_valid_lfs_address, load_valid_transactions,
         prune_mempool, save_chain, validate_block,
     },
+    l2_anchor::on_new_block,
     mempool::mempool_len,
     p2p::{broadcast_to_known_nodes, get_my_address},
     wallet::wallet_load_default,
@@ -145,6 +146,10 @@ pub async fn mine_block(blockchain: &Arc<Mutex<Vec<Block>>>, explicit_reward_add
             eprintln!("Failed to save chain: {}", e);
             return;
         }
+
+        // L2: sprawdź finalizację przy każdym nowym bloku L1
+        let l1_index = block.index;
+        on_new_block(l1_index);
 
         if let Err(e) = prune_mempool(&chain) {
             eprintln!("Failed to prune mempool after mining: {}", e);
