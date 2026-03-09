@@ -15,12 +15,16 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     errors::NodeError,
+    identity::verify_signature,
     storage::{read_data_file, write_data_file},
 };
 
 const COMMITMENTS_FILE: &str = "l2_commitments.json";
 const BRIDGE_OUTPUTS_FILE: &str = "l2_bridge_outputs.json";
 const SEQUENCER_BONDS_FILE: &str = "l2_sequencer_bonds.json";
+/// Snapshoty stanu L2 per wysokość — klucz dla fraud proof pre_state.
+/// Format: l2_snapshot_{height}.json w DATA_DIR.
+const L2_SNAPSHOT_PREFIX: &str = "l2_snapshot_";
 
 // ─────────────────────────────────────────────
 // Storage
@@ -84,6 +88,7 @@ fn now_secs() -> i64 {
 
 /// Sequencer składa StateCommitment na L1 (anchor do aktualnego bloku L1).
 /// Weryfikuje że sequencer ma aktywny bond o wymaganej wartości.
+/// Weryfikuje podpis ed25519 nad preimage() jeśli sequencer_pubkey jest niepusty.
 pub fn submit_commitment(
     store: &mut L2Store,
     sequencer: String,
@@ -91,6 +96,7 @@ pub fn submit_commitment(
     l1_anchor_index: u64,
     state_root: String,
     sequencer_sig: String,
+    sequencer_pubkey: String,
 ) -> Result<(), NodeError> {
     // Sprawdź bond
     let has_bond = store.sequencer_bonds.iter().any(|b| {
@@ -121,20 +127,37 @@ pub fn submit_commitment(
         .map(|b| b.amount)
         .unwrap_or(StateCommitment::MIN_SEQUENCER_BOND);
 
-    let commitment = StateCommitment {
+    // Wstępny commitment do obliczenia preimage
+    let tmp = StateCommitment {
         l2_height,
         l1_anchor_index,
-        state_root,
-        sequencer,
-        sequencer_sig,
+        state_root: state_root.clone(),
+        sequencer: sequencer.clone(),
+        sequencer_sig: sequencer_sig.clone(),
+        sequencer_pubkey: sequencer_pubkey.clone(),
         sequencer_bond: bond,
-        submitted_at: now_secs(),
+        submitted_at: 0,
         challenge_period_secs: StateCommitment::DEFAULT_CHALLENGE_PERIOD,
         state: ConfirmationState::Soft,
     };
 
+    // Weryfikuj podpis sekwencera jeśli dostarczony
+    if !sequencer_sig.is_empty() && !sequencer_pubkey.is_empty() {
+        let preimage = tmp.preimage();
+        if !verify_signature(&sequencer_pubkey, preimage.as_bytes(), &sequencer_sig) {
+            return Err(NodeError::ValidationError(
+                "Nieprawidłowy podpis sekwencera na commitment".into()
+            ));
+        }
+    }
+
+    let commitment = StateCommitment {
+        submitted_at: now_secs(),
+        state: ConfirmationState::Soft,
+        ..tmp
+    };
+
     store.commitments.push(commitment);
-    // Sortuj po l2_height rosnąco
     store.commitments.sort_by_key(|c| c.l2_height);
     Ok(())
 }
@@ -370,6 +393,31 @@ pub fn print_l2_status(store: &L2Store) {
             b.sequencer, b.amount, b.locked_at_l1_index, b.status
         );
     }
+}
+
+// ─────────────────────────────────────────────
+// Snapshot storage (pre-state dla fraud proof)
+// ─────────────────────────────────────────────
+
+/// Zapisuje snapshot salda L2 przed danym blokiem.
+/// Challengerzy używają go jako pre_state do FraudProof::verify().
+pub fn save_l2_snapshot(height: u64, balances: &HashMap<String, u64>) -> Result<(), NodeError> {
+    let key = format!("{}{}.json", L2_SNAPSHOT_PREFIX, height);
+    let json = serde_json::to_string_pretty(balances)
+        .map_err(|e| NodeError::SerializationError(e.to_string()))?;
+    write_data_file(&key, &json)
+        .map_err(|e| NodeError::NetworkError(e.to_string()))
+}
+
+/// Ładuje snapshot salda L2 dla danej wysokości (pre-state dla bloku `height+1`).
+/// Zwraca None jeśli snapshot nie istnieje.
+#[allow(dead_code)]
+pub fn load_l2_snapshot(height: u64) -> Option<HashMap<String, u64>> {
+    let key = format!("{}{}.json", L2_SNAPSHOT_PREFIX, height);
+    read_data_file(&key)
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok())
 }
 
 // ─────────────────────────────────────────────

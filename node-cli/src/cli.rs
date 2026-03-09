@@ -10,6 +10,7 @@ use tokio::sync::Mutex;
 use crate::{
     OBSERVED_IP,
     chain::{clear_chain_storage, save_peers},
+    identity::{sign_message, NODE_IDENTITY},
     l2_anchor::{
         load_l2_store, print_l2_status, register_bridge_output, register_sequencer_bond,
         save_l2_store, submit_commitment, try_finalize_all, try_unlock_bridge_outputs,
@@ -397,13 +398,18 @@ async fn sequencer_commit_command(line: &str, blockchain: &Arc<Mutex<Vec<Block>>
     };
 
     let mut store = load_l2_store();
+    // Podpisz commitment kluczem ed25519 node identity
+    let preimage = format!("SC|{}|{}|{}|{}", l2_height, l1_anchor, state_root, addr);
+    let sig = sign_message(preimage.as_bytes());
+    let pubkey = NODE_IDENTITY.public_key_hex.clone();
     match submit_commitment(
         &mut store,
         addr.clone(),
         l2_height,
         l1_anchor,
         state_root.clone(),
-        String::new(), // sig: MVP placeholder (full: sequencer signs preimage)
+        sig,
+        pubkey,
     ) {
         Ok(_) => match save_l2_store(&store) {
             Ok(_) => println!(

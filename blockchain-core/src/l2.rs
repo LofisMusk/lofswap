@@ -4,6 +4,7 @@
 
 use sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
+use secp256k1::{Message, PublicKey, Secp256k1, ecdsa::Signature as EcdsaSignature};
 use std::collections::HashMap;
 
 // ─────────────────────────────────────────────
@@ -51,6 +52,43 @@ impl L2Transaction {
         let mut h = Sha256::new();
         h.update(preimage.as_bytes());
         format!("{:x}", h.finalize())
+    }
+
+    /// Preimage nad którym wallet podpisuje TX.
+    /// Identyczny z compute_txid preimage — SHA256 tego jest message dla ECDSA.
+    pub fn signing_preimage(&self) -> Vec<u8> {
+        let preimage = format!(
+            "L2TX|{}|{}|{}|{}|{}|{}",
+            self.from, self.to, self.amount, self.fee, self.nonce, self.timestamp
+        );
+        Sha256::digest(preimage.as_bytes()).to_vec()
+    }
+
+    /// Weryfikuje secp256k1 podpis TX.
+    /// Zwraca Ok(()) jeśli prawidłowy, Err(reason) jeśli nieprawidłowy.
+    /// UWAGA: jeśli signature jest pusty — zwraca Err (użyj tylko w trybie dev).
+    pub fn verify_sig(&self) -> Result<(), String> {
+        if self.signature.is_empty() {
+            return Err("brak podpisu (unsigned tx)".into());
+        }
+        if self.pubkey.is_empty() {
+            return Err("brak pubkey".into());
+        }
+        let secp = Secp256k1::new();
+        let sig_bytes = hex::decode(&self.signature)
+            .map_err(|_| "nieprawidłowy hex podpisu")?;
+        let pub_bytes = hex::decode(&self.pubkey)
+            .map_err(|_| "nieprawidłowy hex pubkey")?;
+        let sig = EcdsaSignature::from_compact(&sig_bytes)
+            .map_err(|_| "nieprawidłowa kompaktowa sygnatura")?;
+        let pubkey = PublicKey::from_slice(&pub_bytes)
+            .map_err(|_| "nieprawidłowy pubkey")?;
+        let hash_bytes = self.signing_preimage();
+        let hash_arr: [u8; 32] = hash_bytes.try_into()
+            .map_err(|_| "hash nieprawidłowy")?;
+        let msg = Message::from_digest(hash_arr);
+        secp.verify_ecdsa(msg, &sig, &pubkey)
+            .map_err(|_| "weryfikacja ECDSA nieudana".into())
     }
 }
 
@@ -112,8 +150,11 @@ pub struct StateCommitment {
     pub state_root: String,
     /// Adres L1 sequencera
     pub sequencer: String,
-    /// Podpis sequencera nad preimage()
+    /// Podpis sequencera (ed25519) nad preimage()
     pub sequencer_sig: String,
+    /// ed25519 pubkey sequencera (hex) — do weryfikacji sequencer_sig
+    #[serde(default)]
+    pub sequencer_pubkey: String,
     /// Bond sequencera w lofs (slashowany przy fraud). Min: MIN_SEQUENCER_BOND
     pub sequencer_bond: u64,
     /// Unix timestamp złożenia commitment
@@ -485,6 +526,7 @@ mod tests {
             state_root: pre_root.clone(),
             sequencer: "LFSseq0001".to_string(),
             sequencer_sig: String::new(),
+            sequencer_pubkey: String::new(),
             sequencer_bond: StateCommitment::MIN_SEQUENCER_BOND,
             submitted_at: 0,
             challenge_period_secs: StateCommitment::DEFAULT_CHALLENGE_PERIOD,
@@ -536,6 +578,7 @@ mod tests {
             state_root: correct_root.clone(),
             sequencer: "LFSseq0001".to_string(),
             sequencer_sig: String::new(),
+            sequencer_pubkey: String::new(),
             sequencer_bond: StateCommitment::MIN_SEQUENCER_BOND,
             submitted_at: 0,
             challenge_period_secs: StateCommitment::DEFAULT_CHALLENGE_PERIOD,
@@ -567,6 +610,7 @@ mod tests {
             state_root: "aaa".to_string(),
             sequencer: "LFSseq0001".to_string(),
             sequencer_sig: String::new(),
+            sequencer_pubkey: String::new(),
             sequencer_bond: StateCommitment::MIN_SEQUENCER_BOND,
             submitted_at: 0,
             challenge_period_secs: 100,
@@ -586,6 +630,7 @@ mod tests {
             state_root: "bbb".to_string(),
             sequencer: "LFSseq0001".to_string(),
             sequencer_sig: String::new(),
+            sequencer_pubkey: String::new(),
             sequencer_bond: StateCommitment::MIN_SEQUENCER_BOND,
             submitted_at: 0,
             challenge_period_secs: 1000,
@@ -624,6 +669,7 @@ mod tests {
             state_root: pre_root.clone(),
             sequencer: "LFSseq0001".to_string(),
             sequencer_sig: String::new(),
+            sequencer_pubkey: String::new(),
             sequencer_bond: StateCommitment::MIN_SEQUENCER_BOND,
             submitted_at: 0,
             challenge_period_secs: 100,
