@@ -19,7 +19,7 @@ cargo build -r
 cargo run -p node-cli
 ```
 
-`node-cli` listens on TCP `6000` by default.
+`node-cli` listens on TCP `6100` by default.
 
 ### Wallet CLI
 

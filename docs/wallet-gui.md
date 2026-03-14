@@ -35,7 +35,7 @@ cargo run -p wallet-gui
 - `LOFSWAP_WALLET_MNEMONIC_PASSPHRASE`
   Optional mnemonic passphrase.
 - `WALLET_LOCAL_PORT`
-  Local node port hint (default `6000`).
+  Local node port hint (default `6100`).
 - `WALLET_LOCAL_NODE`
   Explicit local node endpoint hint.
 
@@ -61,4 +61,4 @@ cargo run -p wallet-gui
 
 ## Networking Notes
 
-GUI wallet uses discovered peers + local candidates (`127.0.0.1:6000`, `localhost:6000` unless overridden) to query balances and broadcast transactions.
+GUI wallet uses discovered peers + local candidates (`127.0.0.1:6100`, `localhost:6100` unless overridden) to query balances and broadcast transactions.

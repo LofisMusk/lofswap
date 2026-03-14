@@ -99,6 +99,6 @@ Node also accepts single `Transaction` and single `Block` JSON payloads over TCP
 
 ## Notes
 
-- Default listen port: `6000`.
-- Bootstrap peers are compiled in (`89.168.107.239:6000`, `79.76.116.108:6000`).
+- Default listen port: `6100`.
+- Bootstrap peers are compiled in (`89.168.107.239:6100`, `79.76.116.108:6100`).
 - `clear-chain` wipes chain storage; use with care.

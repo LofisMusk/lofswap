@@ -108,7 +108,7 @@ const DEFAULT_MIN_BROADCAST_PEERS: usize = 2;
 const DEFAULT_TX_FEE: u64 = 1;
 const DEFAULT_TX_HISTORY_LIMIT: usize = 50;
 
-static BOOTSTRAP_NODES: &[&str] = &["89.168.107.239:6000", "79.76.116.108:6000"];
+static BOOTSTRAP_NODES: &[&str] = &["89.168.107.239:6100", "79.76.116.108:6100"];
 static GUI_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 type AnyError = Box<dyn Error + Send + Sync>;
@@ -1932,7 +1932,7 @@ impl PeerStore {
         let local_port = env::var("WALLET_LOCAL_PORT")
             .ok()
             .and_then(|value| value.parse::<u16>().ok())
-            .unwrap_or(6000);
+            .unwrap_or(6100);
         let local_env = env::var("WALLET_LOCAL_NODE").ok();
         let local_candidates = [
             local_env.unwrap_or_else(|| format!("127.0.0.1:{local_port}")),

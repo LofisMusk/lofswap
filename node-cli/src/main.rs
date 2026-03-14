@@ -41,8 +41,8 @@ pub static NODE_PUBKEY: Lazy<String> = Lazy::new(identity::public_key_hex);
 pub const NODE_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub static ACTIVE_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
 
-pub const LISTEN_PORT: u16 = 6000;
-pub const BOOTSTRAP_NODES: &[&str] = &["89.168.107.239:6000", "79.76.116.108:6000"];
+pub const LISTEN_PORT: u16 = 6100;
+pub const BOOTSTRAP_NODES: &[&str] = &["89.168.107.239:6100", "79.76.116.108:6100"];
 pub const MAX_CONNECTIONS: usize = 50;
 pub const BUFFER_SIZE: usize = 8192;
 
