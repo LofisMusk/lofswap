@@ -36,11 +36,13 @@ use crate::vanity::{
 };
 
 static BOOTSTRAP_NODES: &[&str] = &["89.168.107.239:6000", "79.76.116.108:6000"];
+static L2_BOOTSTRAP_NODES: &[&str] = &["89.168.107.239:6100", "79.76.116.108:6100"];
 
 const MEMPOOL_FILE: &str = "wallet_mempool.json";
 const RAW_SIGNED_FILE: &str = "wallet_raw_signed.json";
 const WALLET_CACHE_DIR: &str = "wallet-cache";
 const PEER_CACHE_FILE: &str = "wallet-cache/peers_cache.json";
+const L2_PEER_CACHE_FILE: &str = "wallet-cache/peers_cache_l2.json";
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(800);
 const OFFLINE_GRACE: Duration = Duration::from_secs(10);
 const MIN_BROADCAST_PEERS: usize = 2;
@@ -56,6 +58,91 @@ const PRIVATE_EXPORT_CONFIRM_ENV: &str = "LOFSWAP_ALLOW_PRIVATE_KEY_EXPORT";
 const PRIVATE_EXPORT_CONFIRM_VALUE: &str = "YES_I_UNDERSTAND";
 
 static CACHED_WALLET_PASSPHRASE: OnceLock<String> = OnceLock::new();
+static CLI_NETWORK_MODE: OnceLock<NetworkMode> = OnceLock::new();
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NetworkMode {
+    Default,
+    L2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NetworkConfig {
+    name: &'static str,
+    bootstrap_nodes: &'static [&'static str],
+    default_local_port: u16,
+    peer_cache_file: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CliOptions {
+    network_mode: NetworkMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CliParseResult {
+    Run(CliOptions),
+    ExitOk,
+}
+
+fn cli_usage() -> &'static str {
+    "Usage: wallet-cli [--l2]\n\nOptions:\n  --l2          Use the L2 node network (port 6100)\n  -h, --help    Show this help message"
+}
+
+fn parse_cli_options(args: &[String]) -> Result<CliParseResult, String> {
+    let mut options = CliOptions {
+        network_mode: NetworkMode::Default,
+    };
+
+    for arg in args {
+        match arg.as_str() {
+            "--l2" => options.network_mode = NetworkMode::L2,
+            "-h" | "--help" => return Ok(CliParseResult::ExitOk),
+            _ => return Err(format!("Unknown option: {arg}")),
+        }
+    }
+
+    Ok(CliParseResult::Run(options))
+}
+
+fn bootstrap_peer_port(nodes: &[&str]) -> u16 {
+    nodes
+        .first()
+        .and_then(|peer| peer.rsplit_once(':'))
+        .and_then(|(_, port)| port.parse::<u16>().ok())
+        .expect("bootstrap peers must include a valid port")
+}
+
+fn resolve_network_config(mode: NetworkMode) -> NetworkConfig {
+    let default_local_port = bootstrap_peer_port(BOOTSTRAP_NODES);
+    let default_is_l2 = BOOTSTRAP_NODES == L2_BOOTSTRAP_NODES;
+
+    match mode {
+        NetworkMode::Default => NetworkConfig {
+            name: if default_is_l2 { "l2" } else { "default" },
+            bootstrap_nodes: BOOTSTRAP_NODES,
+            default_local_port,
+            peer_cache_file: PEER_CACHE_FILE,
+        },
+        NetworkMode::L2 if default_is_l2 => NetworkConfig {
+            name: "l2",
+            bootstrap_nodes: BOOTSTRAP_NODES,
+            default_local_port,
+            peer_cache_file: PEER_CACHE_FILE,
+        },
+        NetworkMode::L2 => NetworkConfig {
+            name: "l2",
+            bootstrap_nodes: L2_BOOTSTRAP_NODES,
+            default_local_port: bootstrap_peer_port(L2_BOOTSTRAP_NODES),
+            peer_cache_file: L2_PEER_CACHE_FILE,
+        },
+    }
+}
+
+fn active_network_config() -> NetworkConfig {
+    let mode = *CLI_NETWORK_MODE.get().unwrap_or(&NetworkMode::Default);
+    resolve_network_config(mode)
+}
 
 fn read_line_prompt(prompt: &str) -> Option<String> {
     print!("{prompt}");
@@ -158,7 +245,7 @@ fn ensure_cache_dir() {
 }
 
 fn peer_cache_path() -> PathBuf {
-    PathBuf::from(PEER_CACHE_FILE)
+    PathBuf::from(active_network_config().peer_cache_file)
 }
 
 fn is_valid_peer(p: &str) -> bool {
@@ -172,14 +259,19 @@ struct PeerStore {
 
 impl PeerStore {
     fn load() -> Self {
+        let network = active_network_config();
         ensure_cache_dir();
-        let mut peers: Vec<String> = BOOTSTRAP_NODES.iter().map(|s| s.to_string()).collect();
+        let mut peers: Vec<String> = network
+            .bootstrap_nodes
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         // Always include a local node endpoint so wallet can talk to a node on the same host/IP.
         // Nodes themselves may skip same-IP peers; wallet should not.
         let local_port = env::var("WALLET_LOCAL_PORT")
             .ok()
             .and_then(|s| s.parse::<u16>().ok())
-            .unwrap_or(6000);
+            .unwrap_or(network.default_local_port);
         let local_env = env::var("WALLET_LOCAL_NODE").ok();
         let local_candidates = [
             local_env.unwrap_or_else(|| format!("127.0.0.1:{local_port}")),
@@ -226,11 +318,12 @@ impl PeerStore {
     }
 
     fn discover(&mut self) {
+        let network = active_network_config();
         let candidates: Vec<String> = self
             .peers
             .iter()
             .cloned()
-            .chain(BOOTSTRAP_NODES.iter().map(|s| s.to_string()))
+            .chain(network.bootstrap_nodes.iter().map(|s| s.to_string()))
             .collect();
 
         for peer in candidates {
@@ -1430,7 +1523,25 @@ fn force_send(store: &mut PeerStore, signature: &str) {
 }
 
 fn main() {
-    println!("Wallet CLI (bootstrap discovery, cached peers)");
+    let args: Vec<String> = env::args().skip(1).collect();
+    let options = match parse_cli_options(&args) {
+        Ok(CliParseResult::Run(options)) => options,
+        Ok(CliParseResult::ExitOk) => {
+            println!("{}", cli_usage());
+            return;
+        }
+        Err(err) => {
+            eprintln!("{err}\n\n{}", cli_usage());
+            std::process::exit(2);
+        }
+    };
+    let _ = CLI_NETWORK_MODE.set(options.network_mode);
+    let network = active_network_config();
+
+    println!(
+        "Wallet CLI (bootstrap discovery, cached peers) [network={}]",
+        network.name
+    );
     let mut peers = PeerStore::load();
     peers.discover();
 
@@ -1882,6 +1993,44 @@ fn handle_command_line(peers: &mut PeerStore, line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_cli_options_accepts_l2_flag() {
+        let args = vec!["--l2".to_string()];
+        let parsed = parse_cli_options(&args).unwrap();
+        assert_eq!(
+            parsed,
+            CliParseResult::Run(CliOptions {
+                network_mode: NetworkMode::L2
+            })
+        );
+    }
+
+    #[test]
+    fn parse_cli_options_rejects_unknown_flag() {
+        let args = vec!["--bogus".to_string()];
+        let err = parse_cli_options(&args).unwrap_err();
+        assert!(err.contains("--bogus"));
+    }
+
+    #[test]
+    fn l2_network_config_uses_l2_port() {
+        let config = resolve_network_config(NetworkMode::L2);
+        assert_eq!(config.name, "l2");
+        assert_eq!(config.default_local_port, 6100);
+        assert_eq!(config.bootstrap_nodes, L2_BOOTSTRAP_NODES);
+    }
+
+    #[test]
+    fn l2_network_config_reuses_default_cache_only_when_default_is_l2() {
+        let config = resolve_network_config(NetworkMode::L2);
+        let expected = if BOOTSTRAP_NODES == L2_BOOTSTRAP_NODES {
+            PEER_CACHE_FILE
+        } else {
+            L2_PEER_CACHE_FILE
+        };
+        assert_eq!(config.peer_cache_file, expected);
+    }
 
     #[test]
     fn tx_signed_by_wallet_accepts_address_based_sender() {

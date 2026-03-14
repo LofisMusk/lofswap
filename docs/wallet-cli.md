@@ -8,6 +8,14 @@ cargo run -p wallet-cli
 
 The wallet runs as an interactive REPL.
 
+To force the wallet onto the L2 node network, start it with:
+
+```bash
+cargo run -p wallet-cli -- --l2
+```
+
+`--l2` switches bootstrap discovery and the default local node hint to the L2 network on port `6100`. On the `l2` branch this matches the default network; on `main` it overrides the default main-network peers.
+
 ## Environment Variables
 
 - `LOFSWAP_WALLET_PASSPHRASE`
@@ -27,7 +35,8 @@ The wallet runs as an interactive REPL.
 - `.default_wallet` (legacy plaintext format; migrated when possible)
 - `wallet_mempool.json` (locally queued pending tx)
 - `wallet_raw_signed.json` (raw signed tx cache)
-- `wallet-cache/peers_cache.json` (peer cache)
+- `wallet-cache/peers_cache.json` (default peer cache)
+- `wallet-cache/peers_cache_l2.json` (peer cache used when `--l2` selects a non-default network profile)
 
 ## Command Reference
 
