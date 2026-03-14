@@ -35,6 +35,59 @@ use crate::{
     storage::{read_data_file, write_data_file},
 };
 
+// == peer address registry =====================================================
+// Maps node_id -> "ip:port". NEVER gossiped -- kept local only.
+const PEER_ADDRS_FILE: &str = "peer_addrs.json";
+
+static PEER_ADDRS: Lazy<StdMutex<HashMap<String, String>>> = Lazy::new(|| {
+    StdMutex::new(load_peer_addrs_from_disk())
+});
+
+fn load_peer_addrs_from_disk() -> HashMap<String, String> {
+    let Ok(Some(raw)) = read_data_file(PEER_ADDRS_FILE) else {
+        return HashMap::new();
+    };
+    serde_json::from_str(&raw).unwrap_or_default()
+}
+
+fn persist_peer_addrs(map: &HashMap<String, String>) {
+    if let Ok(json) = serde_json::to_string_pretty(map) {
+        let _ = write_data_file(PEER_ADDRS_FILE, &json);
+    }
+}
+
+/// Store ip:port for a node_id. Returns true if changed.
+fn register_peer_addr(node_id: &str, addr: &str) -> bool {
+    if node_id.is_empty() || addr.is_empty() { return false; }
+    let changed = {
+        let mut g = PEER_ADDRS.lock().unwrap_or_else(|p| p.into_inner());
+        if g.get(node_id).map(|a| a.as_str()) == Some(addr) { false }
+        else { g.insert(node_id.to_string(), addr.to_string()); true }
+    };
+    if changed {
+        let map = PEER_ADDRS.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        persist_peer_addrs(&map);
+    }
+    changed
+}
+
+/// Resolve node_id -> "ip:port" if known.
+fn resolve_peer_addr(node_id: &str) -> Option<String> {
+    PEER_ADDRS.lock().unwrap_or_else(|p| p.into_inner()).get(node_id).cloned()
+}
+
+/// All known (node_id, ip:port) pairs.
+fn all_peer_addrs() -> Vec<(String, String)> {
+    PEER_ADDRS.lock().unwrap_or_else(|p| p.into_inner())
+        .iter().map(|(id, addr)| (id.clone(), addr.clone())).collect()
+}
+
+fn is_valid_node_id(s: &str) -> bool {
+    s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+// =============================================================================
+
 fn debug_log(msg: &str) {
     if cfg!(debug_assertions) {
         println!("[DEBUG] {}", msg);
@@ -314,13 +367,9 @@ fn with_security_state<T>(f: impl FnOnce(&mut SecurityState) -> T) -> T {
     f(&mut guard)
 }
 
-fn mark_good_peer(peer: &str) {
-    let Some(normalized) = normalize_peer_address(peer) else {
-        return;
-    };
-    with_security_state(|state| {
-        state.known_good_addrs.insert(normalized);
-    });
+fn mark_good_peer(node_id: &str) {
+    if !is_valid_node_id(node_id) { return; }
+    with_security_state(|state| { state.known_good_addrs.insert(node_id.to_string()); });
 }
 
 fn register_infraction(ip: &str, points: u32, reason: &str) {
@@ -699,6 +748,11 @@ fn normalize_peer_address(peer: &str) -> Option<String> {
     Some(addr.to_string())
 }
 
+fn node_id_for_addr(addr: &str) -> Option<String> {
+    let guard = PEER_ADDRS.lock().unwrap_or_else(|p| p.into_inner());
+    guard.iter().find(|(_, a)| a.as_str() == addr).map(|(id, _)| id.clone())
+}
+
 fn peer_ip(addr: &str) -> Option<IpAddr> {
     addr.parse::<SocketAddr>().ok().map(|s| s.ip())
 }
@@ -736,57 +790,48 @@ fn peers_in_subnet(peers: &[String], key: &str) -> usize {
         .count()
 }
 
-fn is_anchor_peer(peer: &str) -> bool {
+fn is_anchor_peer_addr(addr: &str) -> bool {
     BOOTSTRAP_NODES
         .iter()
-        .any(|anchor| normalize_peer_address(anchor).as_deref() == Some(peer) || *anchor == peer)
+        .any(|anchor| normalize_peer_address(anchor).as_deref() == Some(addr) || *anchor == addr)
+}
+
+fn is_anchor_peer(node_id: &str) -> bool {
+    resolve_peer_addr(node_id).map(|a| is_anchor_peer_addr(&a)).unwrap_or(false)
 }
 
 fn can_accept_peer(candidate: &str, peers: &[String]) -> bool {
-    if is_anchor_peer(candidate) {
-        return true;
+    if !is_valid_node_id(candidate) { return false; }
+    if is_anchor_peer(candidate) { return true; }
+    if let Some(addr) = resolve_peer_addr(candidate) {
+        let Some(key) = subnet_key(&addr) else { return true; };
+        let in_subnet = peers.iter()
+            .filter(|id| resolve_peer_addr(id).and_then(|a| subnet_key(&a)).map(|k| k == key).unwrap_or(false))
+            .count();
+        return in_subnet < subnet_cap(&addr);
     }
-    let Some(key) = subnet_key(candidate) else {
-        return false;
-    };
-    peers_in_subnet(peers, &key) < subnet_cap(candidate)
+    true
 }
 
 fn sticky_peer_targets(peers: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
-
-    for anchor in BOOTSTRAP_NODES {
-        if let Some(normalized) = normalize_peer_address(anchor) {
-            if seen.insert(normalized.clone()) {
-                out.push(normalized);
-            }
-            if out.len() >= STICKY_TOTAL_TARGETS {
-                return out;
-            }
+    for (node_id, addr) in all_peer_addrs() {
+        if is_anchor_peer_addr(&addr) && seen.insert(node_id.clone()) {
+            out.push(node_id);
         }
+        if out.len() >= STICKY_TOTAL_TARGETS { return out; }
     }
-
     let known_good =
         with_security_state(|state| state.known_good_addrs.iter().cloned().collect::<Vec<_>>());
-    for peer in known_good {
-        if seen.insert(peer.clone()) {
-            out.push(peer);
-        }
-        if out.len() >= STICKY_TOTAL_TARGETS {
-            return out;
-        }
+    for node_id in known_good {
+        if seen.insert(node_id.clone()) { out.push(node_id); }
+        if out.len() >= STICKY_TOTAL_TARGETS { return out; }
     }
-
     for peer in peers {
-        if seen.insert(peer.clone()) {
-            out.push(peer.clone());
-        }
-        if out.len() >= STICKY_TOTAL_TARGETS {
-            return out;
-        }
+        if seen.insert(peer.clone()) { out.push(peer.clone()); }
+        if out.len() >= STICKY_TOTAL_TARGETS { return out; }
     }
-
     out
 }
 
@@ -807,12 +852,13 @@ async fn connect_peer(peer: &str) -> Option<TcpStream> {
     }
 }
 
+/// peer = node_id or ip:port
 async fn send_only(peer: &str, kind: MessageKind, payload: &[u8]) -> bool {
-    if let Some(mut stream) = connect_peer(peer).await {
-        if send_framed_message(&mut stream, kind, payload)
-            .await
-            .is_ok()
-        {
+    let addr = if is_valid_node_id(peer) {
+        match resolve_peer_addr(peer) { Some(a) => a, None => return false }
+    } else { peer.to_string() };
+    if let Some(mut stream) = connect_peer(&addr).await {
+        if send_framed_message(&mut stream, kind, payload).await.is_ok() {
             shutdown_stream(&mut stream).await;
             mark_good_peer(peer);
             return true;
@@ -820,7 +866,7 @@ async fn send_only(peer: &str, kind: MessageKind, payload: &[u8]) -> bool {
         shutdown_stream(&mut stream).await;
     }
     if let Some(legacy) = legacy_payload(kind, payload) {
-        if let Some(mut stream) = connect_peer(peer).await {
+        if let Some(mut stream) = connect_peer(&addr).await {
             if write_all_with_timeout(&mut stream, &legacy).await.is_ok() {
                 shutdown_stream(&mut stream).await;
                 mark_good_peer(peer);
@@ -832,37 +878,34 @@ async fn send_only(peer: &str, kind: MessageKind, payload: &[u8]) -> bool {
     false
 }
 
+/// peer = node_id or ip:port
 async fn request_framed_message(
     peer: &str,
     kind: MessageKind,
     payload: &[u8],
 ) -> Option<InboundMessage> {
-    let mut stream = connect_peer(peer).await?;
-    if send_framed_message(&mut stream, kind, payload)
-        .await
-        .is_err()
-    {
+    let addr = if is_valid_node_id(peer) { resolve_peer_addr(peer)? } else { peer.to_string() };
+    let mut stream = connect_peer(&addr).await?;
+    if send_framed_message(&mut stream, kind, payload).await.is_err() {
         shutdown_stream(&mut stream).await;
         return None;
     }
     let inbound = read_wire_message(&mut stream).await.ok().flatten();
     shutdown_stream(&mut stream).await;
     if let Some(msg) = inbound {
-        if msg.wire == WireMode::Framed {
-            mark_good_peer(peer);
-            return Some(msg);
-        }
+        if msg.wire == WireMode::Framed { mark_good_peer(peer); return Some(msg); }
     }
     None
 }
 
+/// peer = node_id or ip:port
 async fn request_payload(peer: &str, kind: MessageKind, payload: &[u8]) -> Option<Vec<u8>> {
     if let Some(msg) = request_framed_message(peer, kind, payload).await {
         return Some(msg.payload);
     }
-
+    let addr = if is_valid_node_id(peer) { resolve_peer_addr(peer)? } else { peer.to_string() };
     if let Some(legacy) = legacy_payload(kind, payload) {
-        if let Some(mut stream) = connect_peer(peer).await {
+        if let Some(mut stream) = connect_peer(&addr).await {
             if write_all_with_timeout(&mut stream, &legacy).await.is_ok() {
                 if let Ok(bytes) = read_legacy_message(&mut stream).await {
                     shutdown_stream(&mut stream).await;
@@ -873,7 +916,6 @@ async fn request_payload(peer: &str, kind: MessageKind, payload: &[u8]) -> Optio
             shutdown_stream(&mut stream).await;
         }
     }
-
     None
 }
 
@@ -921,7 +963,7 @@ fn block_matches_header(block: &Block, header: &BlockHeader) -> bool {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct PeerInfo {
-    pub public_ip: Option<String>,
+    // public_ip removed -- IPs never gossiped; stored only in peer_addrs.json
     pub port: u16,
     pub node_id: String,
     #[serde(default)]
@@ -929,6 +971,7 @@ pub(crate) struct PeerInfo {
     pub version: String,
     #[serde(default)]
     pub chain_id: String,
+    /// node_id strings only -- no ip:port in gossip
     #[serde(default)]
     pub peers: Vec<String>,
     #[serde(default)]
@@ -1163,12 +1206,11 @@ async fn build_peer_info_snapshot(
     peers: &Arc<Mutex<Vec<String>>>,
     observed_ip: Option<String>,
 ) -> PeerInfo {
-    let public_ip = OBSERVED_IP.read().await.clone();
-    let mut peer_snapshot = peers.lock().await.clone();
-    if let Some(ref ip) = public_ip {
-        let self_addr = format!("{}:{}", ip, LISTEN_PORT);
-        peer_snapshot.retain(|peer| peer != &self_addr);
-    }
+    // Gossip only node_ids -- never ip:port
+    let mut peer_snapshot: Vec<String> = peers.lock().await.clone()
+        .into_iter()
+        .filter(|id| is_valid_node_id(id) && id.as_str() != NODE_ID.as_str())
+        .collect();
     {
         let mut rng = rand::rng();
         peer_snapshot.shuffle(&mut rng);
@@ -1176,7 +1218,6 @@ async fn build_peer_info_snapshot(
     peer_snapshot.truncate(PEER_GOSSIP_LIMIT.min(MAX_PEERS_FROM_GOSSIP));
 
     PeerInfo {
-        public_ip,
         port: LISTEN_PORT,
         node_id: NODE_ID.clone(),
         identity_pubkey: NODE_PUBKEY.clone(),
@@ -1456,18 +1497,8 @@ pub async fn start_tcp_server(
                                 *OBSERVED_IP.write().await = Some(ip.clone());
                             }
                         }
-
-                        let peer_addr = format!("{}:{}", ip, addr.port());
-                        if let Some(normalized) = normalize_peer_address(&peer_addr) {
-                            let mut p = peers.lock().await;
-                            if !p.contains(&normalized) && can_accept_peer(&normalized, &p) {
-                                println!("Added new peer: {}", normalized);
-                                p.push(normalized);
-                                if let Err(e) = save_peers(&p) {
-                                    eprintln!("Failed to save peers: {}", e);
-                                }
-                            }
-                        }
+                        // Peer list stores node_ids only.
+                        // Identity is added after /iam-node or successful handshake.
                     }
 
                     let blockchain = blockchain.clone();
@@ -1728,14 +1759,11 @@ async fn handle_request(
         )
         .await?;
     } else if request.trim() == "/peers" {
-        let mut peer_snapshot = peers.lock().await.clone();
-        peer_snapshot.retain(|peer| normalize_peer_address(peer).is_some());
+        let mut peer_snapshot: Vec<String> = peers.lock().await.clone()
+            .into_iter().filter(|id| is_valid_node_id(id)).collect();
         peer_snapshot.sort();
         peer_snapshot.dedup();
-        {
-            let mut rng = rand::rng();
-            peer_snapshot.shuffle(&mut rng);
-        }
+        { let mut rng = rand::rng(); peer_snapshot.shuffle(&mut rng); }
         peer_snapshot.truncate(PEER_GOSSIP_LIMIT.min(MAX_PEERS_FROM_GOSSIP));
         let peers_json = serde_json::to_vec(&peer_snapshot)
             .map_err(|e| NodeError::SerializationError(e.to_string()))?;
@@ -1836,20 +1864,14 @@ async fn handle_request(
         .await?;
     } else if request.trim() == "/whoami" || request.trim() == "/peer-info" {
         respond_with_peer_info(stream, wire, &peers).await?;
-    } else if let Some(id) = request.strip_prefix("/resolve-ip/") {
-        handle_resolve_ip_request(id.trim(), stream, wire).await?;
-    } else if let Some(new_peer) = request.strip_prefix("/iam/") {
+    } else if let Some(id) = request.strip_prefix("/peer-addr/") {
+        handle_peer_addr_request(id.trim(), stream, wire).await?;
+    } else if let Some(node_id) = request.strip_prefix("/iam-node/") {
         if !check_rate_limit(remote_ip, RateKind::Peers) {
-            send_message(
-                stream,
-                wire,
-                MessageKind::Error,
-                b"reject: peer gossip rate limit exceeded",
-            )
-            .await?;
+            send_message(stream, wire, MessageKind::Error, b"reject: peer gossip rate limit exceeded").await?;
             return Ok(());
         }
-        handle_iam_request(new_peer.trim(), peers, remote_ip).await?;
+        handle_iam_node_request(node_id.trim(), remote_ip, peers).await?;
         send_message(stream, wire, MessageKind::Response, b"ok").await?;
     } else if let Some(rest) = request.strip_prefix("/peers") {
         if !check_rate_limit(remote_ip, RateKind::Peers) {
@@ -1946,70 +1968,55 @@ async fn respond_with_peer_info(
     send_message(stream, wire, MessageKind::PeerInfo, &payload).await
 }
 
-async fn handle_resolve_ip_request(
-    id: &str,
+async fn handle_peer_addr_request(
+    node_id: &str,
     stream: &mut TcpStream,
     wire: WireMode,
 ) -> Result<(), NodeError> {
-    // Use the remote socket address as the caller's observed public IP.
-    match stream.peer_addr() {
-        Ok(addr) => {
-            let ip = addr.ip().to_string();
-            debug_log(&format!(
-                "/resolve-ip for id '{}' resolved caller IP as {}",
-                id, ip
-            ));
-            send_message(stream, wire, MessageKind::Response, ip.as_bytes()).await?;
-        }
-        Err(e) => {
-            debug_log(&format!(
-                "Failed to get peer addr for /resolve-ip (id='{}'): {}",
-                id, e
-            ));
-            send_message(stream, wire, MessageKind::Response, b"unknown").await?;
-        }
+    if !is_valid_node_id(node_id) {
+        send_message(stream, wire, MessageKind::Error, b"invalid node_id").await?;
+        return Ok(());
     }
+    // Only respond to callers asking about themselves (self-IP discovery).
+    // Never reveal addresses of other nodes.
+    let caller_ip = stream.peer_addr().map(|a| a.ip().to_string()).unwrap_or_else(|_| "unknown".to_string());
+    let resp = if node_id == NODE_ID.as_str() {
+        caller_ip
+    } else if resolve_peer_addr(node_id).is_some() {
+        "known".to_string()
+    } else {
+        "unknown".to_string()
+    };
+    debug_log(&format!("/peer-addr/{} -> {}", node_id, resp));
+    send_message(stream, wire, MessageKind::Response, resp.as_bytes()).await?;
     Ok(())
 }
 
-async fn handle_iam_request(
-    new_peer: &str,
-    peers: Arc<Mutex<Vec<String>>>,
+/// Peer announces its node_id; IP is taken from TCP transport (cannot be spoofed).
+async fn handle_iam_node_request(
+    node_id: &str,
     remote_ip: &str,
+    peers: Arc<Mutex<Vec<String>>>,
 ) -> Result<(), NodeError> {
-    let Some(normalized) = normalize_peer_address(new_peer) else {
-        register_infraction(remote_ip, SCORE_DISCOVERY_VIOLATION, "invalid /iam address");
-        return Ok(());
-    };
-
-    let announced_ip = peer_ip(&normalized).map(|ip| ip.to_string());
-    if announced_ip.as_deref() != Some(remote_ip) {
-        register_infraction(
-            remote_ip,
-            SCORE_DISCOVERY_VIOLATION,
-            "peer poisoning attempt via /iam (ip mismatch)",
-        );
+    if !is_valid_node_id(node_id) {
+        register_infraction(remote_ip, SCORE_DISCOVERY_VIOLATION, "invalid node_id in /iam-node");
         return Ok(());
     }
-
-    let my_addr = get_my_address().await;
-    if Some(normalized.as_str()) == my_addr.as_deref() {
-        debug_log(&format!("Ignoring /iam/ request from self: {}", normalized));
+    if node_id == NODE_ID.as_str() {
+        debug_log("Ignoring /iam-node from self");
         return Ok(());
     }
-
+    let addr = format!("{}:{}", remote_ip, LISTEN_PORT);
+    if normalize_peer_address(&addr).is_none() { return Ok(()); }
+    register_peer_addr(node_id, &addr);
     let mut p = peers.lock().await;
-    if !p.contains(&normalized) {
-        if !can_accept_peer(&normalized, &p) {
-            register_infraction(
-                remote_ip,
-                SCORE_DISCOVERY_VIOLATION,
-                "subnet cap reached for /iam",
-            );
+    if !p.contains(&node_id.to_string()) {
+        if !can_accept_peer(node_id, &p) {
+            register_infraction(remote_ip, SCORE_DISCOVERY_VIOLATION, "subnet cap reached for /iam-node");
             return Ok(());
         }
-        println!("Added peer via /iam/: {}", normalized);
-        p.push(normalized);
+        println!("Added peer via /iam-node/: node_id={}...", &node_id[..8]);
+        p.push(node_id.to_string());
         save_peers(&p)?;
     }
     Ok(())
@@ -2051,24 +2058,13 @@ async fn handle_peers_request(
     let mut seen = HashSet::new();
 
     for peer in list.into_iter().take(MAX_PEERS_FROM_GOSSIP) {
-        let Some(normalized) = normalize_peer_address(&peer) else {
-            continue;
-        };
-        if Some(normalized.as_str()) == my_addr.as_deref() {
-            continue;
-        }
-        if !seen.insert(normalized.clone()) || p.contains(&normalized) {
-            continue;
-        }
-        if !can_accept_peer(&normalized, &p) {
-            continue;
-        }
-        println!("Added peer from /peers: {}", normalized);
-        p.push(normalized);
+        if !is_valid_node_id(&peer) || peer == *NODE_ID { continue; }
+        if !seen.insert(peer.clone()) || p.contains(&peer) { continue; }
+        if !can_accept_peer(&peer, &p) { continue; }
+        debug_log(&format!("Added peer from gossip: node_id={}...", &peer[..8]));
+        p.push(peer);
         added_count += 1;
-        if added_count >= MAX_NEW_PEERS_PER_GOSSIP {
-            break;
-        }
+        if added_count >= MAX_NEW_PEERS_PER_GOSSIP { break; }
     }
 
     if added_count > 0 {
@@ -2193,76 +2189,39 @@ pub async fn maintenance_loop(blockchain: Arc<Mutex<Vec<Block>>>, peers: Arc<Mut
         sync_chain(&blockchain, &peers, false, false).await;
 
         let peer_list = peers.lock().await.clone();
-        let my_addr = get_my_address().await;
         let mut added = 0usize;
-        for peer in sticky_peer_targets(&peer_list).into_iter() {
-            if Some(peer.as_str()) == my_addr.as_deref() {
-                continue;
-            }
-            let Some(info) = handshake_with_peer(&peer, &peers).await else {
-                continue;
-            };
+        for node_id in sticky_peer_targets(&peer_list).into_iter() {
+            let Some(addr) = resolve_peer_addr(&node_id) else { continue; };
+            let Some(info) = handshake_with_peer(&addr, &peers).await else { continue; };
             let mut p = peers.lock().await;
             let mut seen = HashSet::new();
-            for entry in info.peers.into_iter().take(MAX_PEERS_FROM_GOSSIP) {
-                let Some(normalized) = normalize_peer_address(&entry) else {
-                    continue;
-                };
-                if Some(normalized.as_str()) == my_addr.as_deref() {
-                    continue;
-                }
-                if !seen.insert(normalized.clone()) || p.contains(&normalized) {
-                    continue;
-                }
-                if !can_accept_peer(&normalized, &p) {
-                    continue;
-                }
-                p.push(normalized);
+            for candidate_id in info.peers.into_iter().take(MAX_PEERS_FROM_GOSSIP) {
+                if !is_valid_node_id(&candidate_id) || candidate_id == *NODE_ID { continue; }
+                if !seen.insert(candidate_id.clone()) || p.contains(&candidate_id) { continue; }
+                if !can_accept_peer(&candidate_id, &p) { continue; }
+                p.push(candidate_id);
                 added += 1;
-                if added >= MAX_NEW_PEERS_PER_GOSSIP {
-                    break;
-                }
+                if added >= MAX_NEW_PEERS_PER_GOSSIP { break; }
             }
-            if added > 0 {
-                let _ = save_peers(&p);
-            }
+            if added > 0 { let _ = save_peers(&p); }
         }
-        if added > 0 {
-            maint_log(&format!("Added {} peers from refresh", added));
-        }
+        if added > 0 { maint_log(&format!("Added {} peers from refresh", added)); }
 
         let current = peers.lock().await.clone();
-        let my_addr = get_my_address().await;
         let mut alive = Vec::with_capacity(current.len());
-        for peer in current.iter() {
-            if Some(peer) == my_addr.as_ref() {
-                alive.push(peer.clone());
-                continue;
-            }
-            if is_anchor_peer(peer) {
-                alive.push(peer.clone());
-                continue;
-            }
-            if ping_peer(peer).await {
-                alive.push(peer.clone());
+        for node_id in current.iter() {
+            if node_id.as_str() == NODE_ID.as_str() { alive.push(node_id.clone()); continue; }
+            if is_anchor_peer(node_id) { alive.push(node_id.clone()); continue; }
+            if let Some(addr) = resolve_peer_addr(node_id) {
+                if ping_peer(&addr).await { alive.push(node_id.clone()); }
+            } else {
+                alive.push(node_id.clone()); // keep if addr unknown yet
             }
         }
-        for &anchor in BOOTSTRAP_NODES {
-            if let Some(normalized) = normalize_peer_address(anchor) {
-                if !alive.contains(&normalized) {
-                    alive.push(normalized);
-                }
-            }
-        }
-        alive.sort();
-        alive.dedup();
+        alive.sort(); alive.dedup();
         if alive.len() != current.len() {
             let removed = current.len().saturating_sub(alive.len());
-            {
-                let mut p = peers.lock().await;
-                *p = alive;
-                let _ = save_peers(&p);
-            }
+            { let mut p = peers.lock().await; *p = alive; let _ = save_peers(&p); }
             maint_log(&format!("Removed {} dead peers", removed));
         }
     }
@@ -2274,24 +2233,10 @@ pub async fn bootstrap_and_discover_ip(peers: &Arc<Mutex<Vec<String>>>) {
 
     {
         let mut p = peers.lock().await;
-        for &bootstrap_node in BOOTSTRAP_NODES {
-            if let Some(normalized) = normalize_peer_address(bootstrap_node) {
-                if !p.contains(&normalized) {
-                    p.push(normalized.clone());
-                    bootstrap_peers.push(normalized.clone());
-                    println!("[STARTUP] Added bootstrap node to peers: {}", normalized);
-                }
-            } else if !p.contains(&bootstrap_node.to_string()) {
-                p.push(bootstrap_node.to_string());
-                bootstrap_peers.push(bootstrap_node.to_string());
-                println!(
-                    "[STARTUP] Added bootstrap node to peers: {}",
-                    bootstrap_node
-                );
-            }
-        }
+        // Migrate: drop any legacy ip:port entries
+        p.retain(|entry| is_valid_node_id(entry));
         if let Err(e) = save_peers(&p) {
-            println!("[STARTUP] Failed to save bootstrap nodes to peers: {}", e);
+            println!("[STARTUP] Failed to save migrated peers: {}", e);
         }
     }
 
@@ -2300,38 +2245,38 @@ pub async fn bootstrap_and_discover_ip(peers: &Arc<Mutex<Vec<String>>>) {
         match handshake_with_peer(bootstrap_node, peers).await {
             Some(info) => {
                 println!(
-                    "[STARTUP] Authenticated bootstrap node {} ({} peers announced)",
-                    bootstrap_node,
-                    info.peers.len()
+                    "[STARTUP] Authenticated bootstrap node {} node_id={}... ({} peers announced)",
+                    bootstrap_node, &info.node_id[..8.min(info.node_id.len())], info.peers.len()
                 );
-                for peer in info.peers.into_iter().take(MAX_PEERS_FROM_GOSSIP) {
-                    let Some(normalized) = normalize_peer_address(&peer) else {
-                        continue;
-                    };
-                    if !bootstrap_peers.contains(&normalized) {
-                        bootstrap_peers.push(normalized.clone());
-                        println!("[STARTUP] Added peer from bootstrap: {}", normalized);
+                // Permanently associate this bootstrap addr with its verified node_id
+                if !info.node_id.is_empty() && normalize_peer_address(bootstrap_node).is_some() {
+                    register_peer_addr(&info.node_id, bootstrap_node);
+                    if !bootstrap_peers.contains(&info.node_id) {
+                        bootstrap_peers.push(info.node_id.clone());
+                    }
+                }
+                for peer_id in info.peers.into_iter().take(MAX_PEERS_FROM_GOSSIP) {
+                    if is_valid_node_id(&peer_id) && !bootstrap_peers.contains(&peer_id) {
+                        bootstrap_peers.push(peer_id);
                     }
                 }
             }
-            None => println!(
-                "[STARTUP] Failed to authenticate bootstrap node: {}",
-                bootstrap_node
-            ),
+            None => println!("[STARTUP] Failed to authenticate bootstrap node: {}", bootstrap_node),
         }
     }
 
     {
         let mut p = peers.lock().await;
-        for peer in &bootstrap_peers {
-            if !p.contains(peer) && can_accept_peer(peer, &p) {
-                p.push(peer.clone());
+        p.retain(|entry| is_valid_node_id(entry));
+        for node_id in &bootstrap_peers {
+            if !p.contains(node_id) && can_accept_peer(node_id, &p) {
+                p.push(node_id.clone());
             }
         }
         if let Err(e) = save_peers(&p) {
             println!("[STARTUP] Failed to save bootstrap peers: {}", e);
         } else {
-            println!("[STARTUP] Saved {} peers to peers.json", p.len());
+            println!("[STARTUP] Saved {} peer node_ids to peers.json", p.len());
         }
     }
 
@@ -2353,117 +2298,70 @@ pub async fn bootstrap_and_discover_ip(peers: &Arc<Mutex<Vec<String>>>) {
 
     if let Some(ip) = observed_ip {
         println!("[STARTUP] Public IP determined via peers: {}", ip);
-        println!(
-            "[STARTUP] Step 4: Adding our address to peers.json and cleaning up duplicates..."
-        );
         let my_address = format!("{}:{}", ip, LISTEN_PORT);
+        register_peer_addr(&NODE_ID, &my_address);
         {
             let mut p = peers.lock().await;
-            p.retain(|peer| peer != &my_address);
-            p.push(my_address.clone());
-
+            p.retain(|entry| is_valid_node_id(entry));
+            if !p.contains(&*NODE_ID) { p.push(NODE_ID.clone()); }
             if let Err(e) = save_peers(&p) {
-                println!("[STARTUP] Failed to save updated peers: {}", e);
+                println!("[STARTUP] Failed to save peers: {}", e);
             } else {
-                println!("[STARTUP] Added our address to peers: {}", my_address);
-                println!("[STARTUP] Cleaned up duplicate addresses");
+                println!("[STARTUP] Registered our node_id in peers list");
             }
         }
-
-        println!("[STARTUP] Step 5: Broadcasting updated peers.json to network...");
-        broadcast_peers_to_network(peers, &my_address).await;
+        println!("[STARTUP] Step 5: Announcing ourselves to network...");
+        announce_to_network(peers).await;
     } else {
-        println!(
-            "[STARTUP] Could not determine public IP from peers. Node will wait for incoming connections."
-        );
+        println!("[STARTUP] Could not determine public IP. Node will wait for incoming connections.");
     }
 
     println!("[STARTUP] Bootstrap and IP discovery sequence completed");
 }
 
-async fn broadcast_peers_to_network(peers: &Arc<Mutex<Vec<String>>>, my_address: &str) {
-    let peer_list = peers.lock().await.clone();
-    let mut gossip_snapshot: Vec<String> = peer_list
-        .iter()
-        .filter_map(|peer| normalize_peer_address(peer))
-        .collect();
-    gossip_snapshot.sort();
-    gossip_snapshot.dedup();
-    gossip_snapshot.truncate(MAX_PEERS_FROM_GOSSIP);
-
-    let peers_json = match serde_json::to_vec(&gossip_snapshot) {
-        Ok(json) => json,
-        Err(e) => {
-            println!("[STARTUP] Failed to serialize peers for broadcast: {}", e);
-            return;
-        }
-    };
-
-    println!("[STARTUP] Broadcasting to {} peers...", peer_list.len());
-    let mut successful_broadcasts = 0;
-    let total_targets = peer_list
-        .iter()
-        .filter(|peer| peer.as_str() != my_address)
-        .count();
-
-    for peer in &peer_list {
-        if peer == my_address {
-            continue;
-        }
-
-        println!("[STARTUP] Broadcasting peers to: {}", peer);
-        if send_only(peer, MessageKind::Peers, &peers_json).await {
-            println!("[STARTUP] Successfully broadcast peers to: {}", peer);
-            successful_broadcasts += 1;
-        } else {
-            println!("[STARTUP] Failed to send peers to: {}", peer);
+/// Announce our node_id to all known peers via /iam-node and gossip our node_id list.
+/// Addresses come from PEER_ADDRS -- never gossiped.
+async fn announce_to_network(peers: &Arc<Mutex<Vec<String>>>) {
+    let addrs = all_peer_addrs();
+    let my_addr = get_my_address().await;
+    let cmd = format!("/iam-node/{}", *NODE_ID);
+    let mut ok = 0usize;
+    for (node_id, addr) in &addrs {
+        if node_id.as_str() == NODE_ID.as_str() { continue; }
+        if my_addr.as_deref() == Some(addr.as_str()) { continue; }
+        if send_only(addr, MessageKind::Command, cmd.as_bytes()).await { ok += 1; }
+    }
+    // Gossip our node_id list (node_ids only)
+    let node_ids: Vec<String> = peers.lock().await.clone().into_iter()
+        .filter(|id| is_valid_node_id(id)).collect();
+    if let Ok(json) = serde_json::to_vec(&node_ids) {
+        for (node_id, addr) in &addrs {
+            if node_id.as_str() == NODE_ID.as_str() { continue; }
+            let _ = send_only(addr, MessageKind::Peers, &json).await;
         }
     }
-
-    println!(
-        "[STARTUP] Broadcast completed: {}/{} successful",
-        successful_broadcasts, total_targets
-    );
+    println!("[STARTUP] Announcement: {}/{} peers notified", ok, addrs.len());
 }
 
 pub async fn broadcast_to_known_nodes(block: &Block) {
-    let my_addr = match get_my_address().await {
-        Some(addr) => addr,
-        None => {
-            debug_log("Skipping broadcast - public IP not yet determined");
-            return;
-        }
-    };
-
-    let peers: Vec<String> = load_peers().unwrap_or_default();
-
     let payload = match serde_json::to_vec(block) {
-        Ok(payload) => payload,
-        Err(_) => {
-            debug_log("Failed to serialize block");
-            return;
-        }
+        Ok(p) => p,
+        Err(_) => { debug_log("Failed to serialize block"); return; }
     };
     if payload.len() > MAX_MESSAGE_SIZE {
-        debug_log("Skipping block broadcast: block payload exceeds max message size");
+        debug_log("Skipping block broadcast: payload exceeds max message size");
         return;
     }
-
-    for peer in peers {
-        if peer == my_addr {
-            continue;
-        }
-
-        debug_log(&format!("Attempting to send block to peer: {}", peer));
-        if let Some(bytes) = request_payload(&peer, MessageKind::Block, &payload).await {
+    let my_addr = get_my_address().await;
+    for (node_id, addr) in all_peer_addrs() {
+        if my_addr.as_deref() == Some(addr.as_str()) { continue; }
+        debug_log(&format!("Sending block to node_id={}...", &node_id[..8]));
+        if let Some(bytes) = request_payload(&addr, MessageKind::Block, &payload).await {
             let resp = String::from_utf8_lossy(&bytes);
-            debug_log(&format!("Response from peer {}: {}", peer, resp.trim()));
-            debug_log(&format!("Block sent to peer: {}", peer));
+            debug_log(&format!("Response from node_id={}...: {}", &node_id[..8], resp.trim()));
+            mark_good_peer(&node_id);
         } else {
-            debug_log(&format!(
-                "Failed to connect or send block to peer: {}",
-                peer
-            ));
+            debug_log(&format!("Failed to send block to node_id={}...", &node_id[..8]));
         }
     }
 }
@@ -2763,104 +2661,59 @@ async fn integrate_peer_info_from_handshake(
         }
     }
 
-    let peer_addr = info
-        .public_ip
-        .as_ref()
-        .map(|ip| format!("{}:{}", ip, info.port))
-        .unwrap_or_else(|| original_addr.to_string());
-    let Some(peer_addr) = normalize_peer_address(&peer_addr) else {
-        return;
-    };
+    let Some(peer_addr) = normalize_peer_address(original_addr) else { return; };
+
     if !pin_peer_key(&peer_addr, &info.identity_pubkey) {
         if let Some(ip) = peer_ip(&peer_addr).map(|ip| ip.to_string()) {
             register_infraction(&ip, SCORE_INVALID_FRAME, "pinned key mismatch in handshake");
         }
-        debug_log(&format!(
-            "Ignoring peer {} due to pinned key mismatch",
-            peer_addr
-        ));
+        debug_log(&format!("Ignoring peer {} due to pinned key mismatch", peer_addr));
         return;
     }
-    let self_addr = {
-        OBSERVED_IP
-            .read()
-            .await
-            .as_ref()
-            .map(|ip| format!("{}:{}", ip, LISTEN_PORT))
-    };
-    if self_addr.as_deref() == Some(peer_addr.as_str()) {
-        return;
-    }
+    if info.node_id == *NODE_ID { return; }
+
+    // Store addr privately (node_id -> ip:port) -- never gossiped
+    register_peer_addr(&info.node_id, &peer_addr);
 
     let mut peers_guard = peers.lock().await;
     let mut changed = false;
-    if !peers_guard.contains(&peer_addr) && can_accept_peer(&peer_addr, &peers_guard) {
-        debug_log(&format!(
-            "Added peer {} via handshake (node_id={})",
-            peer_addr, info.node_id
-        ));
-        peers_guard.push(peer_addr.clone());
+    if !peers_guard.contains(&info.node_id) && can_accept_peer(&info.node_id, &peers_guard) {
+        debug_log(&format!("Added peer node_id={}... addr={} via handshake", &info.node_id[..8], peer_addr));
+        peers_guard.push(info.node_id.clone());
         changed = true;
     }
 
     let mut added_from_gossip = 0usize;
     let mut seen = HashSet::new();
-    for candidate in info.peers.iter().take(MAX_PEERS_FROM_GOSSIP) {
-        let Some(normalized) = normalize_peer_address(candidate) else {
-            continue;
-        };
-        if Some(normalized.as_str()) == self_addr.as_deref() {
-            continue;
-        }
-        if !seen.insert(normalized.clone()) || peers_guard.contains(&normalized) {
-            continue;
-        }
-        if !can_accept_peer(&normalized, &peers_guard) {
-            continue;
-        }
-        peers_guard.push(normalized);
+    for candidate_id in info.peers.iter().take(MAX_PEERS_FROM_GOSSIP) {
+        if !is_valid_node_id(candidate_id) || candidate_id == NODE_ID.as_str() { continue; }
+        if !seen.insert(candidate_id.clone()) || peers_guard.contains(candidate_id) { continue; }
+        if !can_accept_peer(candidate_id, &peers_guard) { continue; }
+        peers_guard.push(candidate_id.clone());
         added_from_gossip += 1;
         changed = true;
-        if added_from_gossip >= MAX_NEW_PEERS_PER_GOSSIP {
-            break;
-        }
+        if added_from_gossip >= MAX_NEW_PEERS_PER_GOSSIP { break; }
     }
 
     if changed {
         if let Err(e) = save_peers(&peers_guard) {
-            eprintln!(
-                "Failed to save peers after handshake with {}: {}",
-                peer_addr, e
-            );
+            eprintln!("Failed to save peers after handshake with {}: {}", peer_addr, e);
         }
     }
-
-    mark_good_peer(&peer_addr);
+    mark_good_peer(&info.node_id);
 }
 
 pub async fn determine_public_ip_from_peers() -> Option<String> {
-    let peers = match load_peers() {
-        Ok(peers) => peers,
-        Err(e) => {
-            debug_log(&format!("Failed to load peers: {}", e));
-            return None;
-        }
-    };
-
-    if peers.is_empty() {
-        debug_log("No peers available to determine public IP");
+    let addrs = all_peer_addrs();
+    if addrs.is_empty() {
+        debug_log("No peer addresses available to determine public IP");
         return None;
     }
-
-    debug_log(&format!("Loaded {} peers from file", peers.len()));
-    for peer in peers.iter().take(5) {
-        debug_log(&format!("Trying to learn our IP via {}", peer));
-        if let Some(info) = fetch_peer_info_once(peer).await {
+    for (node_id, addr) in addrs.iter().take(5) {
+        debug_log(&format!("Trying to learn our IP via node_id={}...", &node_id[..8]));
+        if let Some(info) = fetch_peer_info_once(addr).await {
             if let Some(observed) = info.observed_ip.filter(|ip| !ip.is_empty()) {
-                debug_log(&format!(
-                    "Peer {} sees us as {} -> using as public IP",
-                    peer, observed
-                ));
+                debug_log(&format!("node_id={}... sees us as {} -> using as public IP", &node_id[..8], observed));
                 return Some(observed);
             }
         }
@@ -2895,7 +2748,7 @@ pub async fn sync_chain(
     let raw_peers = peers.lock().await.clone();
     let mut peer_list = sticky_peer_targets(&raw_peers);
     for peer in raw_peers {
-        if !peer_list.contains(&peer) {
+        if !peer_list.contains(&peer) && is_valid_node_id(&peer) {
             peer_list.push(peer);
         }
     }
@@ -2914,12 +2767,16 @@ pub async fn sync_chain(
     let mut best_peer_addr: Option<String> = None;
     let mut consecutive_failures = 0usize;
 
-    for peer in peer_list {
+    for node_id in peer_list {
+        let peer = if is_valid_node_id(&node_id) {
+            match resolve_peer_addr(&node_id) {
+                Some(a) => a,
+                None => { debug_log(&format!("[SYNC] No addr for node_id={}..., skip", &node_id[..8])); continue; }
+            }
+        } else { node_id.clone() };
         let mut peer_failed = false;
-        if Some(peer.as_str()) == my_addr.as_deref() {
-            continue;
-        }
-        log(&format!("[SYNC] Connecting to {}", peer));
+        if my_addr.as_deref() == Some(peer.as_str()) { continue; }
+        log(&format!("[SYNC] Connecting to node_id={}...", &node_id[..8.min(node_id.len())]));
         let Some(info) = handshake_with_peer(&peer, peers).await else {
             log(&format!(
                 "[SYNC] Handshake failed with {} (trying next peer)",
@@ -3236,29 +3093,18 @@ pub async fn sync_chain(
 }
 
 pub async fn ping_peer(peer: &str) -> bool {
-    // Avoid pinging ourselves by comparing the target
-    // peer's IP with the public IP from the library.
-    if let Some(ip) = public_ip::addr().await {
-        let my_ip = ip.to_string();
-        if let Some(target_ip) = peer.split(':').next() {
-            if target_ip == my_ip {
-                debug_log(&format!("Skipping ping to self ({} == {})", peer, my_ip));
-                return false;
-            }
-        }
-    } else if let Some(my_addr) = get_my_address().await {
-        // Fallback: compare full address if we have one.
-        if peer == my_addr {
-            debug_log(&format!("Skipping ping to self by address match: {}", peer));
-            return false;
-        }
+    let addr = if is_valid_node_id(peer) {
+        match resolve_peer_addr(peer) { Some(a) => a, None => return false }
+    } else { peer.to_string() };
+    let my_addr = get_my_address().await;
+    if my_addr.as_deref() == Some(addr.as_str()) {
+        debug_log(&format!("Skipping ping to self: {}", addr));
+        return false;
     }
     if let Ok(Some(bytes)) = timeout(
         Duration::from_millis(700),
-        request_payload(peer, MessageKind::Command, b"/ping"),
-    )
-    .await
-    {
+        request_payload(&addr, MessageKind::Command, b"/ping"),
+    ).await {
         return bytes.as_slice() == b"pong";
     }
     false
