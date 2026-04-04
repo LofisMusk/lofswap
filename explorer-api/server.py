@@ -471,7 +471,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(200, {"peers": peers})
 
         if path == "/mempool":
-            return self._send_json(200, read_lines_json(data_path("mempool.json")))
+            from urllib.parse import parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            try:
+                limit = min(int(qs.get("limit", ["200"])[0]), 500)
+            except (ValueError, IndexError):
+                limit = 200
+            txs = read_lines_json(data_path("mempool.json"))
+            return self._send_json(200, txs[:limit])
 
         if path == "/chain":
             from urllib.parse import parse_qs
@@ -507,7 +514,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(200, meta or {})
 
         if path == "/node/ip":
-            return self._send_json(200, {"public": None, "private": local_ip()})
+            return self._send_json(200, {"public": None})
 
         if path.startswith("/address/"):
             rest = path[len("/address/"):]
@@ -518,8 +525,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send_json(200, {"address": addr, "balance": bal})
             if rest.endswith("/txs"):
                 addr = rest[:-len("/txs")]
+                if not addr or len(addr) > 128:
+                    return self._send_json(400, {"error": "invalid address"})
+                from urllib.parse import parse_qs
+                qs = parse_qs(urlparse(self.path).query)
+                try:
+                    limit = min(int(qs.get("limit", ["200"])[0]), 1000)
+                except (ValueError, IndexError):
+                    limit = 200
                 chain = consensus_chain()
-                return self._send_json(200, address_txs(addr, chain))
+                txs = address_txs(addr, chain)
+                return self._send_json(200, txs[-limit:] if len(txs) > limit else txs)
 
         if path.startswith("/block/"):
             block_hash = path[len("/block/"):]
