@@ -26,7 +26,7 @@ use crate::{
     NODE_PUBKEY, NODE_VERSION, OBSERVED_IP,
     chain::{
         DIFFICULTY_ADJUSTMENT_INTERVAL, DIFFICULTY_MAX_ZEROS, DIFFICULTY_MIN_ZEROS,
-        TARGET_BLOCK_TIME_SECS, calculate_balance, is_tx_valid, load_peers, next_nonce_for_address,
+        TARGET_BLOCK_TIME_SECS, calculate_balance, is_tx_valid, next_nonce_for_address,
         prune_mempool, save_chain, save_peers, validate_block, validate_chain,
     },
     errors::NodeError,
@@ -748,11 +748,6 @@ fn normalize_peer_address(peer: &str) -> Option<String> {
     Some(addr.to_string())
 }
 
-fn node_id_for_addr(addr: &str) -> Option<String> {
-    let guard = PEER_ADDRS.lock().unwrap_or_else(|p| p.into_inner());
-    guard.iter().find(|(_, a)| a.as_str() == addr).map(|(id, _)| id.clone())
-}
-
 fn peer_ip(addr: &str) -> Option<IpAddr> {
     addr.parse::<SocketAddr>().ok().map(|s| s.ip())
 }
@@ -782,6 +777,7 @@ fn subnet_cap(addr: &str) -> usize {
     }
 }
 
+#[allow(dead_code)]
 fn peers_in_subnet(peers: &[String], key: &str) -> usize {
     peers
         .iter()
@@ -2052,7 +2048,7 @@ async fn handle_peers_request(
         );
     }
 
-    let my_addr = get_my_address().await;
+    let _my_addr = get_my_address().await;
     let mut p = peers.lock().await;
     let mut added_count = 0usize;
     let mut seen = HashSet::new();
