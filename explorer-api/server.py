@@ -8,6 +8,29 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, unquote
 
 DATA_DIR = os.environ.get("DATA_DIR", "data")
+
+# -- rate limiting -----------------------------------------------------------
+import collections
+_rate_lock = threading.Lock()
+_rate_counters: dict = {}          # ip -> deque of timestamps
+RATE_LIMIT_WINDOW_SECS = 10
+RATE_LIMIT_MAX_REQUESTS = 30       # per window per IP
+
+def _check_rate_limit(ip: str) -> bool:
+    """Returns True if the request is allowed, False if rate-limited."""
+    now = time.time()
+    cutoff = now - RATE_LIMIT_WINDOW_SECS
+    with _rate_lock:
+        if ip not in _rate_counters:
+            _rate_counters[ip] = collections.deque()
+        dq = _rate_counters[ip]
+        while dq and dq[0] < cutoff:
+            dq.popleft()
+        if len(dq) >= RATE_LIMIT_MAX_REQUESTS:
+            return False
+        dq.append(now)
+        return True
+# ---------------------------------------------------------------------------
 LISTEN_ADDR = os.environ.get("EXPLORER_API_BIND", "127.0.0.1")
 LISTEN_PORT = int(os.environ.get("EXPLORER_API_PORT", "7000"))
 SELF_PEER = os.environ.get("EXPLORER_SELF_PEER", "").strip()
@@ -58,7 +81,17 @@ def load_peers():
     return out
 
 
+def is_allowed_peer(peer: str) -> bool:
+    """SSRF guard: only make outbound connections to known peers."""
+    if not peer or ":" not in peer:
+        return False
+    known = set(load_peers())
+    return peer in known
+
+
 def tcp_request(peer: str, payload: str, timeout: float):
+    if not is_allowed_peer(peer):
+        return None
     if ":" not in peer:
         return None
     host, port = peer.rsplit(":", 1)
@@ -87,6 +120,8 @@ def tcp_request(peer: str, payload: str, timeout: float):
 
 
 def tcp_request_timed(peer: str, payload: str, timeout: float):
+    if not is_allowed_peer(peer):
+        return None
     if ":" not in peer:
         return None
     host, port = peer.rsplit(":", 1)
@@ -373,6 +408,14 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
+        client_ip = self.client_address[0]
+        if not _check_rate_limit(client_ip):
+            self.send_response(429)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(b'{"error":"rate limit exceeded"}')
+            return
         path = urlparse(self.path).path
 
         if path == "/health":
@@ -431,7 +474,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(200, read_lines_json(data_path("mempool.json")))
 
         if path == "/chain":
-            return self._send_json(200, consensus_chain())
+            from urllib.parse import parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            try:
+                limit = min(int(qs.get("limit", ["200"])[0]), 500)
+            except (ValueError, IndexError):
+                limit = 200
+            chain = consensus_chain()
+            return self._send_json(200, chain[-limit:] if len(chain) > limit else chain)
 
         if path == "/chain/latest-tx":
             chain = consensus_chain()
@@ -489,6 +539,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if path.startswith("/peer/") or path.startswith("/api/peer/"):
             peer = unquote(path.split("/peer/", 1)[1])
+            if not is_allowed_peer(peer):
+                return self._send_json(403, {"error": "unknown peer"})
             chain, meta = consensus_state()
             consensus_height = (meta or {}).get("consensus_height", len(chain))
             blocks_mined = 0

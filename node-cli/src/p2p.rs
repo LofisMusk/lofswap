@@ -138,7 +138,7 @@ const HEADERS_PAGE_LIMIT_MAX: usize = 1024;
 const BLOCKS_PAGE_LIMIT: usize = 16;
 const BLOCKS_PAGE_LIMIT_MAX: usize = 64;
 const MAX_HEADERS_PER_SYNC: usize = 200_000;
-const MAX_NETWORK_REORG_DEPTH: usize = 512;
+const MAX_NETWORK_REORG_DEPTH: usize = 100;
 const SYNC_BACKOFF_BASE_MS: u64 = 200;
 const SYNC_BACKOFF_MAX_MS: u64 = 2_000;
 

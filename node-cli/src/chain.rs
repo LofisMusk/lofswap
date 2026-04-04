@@ -21,6 +21,30 @@ use crate::{
 
 const MAX_FUTURE_DRIFT_SECS: i64 = 2 * 60 * 60;
 pub const TARGET_BLOCK_TIME_SECS: i64 = 60;
+
+// == Checkpoints =============================================================
+// Hard-coded (height, hash) pairs. Any chain that diverges from these at the
+// specified heights is unconditionally rejected, regardless of PoW.
+// Add entries here as the network matures and blocks become deeply buried.
+static CHECKPOINTS: &[(u64, &str)] = &[
+    // Example (uncomment and fill when blocks are settled):
+    // (1000, "0000abcd..."),
+];
+
+fn check_checkpoints(chain: &[Block]) -> Result<(), NodeError> {
+    for &(height, expected_hash) in CHECKPOINTS {
+        if let Some(block) = chain.get(height as usize) {
+            if block.hash != expected_hash {
+                return Err(NodeError::ValidationError(format!(
+                    "Checkpoint mismatch at height {}: expected {}, got {}",
+                    height, expected_hash, block.hash
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+// ============================================================================
 pub const DIFFICULTY_ADJUSTMENT_INTERVAL: u64 = 10;
 pub const DIFFICULTY_MIN_ZEROS: u32 = 1;
 pub const DIFFICULTY_MAX_ZEROS: u32 = 32;
@@ -593,6 +617,7 @@ pub fn validate_chain(chain: &[Block]) -> Result<(), NodeError> {
     if chain.is_empty() {
         return Ok(());
     }
+    check_checkpoints(chain)?;
     for i in 0..chain.len() {
         let prev = if i == 0 { None } else { Some(&chain[i - 1]) };
         validate_block(&chain[i], prev, &chain[..i])?;
