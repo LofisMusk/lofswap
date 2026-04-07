@@ -15,7 +15,7 @@ Before you begin, ensure that you have the following installed on your system:
 1. **Clone the repository:**  
     ```bash
     git clone https://github.com/LofisMusk/lofswap.git
-    cd lofswan
+    cd lofswap
     ```
 
 2. **Install Dependencies:**  

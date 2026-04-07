@@ -1,0 +1,127 @@
+name: Deploy Websites
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/deploy-websites.yml
+      - explorer/**
+      - lofswap-website/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-websites-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  detect-changes:
+    name: Detect Website Changes
+    runs-on: ubuntu-24.04
+    outputs:
+      explorer: ${{ steps.filter.outputs.explorer }}
+      website: ${{ steps.filter.outputs.website }}
+      any: ${{ steps.collect.outputs.any }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed website folders
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            explorer:
+              - 'explorer/**'
+            website:
+              - 'lofswap-website/**'
+
+      - name: Summarize changes
+        id: collect
+        shell: bash
+        run: |
+          if [[ "${{ steps.filter.outputs.explorer }}" == "true" || "${{ steps.filter.outputs.website }}" == "true" ]]; then
+            echo "any=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "any=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  deploy:
+    name: Deploy Static Websites
+    needs: detect-changes
+    if: needs.detect-changes.outputs.any == 'true'
+    runs-on: ubuntu-24.04
+    env:
+      DEPLOY_EXPLORER: ${{ needs.detect-changes.outputs.explorer }}
+      DEPLOY_WEBSITE: ${{ needs.detect-changes.outputs.website }}
+      SSH_USER: ${{ secrets.SSH_USER }}
+      SSH_HOST: ${{ secrets.SSH_HOST2 }}
+      REMOTE_WEBSITE_DIR: /var/www/lofswap-site
+      REMOTE_EXPLORER_DIR: /var/www/html
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Prepare deploy archives
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${DEPLOY_WEBSITE}" == "true" ]]; then
+            tar -C lofswap-website -czf "${RUNNER_TEMP}/lofswap-website.tar.gz" .
+          fi
+
+          if [[ "${DEPLOY_EXPLORER}" == "true" ]]; then
+            tar -C explorer -czf "${RUNNER_TEMP}/explorer.tar.gz" .
+          fi
+
+      - name: Setup SSH key and known_hosts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "${{ secrets.SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${SSH_HOST}" > ~/.ssh/known_hosts 2>/dev/null || true
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Upload archives to server
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh_common=(-i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes -o ConnectTimeout=15)
+
+          if [[ "${DEPLOY_WEBSITE}" == "true" ]]; then
+            scp "${ssh_common[@]}" "${RUNNER_TEMP}/lofswap-website.tar.gz" "${SSH_USER}@${SSH_HOST}:/tmp/lofswap-website-${GITHUB_SHA}.tar.gz"
+          fi
+
+          if [[ "${DEPLOY_EXPLORER}" == "true" ]]; then
+            scp "${ssh_common[@]}" "${RUNNER_TEMP}/explorer.tar.gz" "${SSH_USER}@${SSH_HOST}:/tmp/explorer-${GITHUB_SHA}.tar.gz"
+          fi
+
+      - name: Deploy websites on remote server
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh_common=(-i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes -o ConnectTimeout=15)
+
+          ssh "${ssh_common[@]}" "${SSH_USER}@${SSH_HOST}" "\
+            set -euo pipefail; \
+            if [[ '${DEPLOY_WEBSITE}' == 'true' ]]; then \
+              sudo mkdir -p '${REMOTE_WEBSITE_DIR}'; \
+              sudo find '${REMOTE_WEBSITE_DIR}' -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; \
+              sudo tar -xzf '/tmp/lofswap-website-${GITHUB_SHA}.tar.gz' -C '${REMOTE_WEBSITE_DIR}'; \
+              rm -f '/tmp/lofswap-website-${GITHUB_SHA}.tar.gz'; \
+            fi; \
+            if [[ '${DEPLOY_EXPLORER}' == 'true' ]]; then \
+              sudo mkdir -p '${REMOTE_EXPLORER_DIR}'; \
+              sudo find '${REMOTE_EXPLORER_DIR}' -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; \
+              sudo tar -xzf '/tmp/explorer-${GITHUB_SHA}.tar.gz' -C '${REMOTE_EXPLORER_DIR}'; \
+              rm -f '/tmp/explorer-${GITHUB_SHA}.tar.gz'; \
+            fi; \
+            sudo systemctl reload nginx"

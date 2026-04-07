@@ -1,13 +1,68 @@
-name: Deploy Node-CLI to Server 2
+name: Deploy Node
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - main
+    paths:
+      - .github/workflows/main.yml
+      - Cargo.toml
+      - Cargo.lock
+      - blockchain-core/**
+      - node-cli/**
+      - explorer-api/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-node-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build:
-    runs-on: ubuntu-22.04
+  detect-changes:
+    name: Detect Node Changes
+    runs-on: ubuntu-24.04
+    outputs:
+      node_cli: ${{ steps.filter.outputs.node_cli }}
+      explorer_api: ${{ steps.filter.outputs.explorer_api }}
+      any: ${{ steps.collect.outputs.any }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
+      - name: Detect changed packages
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            node_cli:
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'blockchain-core/**'
+              - 'node-cli/**'
+            explorer_api:
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'explorer-api/**'
+
+      - name: Summarize changes
+        id: collect
+        shell: bash
+        run: |
+          if [[ "${{ steps.filter.outputs.node_cli }}" == "true" || "${{ steps.filter.outputs.explorer_api }}" == "true" ]]; then
+            echo "any=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "any=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build-node-cli:
+    name: Build node-cli
+    needs: detect-changes
+    if: needs.detect-changes.outputs.node_cli == 'true'
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -18,158 +73,153 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: "."   # jeśli masz workspace, dostosuj
+          shared-key: deploy-node-linux-amd64
 
-      - name: Build Release
+      - name: Build node-cli
+        run: cargo build --release -p node-cli
+
+      - name: Prepare node-cli artifact
+        shell: bash
         run: |
-          cargo build -r -p node-cli
-          cargo build -r -p explorer-api
-          mkdir -p artifacts/explorer-api
-          cp target/release/node-cli artifacts/
-          cp target/release/explorer-api artifacts/explorer-api/
-          # jeśli masz dodatkowe pliki (config.toml, .env.example itp.)
-          # cp config/* artifacts/
-          cd artifacts
-          zip -r ../node-cli.zip .
+          set -euo pipefail
+          mkdir -p dist/node-cli
+          cp target/release/node-cli dist/node-cli/node-cli
 
-      - name: Upload artifact for debugging (opcjonalnie)
+      - name: Upload node-cli artifact
         uses: actions/upload-artifact@v4
         with:
           name: node-cli-binary
-          path: node-cli.zip
+          path: dist/node-cli/node-cli
+          if-no-files-found: error
+          retention-days: 1
+
+  build-explorer-api:
+    name: Build explorer-api
+    needs: detect-changes
+    if: needs.detect-changes.outputs.explorer_api == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: deploy-explorer-api-linux-amd64
+
+      - name: Build explorer-api
+        run: cargo build --release -p explorer-api
+
+      - name: Prepare explorer-api artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/explorer-api
+          cp target/release/explorer-api dist/explorer-api/explorer-api
+
+      - name: Upload explorer-api artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: explorer-api-binary
+          path: dist/explorer-api/explorer-api
+          if-no-files-found: error
           retention-days: 1
 
   deploy:
-    runs-on: ubuntu-22.04
-    needs: build
-
+    name: Deploy Node Services
+    needs:
+      - detect-changes
+      - build-node-cli
+      - build-explorer-api
+    if: >
+      needs.detect-changes.outputs.any == 'true' &&
+      (needs.build-node-cli.result == 'success' || needs.build-node-cli.result == 'skipped') &&
+      (needs.build-explorer-api.result == 'success' || needs.build-explorer-api.result == 'skipped')
+    runs-on: ubuntu-24.04
+    env:
+      NODE_CLI_CHANGED: ${{ needs.detect-changes.outputs.node_cli }}
+      EXPLORER_API_CHANGED: ${{ needs.detect-changes.outputs.explorer_api }}
+      SSH_USER: ${{ secrets.SSH_USER }}
+      SSH_HOST1: ${{ secrets.SSH_HOST1 }}
+      SSH_HOST2: ${{ secrets.SSH_HOST2 }}
+      DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
     steps:
-      - name: Download build artifact
+      - name: Download node-cli artifact
+        if: env.NODE_CLI_CHANGED == 'true'
         uses: actions/download-artifact@v4
         with:
           name: node-cli-binary
-          path: .
+          path: dist/node-cli
 
-      - name: Prepare artifact file for scp
+      - name: Download explorer-api artifact
+        if: env.EXPLORER_API_CHANGED == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: explorer-api-binary
+          path: dist/explorer-api
+
+      - name: Setup SSH key and known_hosts
+        shell: bash
         run: |
-          # actions/download-artifact extracts into ./node-cli-binary by artifact name.
-          # Move the zip to workspace root so scp can find ./node-cli.zip
-          set -e
-          echo "Workspace contents before move:"
-          ls -la
-
-          if [ -d "./node-cli-binary" ]; then
-            echo "Found ./node-cli-binary, listing:"
-            ls -la node-cli-binary || true
-            # Move any zip found in that folder to workspace root
-            mv node-cli-binary/*.zip ./ || true
-          fi
-
-          # fallback: find any node-cli*.zip and copy to ./node-cli.zip
-          if [ ! -f "./node-cli.zip" ]; then
-            found=$(find . -maxdepth 3 -type f -name 'node-cli*.zip' | head -n1 || true)
-            if [ -n "$found" ]; then
-              echo "Found zip at: $found — copying to ./node-cli.zip"
-              cp "$found" ./node-cli.zip
-            fi
-          fi
-
-          echo "Workspace contents after move:"
-          ls -la
-
-      - name: Setup SSH key & known_hosts
-        run: |
+          set -euo pipefail
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
-
-          # Najbezpieczniejszy sposób – printf gwarantuje trailing newline
           printf '%s\n' "${{ secrets.SSH_KEY }}" > ~/.ssh/deploy_key
-
           chmod 600 ~/.ssh/deploy_key
-
-          # Debug – sprawdzamy format pliku (bezpiecznie, nie pokazuje całego klucza)
-          echo "Key file size: $(stat -c %s ~/.ssh/deploy_key) bytes"
-          head -n 3 ~/.ssh/deploy_key | sed 's/./*/g'   # maskowane pierwsze linie
-          tail -n 3 ~/.ssh/deploy_key | sed 's/./*/g'   # maskowane ostatnie linie
-
-          # Dodajemy host do known_hosts (mniej ostrzeżeń MITM)
-          ssh-keyscan -H ${{ secrets.SSH_HOST2 }} >> ~/.ssh/known_hosts 2>/dev/null || true
+          : > ~/.ssh/known_hosts
+          for host in "${SSH_HOST1}" "${SSH_HOST2}"; do
+            if [[ -n "${host}" ]]; then
+              ssh-keyscan -H "${host}" >> ~/.ssh/known_hosts 2>/dev/null || true
+            fi
+          done
           chmod 644 ~/.ssh/known_hosts
 
-      - name: Deploy to Server 2 (prepare remote dir, SCP + extract + restart)
+      - name: Deploy changed services
+        shell: bash
         run: |
-          echo "Deploying to ${{ secrets.SSH_HOST2 }} as ${{ secrets.SSH_USER }}"
+          set -euo pipefail
 
-          # Ensure remote directory exists and show info (helps diagnose 'Is a directory' errors)
-          ssh -v \
-            -i ~/.ssh/deploy_key \
-            -o StrictHostKeyChecking=no \
-            -o ConnectTimeout=15 \
-            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST2 }} "mkdir -p '${{ secrets.DEPLOY_PATH }}' && echo 'Remote directory info:' && ls -ld '${{ secrets.DEPLOY_PATH }}' || true"
+          ssh_common=(-i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes -o ConnectTimeout=15)
+          hosts=()
 
-          # Kopiowanie z explicit filename to avoid ambiguity
-          scp -v \
-            -i ~/.ssh/deploy_key \
-            -o StrictHostKeyChecking=no \
-            -o ConnectTimeout=15 \
-            "./node-cli.zip" ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST2 }}:"${{ secrets.DEPLOY_PATH }}/node-cli.zip"
+          if [[ -n "${SSH_HOST1}" ]]; then
+            hosts+=("${SSH_HOST1}")
+          fi
 
-          # Zdalne wykonanie komend: unzip, restart
-          ssh -v \
-            -i ~/.ssh/deploy_key \
-            -o StrictHostKeyChecking=no \
-            -o ConnectTimeout=15 \
-            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST2 }} << 'EOF'
-              echo "Połączono z serwerem"
-              cd ${{ secrets.DEPLOY_PATH }} || { echo "Błąd: katalog nie istnieje"; exit 1; }
-              unzip -o node-cli.zip || { echo "Błąd unzip"; exit 1; }
-              rm -f node-cli.zip
-              chmod +x node-cli
-              chmod +x explorer-api/explorer-api || true
-              sudo systemctl daemon-reload
-              sudo systemctl restart node-cli || { echo "Restart nieudany"; exit 1; }
-              sudo systemctl restart explorer-api || { echo "Restart explorer-api nieudany"; exit 1; }
-              sleep 2
-              sudo systemctl status node-cli --no-pager || true
-              sudo systemctl status explorer-api --no-pager || true
-              echo "Deploy zakończony"
-          EOF
+          if [[ -n "${SSH_HOST2}" ]]; then
+            hosts+=("${SSH_HOST2}")
+          fi
 
-      - name: Deploy to Server 1 (prepare remote dir, SCP + extract + restart)
-        run: |
-          echo "Deploying to ${{ secrets.SSH_HOST1 }} as ${{ secrets.SSH_USER }}"
+          if [[ ${#hosts[@]} -eq 0 ]]; then
+            echo "No SSH hosts configured."
+            exit 1
+          fi
 
-          # Ensure remote directory exists and show info (helps diagnose 'Is a directory' errors)
-          ssh -v \
-            -i ~/.ssh/deploy_key \
-            -o StrictHostKeyChecking=no \
-            -o ConnectTimeout=15 \
-            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST1 }} "mkdir -p '${{ secrets.DEPLOY_PATH }}' && echo 'Remote directory info:' && ls -ld '${{ secrets.DEPLOY_PATH }}' || true"
+          for host in "${hosts[@]}"; do
+            echo "Deploying to ${host}"
 
-          # Kopiowanie z explicit filename to avoid ambiguity
-          scp -v \
-            -i ~/.ssh/deploy_key \
-            -o StrictHostKeyChecking=no \
-            -o ConnectTimeout=15 \
-            "./node-cli.zip" ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST1 }}:"${{ secrets.DEPLOY_PATH }}/node-cli.zip"
+            ssh "${ssh_common[@]}" "${SSH_USER}@${host}" "mkdir -p '${DEPLOY_PATH}' '${DEPLOY_PATH}/explorer-api'"
 
-          # Zdalne wykonanie komend: unzip, restart
-          ssh -v \
-            -i ~/.ssh/deploy_key \
-            -o StrictHostKeyChecking=no \
-            -o ConnectTimeout=15 \
-            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST1 }} << 'EOF'
-              echo "Połączono z serwerem"
-              cd ${{ secrets.DEPLOY_PATH }} || { echo "Błąd: katalog nie istnieje"; exit 1; }
-              unzip -o node-cli.zip || { echo "Błąd unzip"; exit 1; }
-              rm -f node-cli.zip
-              chmod +x node-cli
-              chmod +x explorer-api/explorer-api || true
-              sudo systemctl daemon-reload
-              sudo systemctl restart node-cli || { echo "Restart nieudany"; exit 1; }
-              sudo systemctl restart explorer-api || { echo "Restart explorer-api nieudany"; exit 1; }
-              sleep 2
-              sudo systemctl status node-cli --no-pager || true
-              sudo systemctl status explorer-api --no-pager || true
-              echo "Deploy zakończony"
-          EOF
+            if [[ "${NODE_CLI_CHANGED}" == "true" ]]; then
+              scp "${ssh_common[@]}" dist/node-cli/node-cli "${SSH_USER}@${host}:/tmp/node-cli"
+              ssh "${ssh_common[@]}" "${SSH_USER}@${host}" "\
+                install -m 755 /tmp/node-cli '${DEPLOY_PATH}/node-cli' && \
+                rm -f /tmp/node-cli && \
+                sudo systemctl restart node-cli"
+            fi
+
+            if [[ "${EXPLORER_API_CHANGED}" == "true" ]]; then
+              scp "${ssh_common[@]}" dist/explorer-api/explorer-api "${SSH_USER}@${host}:/tmp/explorer-api"
+              ssh "${ssh_common[@]}" "${SSH_USER}@${host}" "\
+                install -m 755 /tmp/explorer-api '${DEPLOY_PATH}/explorer-api/explorer-api' && \
+                rm -f /tmp/explorer-api && \
+                sudo systemctl restart explorer-api"
+            fi
+
+            ssh "${ssh_common[@]}" "${SSH_USER}@${host}" "\
+              sudo systemctl status node-cli --no-pager || true; \
+              sudo systemctl status explorer-api --no-pager || true"
+          done
