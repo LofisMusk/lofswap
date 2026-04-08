@@ -29,7 +29,8 @@ jobs:
       node_cli: ${{ steps.filter.outputs.node_cli }}
       wallet_cli: ${{ steps.filter.outputs.wallet_cli }}
       wallet_gui: ${{ steps.filter.outputs.wallet_gui }}
-      any: ${{ steps.collect.outputs.any }}
+      any: ${{ steps.matrix.outputs.any }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -58,213 +59,124 @@ jobs:
               - 'wallet-gui/**'
               - 'lofswap-logo.png'
 
-      - name: Summarize changes
-        id: collect
+      - name: Build release matrix
+        id: matrix
         shell: bash
         run: |
-          if [[ \
-            "${{ steps.filter.outputs.node_cli }}" == "true" || \
-            "${{ steps.filter.outputs.wallet_cli }}" == "true" || \
-            "${{ steps.filter.outputs.wallet_gui }}" == "true" \
-          ]]; then
-            echo "any=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "any=false" >> "$GITHUB_OUTPUT"
-          fi
+          export NODE_CLI_CHANGED="${{ steps.filter.outputs.node_cli }}"
+          export WALLET_CLI_CHANGED="${{ steps.filter.outputs.wallet_cli }}"
+          export WALLET_GUI_CHANGED="${{ steps.filter.outputs.wallet_gui }}"
+
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import os
+
+          changed = {
+              "node-cli": os.environ["NODE_CLI_CHANGED"] == "true",
+              "wallet-cli": os.environ["WALLET_CLI_CHANGED"] == "true",
+              "wallet-gui": os.environ["WALLET_GUI_CHANGED"] == "true",
+          }
+
+          components = {
+              "node-cli": {
+                  "cargo_package": "node-cli",
+                  "binary_name": "node-cli",
+                  "asset_prefix": "lofswap-node",
+              },
+              "wallet-cli": {
+                  "cargo_package": "wallet-cli",
+                  "binary_name": "wallet-cli",
+                  "asset_prefix": "lofswap-wallet-cli",
+              },
+              "wallet-gui": {
+                  "cargo_package": "wallet-gui",
+                  "binary_name": "wallet-gui",
+                  "asset_prefix": "lofswap-wallet-gui",
+              },
+          }
+
+          platforms = [
+              {
+                  "runner": "ubuntu-24.04",
+                  "os_label": "linux",
+                  "arch": "amd64",
+                  "target": "x86_64-unknown-linux-gnu",
+                  "exe_suffix": "",
+              },
+              {
+                  "runner": "ubuntu-24.04-arm",
+                  "os_label": "linux",
+                  "arch": "arm64",
+                  "target": "aarch64-unknown-linux-gnu",
+                  "exe_suffix": "",
+              },
+              {
+                  "runner": "macos-15-intel",
+                  "os_label": "macos",
+                  "arch": "amd64",
+                  "target": "x86_64-apple-darwin",
+                  "exe_suffix": "",
+              },
+              {
+                  "runner": "macos-15",
+                  "os_label": "macos",
+                  "arch": "arm64",
+                  "target": "aarch64-apple-darwin",
+                  "exe_suffix": "",
+              },
+              {
+                  "runner": "windows-latest",
+                  "os_label": "windows",
+                  "arch": "amd64",
+                  "target": "x86_64-pc-windows-msvc",
+                  "exe_suffix": ".exe",
+              },
+              {
+                  "runner": "windows-11-arm",
+                  "os_label": "windows",
+                  "arch": "arm64",
+                  "target": "aarch64-pc-windows-msvc",
+                  "exe_suffix": ".exe",
+              },
+          ]
+
+          include = []
+          for component_name, component_cfg in components.items():
+              if not changed[component_name]:
+                  continue
+              for platform in platforms:
+                  include.append(
+                      {
+                          "component": component_name,
+                          **component_cfg,
+                          **platform,
+                      }
+                  )
+
+          print(f"any={'true' if include else 'false'}")
+          print(f"matrix={json.dumps({'include': include}, separators=(',', ':'))}")
+          PY
 
   build-artifacts:
     name: Build ${{ matrix.asset_prefix }} ${{ matrix.os_label }} ${{ matrix.arch }}
     needs: detect-changes
+    if: needs.detect-changes.outputs.any == 'true'
     runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ github.workspace }}
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - component: node-cli
-            cargo_package: node-cli
-            binary_name: node-cli
-            asset_prefix: lofswap-node
-            runner: ubuntu-24.04
-            os_label: linux
-            arch: amd64
-            target: x86_64-unknown-linux-gnu
-            exe_suffix: ""
-          - component: node-cli
-            cargo_package: node-cli
-            binary_name: node-cli
-            asset_prefix: lofswap-node
-            runner: ubuntu-24.04-arm
-            os_label: linux
-            arch: arm64
-            target: aarch64-unknown-linux-gnu
-            exe_suffix: ""
-          - component: node-cli
-            cargo_package: node-cli
-            binary_name: node-cli
-            asset_prefix: lofswap-node
-            runner: macos-15-intel
-            os_label: macos
-            arch: amd64
-            target: x86_64-apple-darwin
-            exe_suffix: ""
-          - component: node-cli
-            cargo_package: node-cli
-            binary_name: node-cli
-            asset_prefix: lofswap-node
-            runner: macos-15
-            os_label: macos
-            arch: arm64
-            target: aarch64-apple-darwin
-            exe_suffix: ""
-          - component: node-cli
-            cargo_package: node-cli
-            binary_name: node-cli
-            asset_prefix: lofswap-node
-            runner: windows-latest
-            os_label: windows
-            arch: amd64
-            target: x86_64-pc-windows-msvc
-            exe_suffix: .exe
-          - component: node-cli
-            cargo_package: node-cli
-            binary_name: node-cli
-            asset_prefix: lofswap-node
-            runner: windows-11-arm
-            os_label: windows
-            arch: arm64
-            target: aarch64-pc-windows-msvc
-            exe_suffix: .exe
-          - component: wallet-cli
-            cargo_package: wallet-cli
-            binary_name: wallet-cli
-            asset_prefix: lofswap-wallet-cli
-            runner: ubuntu-24.04
-            os_label: linux
-            arch: amd64
-            target: x86_64-unknown-linux-gnu
-            exe_suffix: ""
-          - component: wallet-cli
-            cargo_package: wallet-cli
-            binary_name: wallet-cli
-            asset_prefix: lofswap-wallet-cli
-            runner: ubuntu-24.04-arm
-            os_label: linux
-            arch: arm64
-            target: aarch64-unknown-linux-gnu
-            exe_suffix: ""
-          - component: wallet-cli
-            cargo_package: wallet-cli
-            binary_name: wallet-cli
-            asset_prefix: lofswap-wallet-cli
-            runner: macos-15-intel
-            os_label: macos
-            arch: amd64
-            target: x86_64-apple-darwin
-            exe_suffix: ""
-          - component: wallet-cli
-            cargo_package: wallet-cli
-            binary_name: wallet-cli
-            asset_prefix: lofswap-wallet-cli
-            runner: macos-15
-            os_label: macos
-            arch: arm64
-            target: aarch64-apple-darwin
-            exe_suffix: ""
-          - component: wallet-cli
-            cargo_package: wallet-cli
-            binary_name: wallet-cli
-            asset_prefix: lofswap-wallet-cli
-            runner: windows-latest
-            os_label: windows
-            arch: amd64
-            target: x86_64-pc-windows-msvc
-            exe_suffix: .exe
-          - component: wallet-cli
-            cargo_package: wallet-cli
-            binary_name: wallet-cli
-            asset_prefix: lofswap-wallet-cli
-            runner: windows-11-arm
-            os_label: windows
-            arch: arm64
-            target: aarch64-pc-windows-msvc
-            exe_suffix: .exe
-          - component: wallet-gui
-            cargo_package: wallet-gui
-            binary_name: wallet-gui
-            asset_prefix: lofswap-wallet-gui
-            runner: ubuntu-24.04
-            os_label: linux
-            arch: amd64
-            target: x86_64-unknown-linux-gnu
-            exe_suffix: ""
-          - component: wallet-gui
-            cargo_package: wallet-gui
-            binary_name: wallet-gui
-            asset_prefix: lofswap-wallet-gui
-            runner: ubuntu-24.04-arm
-            os_label: linux
-            arch: arm64
-            target: aarch64-unknown-linux-gnu
-            exe_suffix: ""
-          - component: wallet-gui
-            cargo_package: wallet-gui
-            binary_name: wallet-gui
-            asset_prefix: lofswap-wallet-gui
-            runner: macos-15-intel
-            os_label: macos
-            arch: amd64
-            target: x86_64-apple-darwin
-            exe_suffix: ""
-          - component: wallet-gui
-            cargo_package: wallet-gui
-            binary_name: wallet-gui
-            asset_prefix: lofswap-wallet-gui
-            runner: macos-15
-            os_label: macos
-            arch: arm64
-            target: aarch64-apple-darwin
-            exe_suffix: ""
-          - component: wallet-gui
-            cargo_package: wallet-gui
-            binary_name: wallet-gui
-            asset_prefix: lofswap-wallet-gui
-            runner: windows-latest
-            os_label: windows
-            arch: amd64
-            target: x86_64-pc-windows-msvc
-            exe_suffix: .exe
-          - component: wallet-gui
-            cargo_package: wallet-gui
-            binary_name: wallet-gui
-            asset_prefix: lofswap-wallet-gui
-            runner: windows-11-arm
-            os_label: windows
-            arch: arm64
-            target: aarch64-pc-windows-msvc
-            exe_suffix: .exe
+      matrix: ${{ fromJSON(needs.detect-changes.outputs.matrix) }}
     steps:
-      - name: Check if component should build
-        id: should_build
-        shell: bash
-        run: |
-          component="${{ matrix.component }}"
-          if [[ "$component" == "node-cli" ]] && [[ "${{ needs.detect-changes.outputs.node_cli }}" == "true" ]]; then
-            echo "build=true" >> "$GITHUB_OUTPUT"
-          elif [[ "$component" == "wallet-cli" ]] && [[ "${{ needs.detect-changes.outputs.wallet_cli }}" == "true" ]]; then
-            echo "build=true" >> "$GITHUB_OUTPUT"
-          elif [[ "$component" == "wallet-gui" ]] && [[ "${{ needs.detect-changes.outputs.wallet_gui }}" == "true" ]]; then
-            echo "build=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "build=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Checkout code
-        if: steps.should_build.outputs.build == 'true'
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install Linux GUI dependencies
         if: matrix.component == 'wallet-gui' && matrix.os_label == 'linux'
-        shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -279,7 +191,7 @@ jobs:
             pkg-config
 
       - name: Setup Node.js
-        if: steps.should_build.outputs.build == 'true' && matrix.component == 'wallet-gui'
+        if: matrix.component == 'wallet-gui'
         uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -297,7 +209,7 @@ jobs:
           shared-key: release-${{ matrix.component }}-${{ matrix.target }}
 
       - name: Build wallet-gui frontend
-        if: steps.should_build.outputs.build == 'true' && matrix.component == 'wallet-gui'
+        if: matrix.component == 'wallet-gui'
         working-directory: wallet-gui/frontend
         run: |
           npm ci --no-audit --no-fund
