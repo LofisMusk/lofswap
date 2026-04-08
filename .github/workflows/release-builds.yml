@@ -26,6 +26,7 @@ jobs:
     name: Detect Release Targets
     runs-on: ubuntu-24.04
     outputs:
+      workflow: ${{ steps.filter.outputs.workflow }}
       node_cli: ${{ steps.filter.outputs.node_cli }}
       wallet_cli: ${{ steps.filter.outputs.wallet_cli }}
       wallet_gui: ${{ steps.filter.outputs.wallet_gui }}
@@ -42,6 +43,8 @@ jobs:
         uses: dorny/paths-filter@v3
         with:
           filters: |
+            workflow:
+              - '.github/workflows/release-builds.yml'
             node_cli:
               - 'Cargo.toml'
               - 'Cargo.lock'
@@ -63,6 +66,7 @@ jobs:
         id: matrix
         shell: bash
         run: |
+          export WORKFLOW_CHANGED="${{ steps.filter.outputs.workflow }}"
           export NODE_CLI_CHANGED="${{ steps.filter.outputs.node_cli }}"
           export WALLET_CLI_CHANGED="${{ steps.filter.outputs.wallet_cli }}"
           export WALLET_GUI_CHANGED="${{ steps.filter.outputs.wallet_gui }}"
@@ -76,6 +80,7 @@ jobs:
               "wallet-cli": os.environ["WALLET_CLI_CHANGED"] == "true",
               "wallet-gui": os.environ["WALLET_GUI_CHANGED"] == "true",
           }
+          workflow_changed = os.environ["WORKFLOW_CHANGED"] == "true"
 
           components = {
               "node-cli": {
@@ -142,7 +147,7 @@ jobs:
 
           include = []
           for component_name, component_cfg in components.items():
-              if not changed[component_name]:
+              if not (workflow_changed or changed[component_name]):
                   continue
               for platform in platforms:
                   include.append(
