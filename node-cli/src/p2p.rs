@@ -86,6 +86,37 @@ fn is_valid_node_id(s: &str) -> bool {
     s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
+/// Verify that a claimed node_id is cryptographically consistent with the accompanying pubkey.
+/// node_id must equal SHA-256(pubkey_bytes) — same derivation used in identity.rs.
+/// Returns false if the pubkey is missing/invalid or the node_id doesn't match.
+fn node_id_matches_pubkey(node_id: &str, identity_pubkey: &str) -> bool {
+    if identity_pubkey.is_empty() {
+        // Older nodes may not send pubkey — skip validation but don't trust the node_id
+        return true;
+    }
+    match node_id_from_pubkey_hex(identity_pubkey) {
+        Some(expected) => {
+            if expected != node_id {
+                eprintln!(
+                    "[security] node_id/pubkey mismatch: claimed={} expected={} — rejecting peer",
+                    &node_id[..8.min(node_id.len())],
+                    &expected[..8.min(expected.len())]
+                );
+                false
+            } else {
+                true
+            }
+        }
+        None => {
+            eprintln!(
+                "[security] invalid identity_pubkey from peer with claimed node_id={} — rejecting",
+                &node_id[..8.min(node_id.len())]
+            );
+            false
+        }
+    }
+}
+
 // =============================================================================
 
 fn debug_log(msg: &str) {
@@ -861,8 +892,16 @@ async fn send_only(peer: &str, kind: MessageKind, payload: &[u8]) -> bool {
         }
         shutdown_stream(&mut stream).await;
     }
+    // Legacy fallback: framed send failed — attempt unframed for older nodes.
+    // DEPRECATED: legacy wire mode will be removed in a future protocol version.
+    // Nodes running only legacy mode cannot be authenticated or rate-limited at the frame level.
     if let Some(legacy) = legacy_payload(kind, payload) {
         if let Some(mut stream) = connect_peer(&addr).await {
+            eprintln!(
+                "[DEPRECATED] send_only: falling back to legacy (unframed) wire mode for peer {}. \
+                 Upgrade the peer to use LFS1 framed protocol.",
+                addr
+            );
             if write_all_with_timeout(&mut stream, &legacy).await.is_ok() {
                 shutdown_stream(&mut stream).await;
                 mark_good_peer(peer);
@@ -900,8 +939,15 @@ async fn request_payload(peer: &str, kind: MessageKind, payload: &[u8]) -> Optio
         return Some(msg.payload);
     }
     let addr = if is_valid_node_id(peer) { resolve_peer_addr(peer)? } else { peer.to_string() };
+    // Legacy fallback: framed request failed — attempt unframed for older nodes.
+    // DEPRECATED: legacy wire mode will be removed in a future protocol version.
     if let Some(legacy) = legacy_payload(kind, payload) {
         if let Some(mut stream) = connect_peer(&addr).await {
+            eprintln!(
+                "[DEPRECATED] request_payload: falling back to legacy (unframed) wire mode for peer {}. \
+                 Upgrade the peer to use LFS1 framed protocol.",
+                addr
+            );
             if write_all_with_timeout(&mut stream, &legacy).await.is_ok() {
                 if let Ok(bytes) = read_legacy_message(&mut stream).await {
                     shutdown_stream(&mut stream).await;
@@ -2629,11 +2675,12 @@ async fn integrate_peer_info_from_handshake(
         ));
         return;
     }
-    if node_id_from_pubkey_hex(&info.identity_pubkey).as_deref() != Some(info.node_id.as_str()) {
-        debug_log(&format!(
-            "Ignoring peer {} with invalid node_id/pubkey mapping",
-            original_addr
-        ));
+    if !node_id_matches_pubkey(&info.node_id, &info.identity_pubkey) {
+        register_infraction(
+            &peer_ip(original_addr).map(|ip| ip.to_string()).unwrap_or_default(),
+            SCORE_DISCOVERY_VIOLATION,
+            "node_id/pubkey mismatch in handshake",
+        );
         return;
     }
     if !info.chain_id.is_empty() && info.chain_id != CHAIN_ID {

@@ -17,8 +17,12 @@ const KEYSTORE_VERSION: u8 = 1;
 const CIPHER_NAME: &str = "xchacha20poly1305";
 const KDF_NAME: &str = "argon2id";
 const KEYSTORE_AAD: &[u8] = b"lofswap-keystore-v1";
-const KDF_MEMORY_KIB: u32 = 64 * 1024;
-const KDF_TIME_COST: u32 = 3;
+// Argon2id params for NEW keystores.
+// Existing keystores store their own params and are unaffected by changes here.
+// Values follow OWASP 2024 recommendations for interactive authentication:
+// 128 MiB memory, 4 iterations, parallelism 1.
+const KDF_MEMORY_KIB: u32 = 128 * 1024; // bumped from 64 MiB → 128 MiB
+const KDF_TIME_COST: u32 = 4;           // bumped from 3 → 4 iterations
 const KDF_PARALLELISM: u32 = 1;
 const KDF_SALT_LEN: usize = 16;
 const CIPHER_NONCE_LEN: usize = 24;
@@ -81,6 +85,17 @@ pub fn generate_mnemonic_12() -> Result<String, String> {
     Ok(mnemonic)
 }
 
+/// Derive a secp256k1 secret key from a BIP-39 mnemonic using HKDF-SHA256.
+///
+/// # ⚠️ Non-standard derivation — NOT BIP32/BIP44 compatible
+///
+/// This function does **not** follow the BIP32 HD wallet derivation standard.
+/// The derivation path parameter is included only as part of the HKDF salt and
+/// does NOT produce the same key as a BIP32/BIP44-compliant wallet (MetaMask,
+/// Ledger, Trezor, etc.) would derive from the same mnemonic and path.
+///
+/// **Do not import a LofSwap mnemonic into external wallets expecting standard
+/// BIP44 derivation — the keys will differ and funds will appear missing.**
 pub fn derive_secret_key_from_mnemonic(
     mnemonic: &str,
     mnemonic_passphrase: &str,

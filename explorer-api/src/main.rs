@@ -1,6 +1,7 @@
 use axum::{
-    extract::State,
+    extract::{ConnectInfo, State},
     http::{HeaderMap, HeaderValue, StatusCode},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::get,
     Json, Router,
@@ -9,13 +10,24 @@ use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
+    collections::HashMap,
     env, fs,
     io::{Read, Write},
-    net::{SocketAddr, TcpStream, UdpSocket},
+    net::{IpAddr, SocketAddr, TcpStream, UdpSocket},
     path::{Path, PathBuf},
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex as StdMutex, RwLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+/// Hard cap on bytes read from a single peer TCP response.
+/// Prevents OOM DoS via malicious peers sending unbounded data.
+const MAX_PEER_RESPONSE_BYTES: u64 = 32 * 1024 * 1024; // 32 MB
+
+/// HTTP rate limit: max requests per IP per minute on all REST endpoints.
+const HTTP_RATE_LIMIT_PER_MIN: u32 = 120;
+
+/// Max blocks accepted from a peer before rejecting the chain (sanity cap).
+const MAX_PEER_CHAIN_BLOCKS: usize = 10_000_000;
 
 #[derive(Clone)]
 struct AppState {
@@ -25,6 +37,8 @@ struct AppState {
     refresh_interval: Duration,
     self_peer: Option<String>,
     cache: Arc<RwLock<Cache>>,
+    /// Per-IP HTTP rate limiter: maps IP -> (request_count, window_start).
+    rate_limiter: Arc<StdMutex<HashMap<IpAddr, (u32, Instant)>>>,
 }
 
 /// Single shared cache — written by the background refresh task,
@@ -131,7 +145,8 @@ fn tcp_request(peer: &str, payload: &str, timeout: Duration) -> Option<String> {
     let _ = stream.set_write_timeout(Some(timeout));
     stream.write_all(payload.as_bytes()).ok()?;
     let mut buf = Vec::new();
-    stream.read_to_end(&mut buf).ok()?;
+    // Hard-cap bytes read to prevent OOM from malicious/misbehaving peers.
+    stream.take(MAX_PEER_RESPONSE_BYTES).read_to_end(&mut buf).ok()?;
     if buf.is_empty() {
         return None;
     }
@@ -153,7 +168,8 @@ fn tcp_request_timed(
     let _ = stream.set_write_timeout(Some(timeout));
     stream.write_all(payload.as_bytes()).ok()?;
     let mut buf = Vec::new();
-    stream.read_to_end(&mut buf).ok()?;
+    // Hard-cap bytes read to prevent OOM from malicious/misbehaving peers.
+    stream.take(MAX_PEER_RESPONSE_BYTES).read_to_end(&mut buf).ok()?;
     if buf.is_empty() {
         return None;
     }
@@ -165,10 +181,135 @@ fn ping_peer_timed(peer: &str, timeout: Duration) -> Option<Duration> {
         .and_then(|(s, dur)| if s.trim() == "pong" { Some(dur) } else { None })
 }
 
+/// Validates structural integrity and Proof-of-Work of a chain received from a peer.
+///
+/// Checks performed:
+/// 1. Chain length sanity cap.
+/// 2. Each block index is sequential (0, 1, 2, …).
+/// 3. Each block's `previous_hash` matches the prior block's `hash`.
+/// 4. Each block's `hash` satisfies the claimed `difficulty` (leading hex zeros).
+/// 5. Each block's `hash` matches the canonical preimage SHA-256.
+///
+/// Returns `true` only when ALL blocks pass. An empty chain is considered valid.
+fn validate_peer_chain(chain: &[Value]) -> bool {
+    if chain.len() > MAX_PEER_CHAIN_BLOCKS {
+        eprintln!(
+            "[validate_peer_chain] rejected: chain too long ({} blocks)",
+            chain.len()
+        );
+        return false;
+    }
+
+    for (i, block) in chain.iter().enumerate() {
+        // ── required fields ──────────────────────────────────────────────────
+        let index = match block.get("index").and_then(|v| v.as_u64()) {
+            Some(v) => v,
+            None => {
+                eprintln!("[validate_peer_chain] block {} missing 'index'", i);
+                return false;
+            }
+        };
+        let claimed_hash = match block.get("hash").and_then(|v| v.as_str()) {
+            Some(v) => v.to_string(),
+            None => {
+                eprintln!("[validate_peer_chain] block {} missing 'hash'", i);
+                return false;
+            }
+        };
+        let difficulty = match block.get("difficulty").and_then(|v| v.as_u64()) {
+            Some(v) => v as u32,
+            None => {
+                eprintln!("[validate_peer_chain] block {} missing 'difficulty'", i);
+                return false;
+            }
+        };
+
+        // ── index is sequential ───────────────────────────────────────────────
+        if index as usize != i {
+            eprintln!(
+                "[validate_peer_chain] index mismatch at pos {}: got {}",
+                i, index
+            );
+            return false;
+        }
+
+        // ── previous_hash chain link ───────────────────────────────────────────
+        if i > 0 {
+            let prev_hash = match chain[i - 1].get("hash").and_then(|v| v.as_str()) {
+                Some(v) => v.to_string(),
+                None => return false,
+            };
+            let prev_hash_field = match block.get("previous_hash").and_then(|v| v.as_str()) {
+                Some(v) => v.to_string(),
+                None => {
+                    eprintln!("[validate_peer_chain] block {} missing 'previous_hash'", i);
+                    return false;
+                }
+            };
+            if prev_hash != prev_hash_field {
+                eprintln!(
+                    "[validate_peer_chain] block {} previous_hash mismatch",
+                    i
+                );
+                return false;
+            }
+        }
+
+        // ── PoW: hash must start with `difficulty` hex zeros ─────────────────
+        let zeros = "0".repeat(difficulty as usize);
+        if !claimed_hash.starts_with(&zeros) {
+            eprintln!(
+                "[validate_peer_chain] block {} PoW failure (difficulty {})",
+                i, difficulty
+            );
+            return false;
+        }
+
+        // ── hash integrity: recompute canonical preimage ──────────────────────
+        // Canonical preimage (spec_v0.9):
+        //   version|index|timestamp|previous_hash|miner|difficulty|nonce|txs_json
+        let version = block.get("version").and_then(|v| v.as_u64()).unwrap_or(1);
+        let timestamp = block.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0);
+        let previous_hash = block.get("previous_hash").and_then(|v| v.as_str()).unwrap_or("0");
+        let miner = block.get("miner").and_then(|v| v.as_str()).unwrap_or("");
+        let nonce = block.get("nonce").and_then(|v| v.as_u64()).unwrap_or(0);
+        let transactions = block.get("transactions").cloned().unwrap_or(Value::Array(vec![]));
+        let txs_json = serde_json::to_string(&transactions).unwrap_or_default();
+
+        let preimage = format!(
+            "{}|{}|{}|{}|{}|{}|{}|{}",
+            version, index, timestamp, previous_hash, miner, difficulty, nonce, txs_json
+        );
+        let mut hasher = Sha256::new();
+        hasher.update(preimage.as_bytes());
+        let computed = format!("{:x}", hasher.finalize());
+
+        if computed != claimed_hash {
+            eprintln!(
+                "[validate_peer_chain] block {} hash mismatch (computed={}, claimed={})",
+                i, &computed[..8], &claimed_hash[..8.min(claimed_hash.len())]
+            );
+            return false;
+        }
+    }
+
+    true
+}
+
 fn chain_from_peer(peer: &str, timeout: Duration) -> Option<Vec<Value>> {
     let resp = tcp_request(peer, "/chain", timeout)?;
     match serde_json::from_str::<Value>(&resp).ok()? {
-        Value::Array(arr) => Some(arr),
+        Value::Array(arr) => {
+            if validate_peer_chain(&arr) {
+                Some(arr)
+            } else {
+                eprintln!(
+                    "[chain_from_peer] rejected chain from {} (failed PoW/structure validation)",
+                    peer
+                );
+                None
+            }
+        }
         _ => None,
     }
 }
@@ -425,6 +566,50 @@ fn confirming_nodes_for_block(block_idx: usize, peers: &[Value], local_height: u
 
 async fn options_handler() -> Response {
     (StatusCode::NO_CONTENT, cors_headers(), ()).into_response()
+}
+
+/// Axum middleware: per-IP rate limiting (HTTP_RATE_LIMIT_PER_MIN req/min).
+/// Exceeding the limit returns HTTP 429 with a JSON error body.
+async fn rate_limit_middleware(
+    State(state): State<Arc<AppState>>,
+    req: axum::extract::Request,
+    next: Next,
+) -> Response {
+    // Extract remote IP from ConnectInfo extension (set by into_make_service_with_connect_info).
+    let ip: Option<IpAddr> = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ci| ci.0.ip());
+
+    if let Some(ip) = ip {
+        let allowed = {
+            let mut map = state
+                .rate_limiter
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            let now = Instant::now();
+            let entry = map.entry(ip).or_insert((0, now));
+            if now.duration_since(entry.1) >= Duration::from_secs(60) {
+                *entry = (1, now);
+                true
+            } else if entry.0 < HTTP_RATE_LIMIT_PER_MIN {
+                entry.0 += 1;
+                true
+            } else {
+                false
+            }
+        };
+        if !allowed {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                cors_headers(),
+                Json(serde_json::json!({ "error": "rate limit exceeded, try again later" })),
+            )
+                .into_response();
+        }
+    }
+
+    next.run(req).await
 }
 
 async fn health(State(state): State<Arc<AppState>>) -> Response {
@@ -767,6 +952,7 @@ async fn main() {
         refresh_interval,
         self_peer: env::var("EXPLORER_SELF_PEER").ok().filter(|v| !v.trim().is_empty()),
         cache: Arc::new(RwLock::new(Cache::default())),
+        rate_limiter: Arc::new(StdMutex::new(HashMap::new())),
     });
 
     // ── kick off background refresh immediately ──
@@ -820,13 +1006,16 @@ async fn main() {
         // address endpoints
         .route("/address/:addr/balance", get(address_balance).options(options_handler))
         .route("/address/:addr/txs",     get(address_txs).options(options_handler))
+        .layer(middleware::from_fn_with_state(state.clone(), rate_limit_middleware))
         .with_state(state);
 
     let addr: SocketAddr = format!("{}:{}", bind, port).parse().unwrap();
     println!("Explorer API listening on http://{}", addr);
-    println!("  PEER_TIMEOUT={}s  MAX_PEERS={}  REFRESH_INTERVAL={}s",
-        peer_timeout.as_secs_f32(), max_peers, refresh_interval.as_secs_f32());
+    println!("  PEER_TIMEOUT={}s  MAX_PEERS={}  REFRESH_INTERVAL={}s  HTTP_RATE_LIMIT={}/min",
+        peer_timeout.as_secs_f32(), max_peers, refresh_interval.as_secs_f32(), HTTP_RATE_LIMIT_PER_MIN);
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    // Use into_make_service_with_connect_info so ConnectInfo<SocketAddr> is available
+    // in middleware for per-IP rate limiting.
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
 }

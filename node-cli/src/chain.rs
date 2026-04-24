@@ -26,12 +26,25 @@ pub const TARGET_BLOCK_TIME_SECS: i64 = 60;
 // Hard-coded (height, hash) pairs. Any chain that diverges from these at the
 // specified heights is unconditionally rejected, regardless of PoW.
 // Add entries here as the network matures and blocks become deeply buried.
+//
+// TODO: Add checkpoints once blocks are buried deeply enough to be considered
+//       immutable. Without checkpoints, a well-resourced attacker performing a
+//       51% attack can rewrite history beyond MAX_NETWORK_REORG_DEPTH.
+//       Suggested cadence: add a checkpoint every ~10,000 blocks.
 static CHECKPOINTS: &[(u64, &str)] = &[
     // Example (uncomment and fill when blocks are settled):
     // (1000, "0000abcd..."),
 ];
 
 fn check_checkpoints(chain: &[Block]) -> Result<(), NodeError> {
+    if cfg!(debug_assertions) && CHECKPOINTS.is_empty() {
+        // Remind developers during development that checkpoints haven't been set.
+        // This is harmless for now but should be addressed before mainnet.
+        println!(
+            "[MAINT] WARNING: No checkpoints configured. \
+             Add (height, hash) entries to CHECKPOINTS in chain.rs once blocks are settled."
+        );
+    }
     for &(height, expected_hash) in CHECKPOINTS {
         if let Some(block) = chain.get(height as usize) {
             if block.hash != expected_hash {
