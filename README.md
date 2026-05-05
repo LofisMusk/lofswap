@@ -20,7 +20,7 @@ These scripts build frontend assets, build `wallet-gui`, prepare runtime assets,
 cd wallet-gui/frontend
 npm install
 npm run build
-cd ../..
+cd ..
 cargo run -p wallet-gui
 ```
 
