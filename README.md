@@ -8,9 +8,9 @@
 
 ### Helper Scripts
 
-- macOS: `./gui-scripts/Start-LofSwap-Wallet.command`
-- Linux: `./gui-scripts/Start-LofSwap-Wallet.sh`
-- Windows PowerShell: `./gui-scripts/Start-LofSwap-Wallet.ps1`
+- macOS: `./gui-launchers/Start-LofSwap-Wallet.command`
+- Linux: `./gui-launchers/Start-LofSwap-Wallet.sh`
+- Windows PowerShell: `./gui-launchers/Start-LofSwap-Wallet.ps1`
 
 These scripts build frontend assets, build `wallet-gui`, prepare runtime assets, then launch.
 
