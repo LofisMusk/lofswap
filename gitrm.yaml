@@ -1,4 +1,10 @@
 build:
-  mainFile: 'Cargo.toml'
+  project_name: lofswap
+  main_file: 'Cargo.toml'
   flags: '-r --workspace'
-  outputPath: 'target/release/'
+  output_path: 'target/release'
+deps: []
+custom_script:
+  language: ''
+  script: ''
+  override: false
