@@ -2,7 +2,7 @@ build:
   project_name: lofswap
   main_file: 'Cargo.toml'
   flags: '-r --workspace'
-  output_path: 'target/release/'
+  output_path: 'target/'
 deps: []
 custom_script:
   language: ''
