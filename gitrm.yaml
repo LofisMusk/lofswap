@@ -1,0 +1,10 @@
+build:
+  project_name: lofswap-wallet-gui
+  main_file: 'Cargo.toml'
+  flags: '-r --workspace'
+  output_path: 'target/'
+deps: []
+custom_script:
+  language: ''
+  script: ''
+  override: false
