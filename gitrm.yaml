@@ -3,6 +3,10 @@ build:
   main_file: 'Cargo.toml'
   flags: '-r --workspace'
   output_path: 'target/'
+  binaries:
+    - explorer-api
+    - wallet-cli
+    - node-cli
 deps: []
 custom_script:
   language: ''
