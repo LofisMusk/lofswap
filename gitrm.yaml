@@ -1,6 +1,6 @@
 build:
   project_name: lofswap-wallet-gui
-  main_file: 'Cargo.toml'
+  main_file: 'wallet-gui/Cargo.toml'
   flags: '-r -p wallet-gui'
   output_path: 'target/'
 deps: []
