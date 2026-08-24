@@ -16,3 +16,5 @@ wallet-cache/
 wallet-gui/node_modules
 wallet-gui/frontend/node_modules
 wallet-gui/frontend/dist
+contracts/evm/node_modules
+contracts/solana/target

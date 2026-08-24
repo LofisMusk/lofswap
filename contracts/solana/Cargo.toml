@@ -1,0 +1,33 @@
+# Standalone crate: it is built with the Solana toolchain
+# (`cargo build-sbf`), not with the node workspace.
+[workspace]
+
+[package]
+name = "lofswap-htlc-solana"
+version = "1.0.0"
+edition = "2021"
+description = "Hashed timelock escrow for the Solana leg of a LofSwap cross-chain swap"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+solana-program = "2.1"
+solana-system-interface = { version = "1", features = ["bincode"] }
+solana-sdk-ids = "2"
+
+[dev-dependencies]
+solana-program = "2.1"
+
+[features]
+default = []
+# Set when building the on-chain artefact with `cargo build-sbf`.
+no-entrypoint = []
+# Declared for the `entrypoint!` macro; the program uses the default heap and
+# panic handler.
+custom-heap = []
+custom-panic = []
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

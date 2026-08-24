@@ -1,0 +1,16 @@
+{
+  "name": "lofswap-evm-htlc",
+  "version": "1.0.0",
+  "private": true,
+  "description": "HTLC escrow contract for the EVM leg (Ethereum, BNB Chain, ...) of a LofSwap cross-chain swap",
+  "scripts": {
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "@ethereumjs/common": "4.4.0",
+    "@ethereumjs/util": "9.1.0",
+    "@ethereumjs/vm": "8.1.1",
+    "ethers": "6.13.4",
+    "solc": "0.8.28"
+  }
+}

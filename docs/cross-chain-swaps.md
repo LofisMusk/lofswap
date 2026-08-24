@@ -132,11 +132,18 @@ signature, so the advertised terms of a trade are public and immutable. Wallets
 and explorers can show exactly which foreign HTLC a LofSwap escrow belongs to,
 and a maker cannot later claim they promised something else.
 
-The foreign HTLC must hash the same 32 raw secret bytes with SHA-256:
+The foreign HTLC must hash the same 32 raw secret bytes with SHA-256. Both
+implementations live in this repository:
 
-* Ethereum: `sha256(abi.encodePacked(secret))` — the standard HTLC contract
-  shape, not `keccak256`;
-* Solana: `hashv(&[secret])` with the SHA-256 syscall.
+* [`contracts/evm/`](../contracts/evm) — `LofSwapHTLC.sol` for Ethereum, BNB
+  Chain, Polygon, Arbitrum, Base and any other EVM chain; escrows the native
+  coin or any ERC-20 (USDC, USDT, …) and hashes with
+  `sha256(abi.encodePacked(secret))`, never `keccak256`;
+* [`contracts/solana/`](../contracts/solana) — a native Solana program for SOL
+  and SPL tokens, hashing with the SHA-256 syscall.
+
+[`contracts/README.md`](../contracts/README.md) walks through a full
+`USDC (Ethereum) -> USDC (Solana)` trade and lists the deployment steps.
 
 ## Wallet commands
 

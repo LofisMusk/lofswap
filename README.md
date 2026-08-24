@@ -12,6 +12,7 @@ Transfers between LofSwap participants are settled by the chain itself; cross-ch
 - [Getting Started](docs/getting-started.md)
 - [Architecture](docs/architecture.md)
 - [Cross-Chain Swaps](docs/cross-chain-swaps.md)
+- [Foreign Legs (EVM / Solana contracts)](contracts/README.md)
 - [Node CLI](docs/node-cli.md)
 - [Wallet CLI](docs/wallet-cli.md)
 - [Wallet GUI](docs/wallet-gui.md)
@@ -25,6 +26,8 @@ Transfers between LofSwap participants are settled by the chain itself; cross-ch
 - `wallet-gui/` desktop wallet application
 - `explorer/` static explorer UI
 - `explorer-api/` explorer HTTP API
+- `contracts/evm/` HTLC escrow for EVM chains (Ethereum, BNB Chain, …)
+- `contracts/solana/` HTLC escrow program for Solana
 
 ## Quick Start
 
