@@ -2,13 +2,16 @@
 
 ![LofSwap logo](lofswap-logo.png)
 
-LofSwap is a Proof-of-Work blockchain project with a node, CLI wallet, desktop wallet GUI, and explorer stack.
+LofSwap is a Proof-of-Work blockchain for trust-minimised cross-chain swaps, with a node, CLI wallet, desktop wallet GUI, and explorer stack.
+
+Transfers between LofSwap participants are settled by the chain itself; cross-chain trades (for example `USDC (Ethereum) -> USDC (Solana)`) are settled with hashed timelock contracts, so no bridge or custodian ever holds the funds.
 
 ## Documentation
 
 - [Docs Index](docs/README.md)
 - [Getting Started](docs/getting-started.md)
 - [Architecture](docs/architecture.md)
+- [Cross-Chain Swaps](docs/cross-chain-swaps.md)
 - [Node CLI](docs/node-cli.md)
 - [Wallet CLI](docs/wallet-cli.md)
 - [Wallet GUI](docs/wallet-gui.md)

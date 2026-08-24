@@ -228,6 +228,7 @@ pub fn build_tx(sk: &SecretKey, to: &str, amount: u64) -> Transaction {
         pubkey: pk.to_string(),
         nonce,
         txid: String::new(),
+        swap: None,
     };
     tx.txid = tx.compute_txid();
     tx

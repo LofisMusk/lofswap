@@ -21,6 +21,7 @@
 - Transaction kinds:
   - `Coinbase`
   - `Transfer`
+  - `SwapLock` / `SwapClaim` / `SwapRefund` (hashed timelock contracts, tx version 4)
 - Address format: `LFS` + Base58 payload derived from SHA-256(pubkey)[0..20].
 - Transfer validation includes:
   - chain ID checks
@@ -29,6 +30,15 @@
   - fee floor
   - sufficient balance (including pending mempool spend)
   - duplicate protection by signature/txid
+
+## Cross-Chain Swaps
+
+Cross-chain trades settle through HTLCs rather than a bridge: the local leg is
+locked in a keyless escrow address derived from the swap terms, and is released
+only by revealing the hashlock preimage (claim) or by waiting out the timelock
+(refund). Timelocks are evaluated against median time past. See
+[`cross-chain-swaps.md`](./cross-chain-swaps.md) for the full protocol, the
+foreign-leg commitment format and the safety rules.
 
 ## Consensus and Mining
 
@@ -70,6 +80,8 @@ Common request paths include:
 - `/chain`
 - `/chain-hash`
 - `/whoami` / `/peer-info`
+- `/swap/{swap_id|escrow}`
+- `/swaps`, `/swaps/open`, `/swaps/address/{address}`
 
 Wallet components connect to peers (bootstrap + local defaults) and broadcast signed transactions.
 

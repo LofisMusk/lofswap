@@ -33,6 +33,7 @@ use crate::{
     identity::{node_id_from_pubkey_hex, pin_matches_or_insert, sign_message, verify_signature},
     mempool::insert_transaction,
     storage::{read_data_file, write_data_file},
+    swap::SwapIndex,
 };
 
 // == peer address registry =====================================================
@@ -214,6 +215,9 @@ struct InboundMessage {
     kind: MessageKind,
     payload: Vec<u8>,
 }
+
+/// Upper bound on how many swap records a single query returns.
+const SWAP_PAGE_LIMIT: usize = 200;
 
 #[derive(Debug, Clone, Copy)]
 enum RateKind {
@@ -1878,6 +1882,74 @@ async fn handle_request(
             blocks.pop();
         };
         send_message(stream, wire, MessageKind::Response, &payload).await?;
+    } else if request.trim() == "/swaps" || request.trim() == "/swaps/open" {
+        if !check_rate_limit(remote_ip, RateKind::Block) {
+            send_message(
+                stream,
+                wire,
+                MessageKind::Error,
+                b"reject: swap query rate limit exceeded",
+            )
+            .await?;
+            return Ok(());
+        }
+        let chain = blockchain.lock().await;
+        let index = SwapIndex::build(&chain);
+        let open_only = request.trim() == "/swaps/open";
+        let records = if open_only { index.open() } else { index.all() };
+        let limited: Vec<_> = records.into_iter().take(SWAP_PAGE_LIMIT).collect();
+        let json = serde_json::to_vec(&limited)
+            .map_err(|e| NodeError::SerializationError(e.to_string()))?;
+        send_message(stream, wire, MessageKind::Response, &json).await?;
+    } else if let Some(addr) = request.trim().strip_prefix("/swaps/address/") {
+        if !check_rate_limit(remote_ip, RateKind::Block) {
+            send_message(
+                stream,
+                wire,
+                MessageKind::Error,
+                b"reject: swap query rate limit exceeded",
+            )
+            .await?;
+            return Ok(());
+        }
+        let addr = addr.trim().to_string();
+        let chain = blockchain.lock().await;
+        let index = SwapIndex::build(&chain);
+        let records: Vec<_> = index
+            .for_address(&addr)
+            .into_iter()
+            .take(SWAP_PAGE_LIMIT)
+            .collect();
+        let json = serde_json::to_vec(&records)
+            .map_err(|e| NodeError::SerializationError(e.to_string()))?;
+        send_message(stream, wire, MessageKind::Response, &json).await?;
+    } else if let Some(id) = request.trim().strip_prefix("/swap/") {
+        if !check_rate_limit(remote_ip, RateKind::Block) {
+            send_message(
+                stream,
+                wire,
+                MessageKind::Error,
+                b"reject: swap query rate limit exceeded",
+            )
+            .await?;
+            return Ok(());
+        }
+        let id = id.trim().to_string();
+        let chain = blockchain.lock().await;
+        let index = SwapIndex::build(&chain);
+        // Escrow addresses are accepted as an alias so wallets can look a swap
+        // up straight from a balance view.
+        let record = index.get(&id).or_else(|| index.by_escrow(&id));
+        match record {
+            Some(record) => {
+                let json = serde_json::to_vec(record)
+                    .map_err(|e| NodeError::SerializationError(e.to_string()))?;
+                send_message(stream, wire, MessageKind::Response, &json).await?;
+            }
+            None => {
+                send_message(stream, wire, MessageKind::Error, b"unknown swap").await?;
+            }
+        }
     } else if request.trim() == "/chain" {
         let chain = blockchain.lock().await;
         let json = serde_json::to_vec(&*chain)

@@ -2,7 +2,10 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub mod swap;
 pub mod wallet_keystore;
+
+pub use swap::{ForeignLeg, SWAP_TX_VERSION, SwapPayload};
 
 // spec_v0.9 constants
 pub const SPEC_VERSION: &str = "0.9";
@@ -19,6 +22,22 @@ pub fn default_chain_id() -> String {
 pub enum TxKind {
     Coinbase,
     Transfer,
+    /// Locks coins into a hashed-timelock escrow (local leg of a swap).
+    SwapLock,
+    /// Spends an escrow by revealing the hashlock preimage.
+    SwapClaim,
+    /// Returns an expired escrow to the maker.
+    SwapRefund,
+}
+
+impl TxKind {
+    /// True for the three hashed-timelock (cross-chain swap) kinds.
+    pub fn is_swap(&self) -> bool {
+        matches!(
+            self,
+            TxKind::SwapLock | TxKind::SwapClaim | TxKind::SwapRefund
+        )
+    }
 }
 
 fn default_tx_kind() -> TxKind {
@@ -47,6 +66,11 @@ pub struct Transaction {
     // Computed identifier. Optional when deserializing from older nodes.
     #[serde(default)]
     pub txid: String,
+    // Hashed-timelock payload for swap transactions (v4+).
+    // Skipped when absent so pre-swap transactions serialize byte-for-byte as
+    // before — block hashes cover the JSON of their transactions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swap: Option<SwapPayload>,
 }
 
 impl Transaction {
@@ -82,9 +106,53 @@ impl Transaction {
             )
         };
         let preimage = format!("{}|{}", preimage, self.nonce);
+        // v4 folds the whole HTLC payload into the txid so swap terms cannot
+        // be altered without changing the transaction identity.
+        let preimage = if self.version >= SWAP_TX_VERSION {
+            format!("{}|{}", preimage, self.swap_digest())
+        } else {
+            preimage
+        };
         let mut hasher = Sha256::new();
         hasher.update(preimage.as_bytes());
         format!("{:x}", hasher.finalize())
+    }
+
+    /// Digest of the attached HTLC payload (`"none"` when there is none).
+    pub fn swap_digest(&self) -> String {
+        self.swap
+            .as_ref()
+            .map(|s| s.digest())
+            .unwrap_or_else(|| "none".to_string())
+    }
+
+    /// Canonical message that a sender signs for v3+ transactions.
+    ///
+    /// Node and wallet share this helper so the signature format can never
+    /// drift between the two implementations.
+    pub fn signing_preimage(&self, signer_pubkey: &str) -> String {
+        let chain_id = if self.chain_id.is_empty() {
+            CHAIN_ID
+        } else {
+            self.chain_id.as_str()
+        };
+        let base = format!(
+            "{}|{}|{:?}|{}|{}|{}|{}|{}|{}",
+            self.version,
+            chain_id,
+            self.kind,
+            signer_pubkey,
+            self.to,
+            self.amount,
+            self.fee,
+            self.timestamp,
+            self.nonce
+        );
+        if self.version >= SWAP_TX_VERSION {
+            format!("{}|{}", base, self.swap_digest())
+        } else {
+            base
+        }
     }
 }
 
@@ -208,7 +276,82 @@ impl Block {
 
 #[cfg(test)]
 mod tests {
-    use super::Block;
+    use super::*;
+
+    fn sample_transfer() -> Transaction {
+        Transaction {
+            version: 3,
+            chain_id: CHAIN_ID.to_string(),
+            kind: TxKind::Transfer,
+            timestamp: 42,
+            from: "LFSfrom".into(),
+            to: "LFSto".into(),
+            amount: 7,
+            fee: 1,
+            signature: "sig".into(),
+            pubkey: "pk".into(),
+            nonce: 3,
+            txid: String::new(),
+            swap: None,
+        }
+    }
+
+    /// Block hashes cover the JSON of their transactions, so adding the swap
+    /// field must not change how pre-swap transactions serialize.
+    #[test]
+    fn transactions_without_a_swap_serialize_exactly_as_before() {
+        let json = serde_json::to_string(&sample_transfer()).unwrap();
+        assert_eq!(
+            json,
+            r#"{"version":3,"chain_id":"lofswap-testnet","kind":"transfer","timestamp":42,"from":"LFSfrom","to":"LFSto","amount":7,"fee":1,"signature":"sig","pubkey":"pk","nonce":3,"txid":""}"#
+        );
+    }
+
+    #[test]
+    fn swap_payload_changes_txid_and_signing_preimage() {
+        let plain = Transaction {
+            version: 4,
+            ..sample_transfer()
+        };
+        let mut with_swap = plain.clone();
+        with_swap.kind = TxKind::SwapLock;
+        with_swap.swap = Some(SwapPayload {
+            swap_id: "id".into(),
+            hashlock: "aa".repeat(32),
+            timelock: 100,
+            recipient: "LFSto".into(),
+            secret: String::new(),
+            foreign: None,
+        });
+        assert_ne!(plain.compute_txid(), with_swap.compute_txid());
+        assert_ne!(
+            plain.signing_preimage("pk"),
+            with_swap.signing_preimage("pk")
+        );
+        // Tampering with any swap field invalidates the signature.
+        let mut tampered = with_swap.clone();
+        tampered.swap.as_mut().unwrap().timelock = 101;
+        assert_ne!(
+            with_swap.signing_preimage("pk"),
+            tampered.signing_preimage("pk")
+        );
+    }
+
+    #[test]
+    fn swap_kinds_have_stable_wire_names() {
+        for (kind, name) in [
+            (TxKind::SwapLock, "swaplock"),
+            (TxKind::SwapClaim, "swapclaim"),
+            (TxKind::SwapRefund, "swaprefund"),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&kind).unwrap(),
+                format!("\"{}\"", name)
+            );
+            assert!(kind.is_swap());
+        }
+        assert!(!TxKind::Transfer.is_swap());
+    }
 
     #[test]
     fn genesis_is_deterministic() {

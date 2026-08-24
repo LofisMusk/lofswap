@@ -14,6 +14,7 @@ use crate::{
     miner::mine_block,
     p2p::{determine_public_ip_from_peers, get_my_address, ping_peer, sync_chain},
     storage::read_data_file,
+    swap::SwapIndex,
 };
 
 const SELF_PEER_NOTE: &str = "Note: if peers.json contains this node's own address, it stays in the file but is hidden from the peer list while still being broadcast to other nodes.";
@@ -21,7 +22,7 @@ const SELF_PEER_NOTE: &str = "Note: if peers.json contains this node's own addre
 pub async fn run_cli(blockchain: Arc<Mutex<Vec<Block>>>, peers: Arc<Mutex<Vec<String>>>) {
     let interactive = io::stdin().is_terminal();
     println!(
-        "Commands: mine <LFS_ADDRESS> | sync | print-chain | list-peers | add-peer | remove-peer | remove-offline-peers | clear-chain | print-mempool | get-publicip | print-my-addr | debug-peers | exit"
+        "Commands: mine <LFS_ADDRESS> | sync | print-chain | list-peers | add-peer | remove-peer | remove-offline-peers | clear-chain | print-mempool | print-swaps | get-publicip | print-my-addr | debug-peers | exit"
     );
 
     if interactive {
@@ -93,6 +94,7 @@ async fn handle_command(
         "remove-offline-peers" => remove_offline_peers(peers).await,
         "clear-chain" => clear_chain(),
         "print-mempool" => print_mempool(),
+        "print-swaps" => print_swaps(blockchain).await,
         "get-publicip" => get_public_ip().await,
         "exit" => return false,
         line if line.starts_with("mine ") => mine_command(line, blockchain).await,
@@ -101,6 +103,39 @@ async fn handle_command(
         _ => println!("Unknown command"),
     }
     true
+}
+
+async fn print_swaps(blockchain: &Arc<Mutex<Vec<Block>>>) {
+    let chain = blockchain.lock().await;
+    let index = SwapIndex::build(&chain);
+    if index.is_empty() {
+        println!("No cross-chain swaps on this chain yet");
+        return;
+    }
+    println!("Swaps: {} total", index.len());
+    for record in index.all() {
+        let foreign = record
+            .foreign
+            .as_ref()
+            .map(|f| {
+                format!(
+                    "{} {} on {} -> {}",
+                    f.amount, f.asset, f.chain, f.beneficiary
+                )
+            })
+            .unwrap_or_else(|| "-".to_string());
+        println!(
+            "  {} [{}] {} LFS  {} -> {}  timelock={}  height={}  counter-leg: {}",
+            record.swap_id,
+            record.status.as_str(),
+            record.amount,
+            record.maker,
+            record.recipient,
+            record.timelock,
+            record.lock_height,
+            foreign
+        );
+    }
 }
 
 async fn mine_command(line: &str, blockchain: &Arc<Mutex<Vec<Block>>>) {
