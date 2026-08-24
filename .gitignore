@@ -18,3 +18,4 @@ wallet-gui/frontend/node_modules
 wallet-gui/frontend/dist
 contracts/evm/node_modules
 contracts/solana/target
+contracts/solana/e2e/node_modules

@@ -106,10 +106,33 @@ replayed against another chain.
 
 ```bash
 cd contracts/solana
-cargo test                     # unit tests, host toolchain
-cargo build-sbf                # on-chain artefact (needs the Solana toolchain)
+cargo test                     # unit tests only, no Solana toolchain needed
+cargo test-sbf                 # builds the artefact and runs it in the runtime
+cargo build-sbf                # on-chain artefact on its own
 solana program deploy target/deploy/lofswap_htlc_solana.so
 ```
+
+`cargo test-sbf` is the one that matters: it compiles the program to SBF and
+runs the integration suites (`tests/sol_escrow.rs`, `tests/spl_escrow.rs`)
+against that bytecode inside the Solana runtime, with the real SPL token
+program loaded, so a rejection in a test is a rejection an on-chain
+transaction would get.
+
+Validators that have every feature gate activated — `solana-test-validator`
+does by default — no longer execute SBPF v0, which is what `cargo build-sbf`
+emits unless told otherwise. Build with `--arch v3` for those:
+
+```bash
+solana-test-validator --reset --quiet &
+cargo build-sbf --arch v3
+solana program deploy target/deploy/lofswap_htlc_solana.so
+cd e2e && npm install && npm run e2e -- <program id>
+```
+
+`e2e/validator-e2e.mjs` runs a whole SOL swap against that validator — lock,
+a wrong secret, a theft attempt, then the claim that publishes the preimage —
+building every transaction from the wire format alone, which is also how it
+checks that a non-Rust client can drive the program.
 
 For an SPL swap the client creates the escrow token account (an ATA owned by
 the swap PDA) in the same transaction as `Lock`; the program checks its mint
@@ -124,13 +147,28 @@ for the counterparty.
 
 ## Status
 
-These contracts are **new and unaudited**. The EVM contract is exercised by a
-suite that runs the real EVM (`npm test`, 11 cases: happy path, wrong secret,
-double settlement, both sides of the timelock, ERC-20, fee-on-transfer tokens,
-tokens that fail silently). The Solana program's pure logic — swap id
-derivation, hashlock parity, state layout, instruction encoding — is unit
-tested, but it has **not** been run against a validator here, because this
-environment has no Solana toolchain.
+These contracts are **new and unaudited**, but both are exercised against a
+real execution environment rather than a mock.
+
+The EVM contract runs on the real EVM (`npm test`, 11 cases: happy path, wrong
+secret, double settlement, both sides of the timelock, ERC-20, fee-on-transfer
+tokens, tokens that fail silently).
+
+The Solana program is covered three ways:
+
+* 11 unit tests for the pure logic — swap id derivation, hashlock parity,
+  state layout, instruction encoding (`cargo test`);
+* 23 integration tests that execute the compiled SBF artefact in the Solana
+  runtime with the SPL token program loaded (`cargo test-sbf`): the SOL and
+  SPL happy paths, and the attack paths — a wrong secret, a claim redirected
+  to a thief, a claim after the deadline, a refund before it, a refund to
+  somebody other than the maker, double settlement, an escrow address that
+  does not match the terms, a squatted escrow address, an escrow token account
+  the swap does not own or holding the wrong mint, a payout into a stranger's
+  token account, a replayed lock, and both `Close` gates;
+* a full swap against a live `solana-test-validator` — deploy, lock, rejected
+  secret, rejected theft, claim, preimage published on chain
+  (`e2e/validator-e2e.mjs`).
 
 Before touching real money: deploy to Sepolia / BNB testnet / Solana devnet,
 run a full swap in both directions, and have the code reviewed. Start with
