@@ -47,6 +47,7 @@ When running, node CLI supports:
 - `remove-offline-peers`
 - `clear-chain`
 - `print-mempool`
+- `print-swaps` (cross-chain HTLC swaps and their state)
 - `get-publicip`
 - `print-my-addr`
 - `debug-peers`
@@ -76,6 +77,10 @@ Common paths accepted by node request handler:
 - `/blocks?from={index}&limit={count}`
 - `/chain`
 - `/chain-hash`
+- `/swap/{swap_id|escrow}`
+- `/swaps`
+- `/swaps/open`
+- `/swaps/address/{address}`
 - `/whoami`
 - `/peer-info`
 - `/resolve-ip/{id}`

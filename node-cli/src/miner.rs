@@ -103,6 +103,7 @@ pub async fn mine_block(blockchain: &Arc<Mutex<Vec<Block>>>, explicit_reward_add
         pubkey: String::new(),
         nonce: 0,
         txid: String::new(),
+        swap: None,
     };
     coinbase.txid = coinbase.compute_txid();
     block_txs.push(coinbase);

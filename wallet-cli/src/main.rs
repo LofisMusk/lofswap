@@ -1,5 +1,6 @@
 mod gpu;
 mod opencl;
+mod swap;
 mod vanity;
 
 use blockchain_core::{
@@ -663,20 +664,6 @@ fn build_tx(store: &mut PeerStore, sk: &SecretKey, to: &str, amount: u64) -> Tra
     let from_addr = pubkey_to_address(&pk.to_string());
     let nonce = fetch_next_nonce_from_peers(store, &from_addr)
         .unwrap_or_else(|| next_nonce_fallback_from_local(&from_addr));
-    let preimage = format!(
-        "{}|{}|{:?}|{}|{}|{}|{}|{}|{}",
-        3,
-        CHAIN_ID,
-        TxKind::Transfer,
-        pk,
-        to,
-        amount,
-        DEFAULT_TX_FEE,
-        ts,
-        nonce
-    );
-    let hash = Sha256::digest(preimage.as_bytes());
-    let sig = secp.sign_ecdsa(Message::from_digest(hash.into()), sk);
     let mut tx = Transaction {
         version: 3,
         chain_id: CHAIN_ID.to_string(),
@@ -686,11 +673,17 @@ fn build_tx(store: &mut PeerStore, sk: &SecretKey, to: &str, amount: u64) -> Tra
         to: to.into(),
         amount,
         fee: DEFAULT_TX_FEE,
-        signature: hex::encode(sig.serialize_compact()),
+        signature: String::new(),
         pubkey: pk.to_string(),
         nonce,
         txid: String::new(),
+        swap: None,
     };
+    // The canonical preimage lives in blockchain-core so wallet and node can
+    // never disagree about what was signed.
+    let hash = Sha256::digest(tx.signing_preimage(&pk.to_string()).as_bytes());
+    let sig = secp.sign_ecdsa(Message::from_digest(hash.into()), sk);
+    tx.signature = hex::encode(sig.serialize_compact());
     tx.txid = tx.compute_txid();
     tx
 }
@@ -911,7 +904,7 @@ fn export_dat(path: &str) {
 // ---------- CLI ----------
 fn help() {
     println!(
-        "Commands:\n  help\n  create-wallet [startswith <prefix>] [endswith <suffix>] [cpu [workers]|gpu [workers]|opencl [workers]] [--vanity-source raw|mnemonic] [--generate-mnemonic-after-hit]\n                              (prefix/suffix applies after LFS; omitted workers auto-selects a system default)\n  gpu-info                    (list detected GPU adapters/backends via wgpu)\n  opencl-info                 (list detected OpenCL devices; OpenCL backend is feature-gated)\n  gpu-test [adapter_index]    (run a small compute shader smoke test)\n  gpu-pubkey-hash-test [adapter_index] [count]\n                              (GPU SHA-256 over compressed pubkey hex strings with CPU verification)\n  gpu-pipeline-test [adapter_index] [chunks] [workgroups]\n                              (chunked compute dispatch test for future GPU vanity pipeline)\n  gpu-vanity-probe [adapter_index] [chunks] [workgroups] [prefix|-] [suffix|-]\n                              (vanity-like GPU probe: params+pattern buffers+hit counters; no real crypto yet)\n  gpu-vanity-job-test [adapter_index] [chunks] [workgroups] [prefix|-] [suffix|-] [max_hits] [stop_after_hits]\n                              (work-item + hit-buffer + stop-flag GPU pipeline test, closer to final vanity backend)\n  recover-mnemonic <seed words...>\n  import-priv <hex>\n  import-dat <file>\n  export-dat <file>\n  export-priv               (requires strong confirmation)\n  default-wallet\n  send <to?> <amount> [n=2]   (defaults to your address)\n  send-priv <priv> <to> <amount> [n=2]\n  sign-raw <to> <amount>      (sign only; save locally)\n  sign-raw-priv <priv> <to> <amount>\n  send-raw <sig|txid> [n=2]   (broadcast a stored raw tx)\n  raw_tx                      (list stored raw-signed txs)\n  force-send <signature>     (resend a pending tx even if only one peer is reachable)\n  balance [address]          (defaults to your address)\n  faucet [address]           (disabled in v2; coinbase-only emission)\n  tx-history [address]       (defaults to your address)\n  tx-info <txid|signature>\n  list-peers\n  print-mempool\n  exit"
+        "Commands:\n  help\n  create-wallet [startswith <prefix>] [endswith <suffix>] [cpu [workers]|gpu [workers]|opencl [workers]] [--vanity-source raw|mnemonic] [--generate-mnemonic-after-hit]\n                              (prefix/suffix applies after LFS; omitted workers auto-selects a system default)\n  gpu-info                    (list detected GPU adapters/backends via wgpu)\n  opencl-info                 (list detected OpenCL devices; OpenCL backend is feature-gated)\n  gpu-test [adapter_index]    (run a small compute shader smoke test)\n  gpu-pubkey-hash-test [adapter_index] [count]\n                              (GPU SHA-256 over compressed pubkey hex strings with CPU verification)\n  gpu-pipeline-test [adapter_index] [chunks] [workgroups]\n                              (chunked compute dispatch test for future GPU vanity pipeline)\n  gpu-vanity-probe [adapter_index] [chunks] [workgroups] [prefix|-] [suffix|-]\n                              (vanity-like GPU probe: params+pattern buffers+hit counters; no real crypto yet)\n  gpu-vanity-job-test [adapter_index] [chunks] [workgroups] [prefix|-] [suffix|-] [max_hits] [stop_after_hits]\n                              (work-item + hit-buffer + stop-flag GPU pipeline test, closer to final vanity backend)\n  recover-mnemonic <seed words...>\n  import-priv <hex>\n  import-dat <file>\n  export-dat <file>\n  export-priv               (requires strong confirmation)\n  default-wallet\n  send <to?> <amount> [n=2]   (defaults to your address)\n  send-priv <priv> <to> <amount> [n=2]\n  sign-raw <to> <amount>      (sign only; save locally)\n  sign-raw-priv <priv> <to> <amount>\n  send-raw <sig|txid> [n=2]   (broadcast a stored raw tx)\n  raw_tx                      (list stored raw-signed txs)\n  force-send <signature>     (resend a pending tx even if only one peer is reachable)\n  balance [address]          (defaults to your address)\n  faucet [address]           (disabled in v2; coinbase-only emission)\n  tx-history [address]       (defaults to your address)\n  tx-info <txid|signature>\n  swap-secret                 (draw a hashlock/secret pair for a cross-chain swap)\n  swap-lock --to <addr> --amount <n> [--hours <h>] [--hashlock <hex>] [--foreign <chain>,<asset>,<amount>,<beneficiary>[,<ref>]]\n  swap-claim <swap_id> [secret]\n  swap-refund <swap_id>       (after the timelock expires)\n  swap-show <swap_id|escrow>\n  swap-list [address|open]\n  list-peers\n  print-mempool\n  exit"
     );
 }
 
@@ -1595,6 +1588,21 @@ fn handle_command_line(peers: &mut PeerStore, line: &str) -> bool {
     }
     match a[0] {
         "help" => help(),
+        "swap-secret" => swap::cmd_swap_secret(),
+        "swap-lock" => swap::cmd_swap_lock(peers, &a[1..]),
+        "swap-claim" => match a.get(1) {
+            Some(id) => swap::cmd_swap_claim(peers, id, a.get(2).copied()),
+            None => println!("Usage: swap-claim <swap_id> [secret]"),
+        },
+        "swap-refund" => match a.get(1) {
+            Some(id) => swap::cmd_swap_refund(peers, id),
+            None => println!("Usage: swap-refund <swap_id>"),
+        },
+        "swap-show" => match a.get(1) {
+            Some(id) => swap::cmd_swap_show(peers, id),
+            None => println!("Usage: swap-show <swap_id|escrow>"),
+        },
+        "swap-list" => swap::cmd_swap_list(peers, a.get(1).copied()),
         "gpu-info" => print_gpu_info(),
         "opencl-info" => print_opencl_info(),
         "gpu-test" => {

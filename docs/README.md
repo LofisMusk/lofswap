@@ -8,6 +8,10 @@ This folder contains project documentation for development, local testing, and o
   Quick setup, build, and first-run flows.
 - [`architecture.md`](./architecture.md)
   Workspace layout, protocol model, and consensus behavior.
+- [`cross-chain-swaps.md`](./cross-chain-swaps.md)
+  HTLC atomic swap protocol, transaction kinds, wallet commands, and endpoints.
+- [`../contracts/README.md`](../contracts/README.md)
+  The foreign legs: EVM (Ethereum, BNB Chain, …) and Solana escrow contracts.
 - [`node-cli.md`](./node-cli.md)
   Node runtime flags, commands, API routes, mining, and data files.
 - [`wallet-cli.md`](./wallet-cli.md)

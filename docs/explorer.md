@@ -48,6 +48,11 @@ Additional API-style aliases also exist:
 - `GET /api/block/:hash`
 - `GET /api/peer/:peer`
 
+Cross-chain swap views:
+
+- `GET /api/swaps` (optional `?status=open|claimed|refunded` and `?address=LFS…`)
+- `GET /api/swap/:id` (swap id or escrow address)
+
 ## Serve the Static Explorer
 
 Copy `explorer/index.html` to a web server and point it to API base:

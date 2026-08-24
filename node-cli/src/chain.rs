@@ -17,6 +17,7 @@ use crate::{
     errors::NodeError,
     mempool::{read_mempool, replace_mempool},
     storage::{data_path, read_data_file, remove_data_file, write_data_file},
+    swap::{SwapIndex, validate_swap_common, validate_swap_lock, validate_swap_settlement},
 };
 
 const MAX_FUTURE_DRIFT_SECS: i64 = 2 * 60 * 60;
@@ -61,7 +62,7 @@ fn check_checkpoints(chain: &[Block]) -> Result<(), NodeError> {
 pub const DIFFICULTY_ADJUSTMENT_INTERVAL: u64 = 10;
 pub const DIFFICULTY_MIN_ZEROS: u32 = 1;
 pub const DIFFICULTY_MAX_ZEROS: u32 = 32;
-const MIN_TX_FEE: u64 = 1;
+pub const MIN_TX_FEE: u64 = 1;
 const CHAIN_SNAPSHOT_FILE: &str = "blockchain.json";
 const CHAIN_DB_DIR: &str = "chain_db";
 const CHAIN_DB_BLOCKS_TREE: &str = "blocks";
@@ -272,6 +273,19 @@ fn validate_tx_common(tx: &Transaction) -> Result<(), NodeError> {
                 )));
             }
         }
+        TxKind::SwapLock | TxKind::SwapClaim | TxKind::SwapRefund => {
+            if tx.fee < MIN_TX_FEE {
+                return Err(NodeError::ValidationError(format!(
+                    "Fee too low (min {})",
+                    MIN_TX_FEE
+                )));
+            }
+            if tx.swap.is_none() {
+                return Err(NodeError::ValidationError(
+                    "Swap transaction is missing its swap payload".to_string(),
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -350,17 +364,10 @@ fn verify_tx_signature(
     from_pubkey: &PublicKey,
 ) -> Result<(), NodeError> {
     let secp = Secp256k1::new();
-    let chain_id = if tx.chain_id.is_empty() {
-        CHAIN_ID
-    } else {
-        tx.chain_id.as_str()
-    };
-    let msg_data_v3 = format!(
-        "{}|{}|{:?}|{}|{}|{}|{}|{}",
-        tx.version, chain_id, tx.kind, pubkey_str, tx.to, tx.amount, tx.fee, tx.timestamp
-    );
-    let msg_data_v3 = format!("{}|{}", msg_data_v3, tx.nonce);
-    let hash_v3 = Sha256::digest(msg_data_v3.as_bytes());
+    // v3 and v4 share the canonical preimage builder in blockchain-core, so
+    // node and wallet can never disagree on what was signed. v4 additionally
+    // commits to the HTLC payload of swap transactions.
+    let hash_v3 = Sha256::digest(tx.signing_preimage(pubkey_str).as_bytes());
     let msg_v3 = Message::from_digest(hash_v3.into());
 
     let msg_data_v2 = format!(
@@ -399,6 +406,73 @@ fn verify_tx_signature(
     Ok(())
 }
 
+fn tx_already_known(
+    tx: &Transaction,
+    chain: &[Block],
+    mempool: &[Transaction],
+    check_mempool_duplicates: bool,
+) -> bool {
+    let in_chain = chain
+        .iter()
+        .any(|block| block.transactions.iter().any(|btx| same_tx(btx, tx)));
+    let in_mempool = check_mempool_duplicates && mempool.iter().any(|m| same_tx(m, tx));
+    in_chain || in_mempool
+}
+
+/// Mempool admission for `SwapClaim` / `SwapRefund`.
+///
+/// These transactions spend an escrow that has no private key, so instead of
+/// the usual "signature of the sender" rule they are authorised by the swap
+/// record: the recipient signs a claim, the maker signs a refund.
+fn is_settlement_valid_inner(
+    tx: &Transaction,
+    chain: &[Block],
+    check_mempool_duplicates: bool,
+) -> Result<(), NodeError> {
+    if tx.pubkey.is_empty() {
+        return Err(NodeError::ValidationError(
+            "Swap settlement must carry the signer pubkey".to_string(),
+        ));
+    }
+    let signer_pubkey = tx
+        .pubkey
+        .parse::<PublicKey>()
+        .map_err(|_| NodeError::ValidationError("Invalid public key".to_string()))?;
+    let signer = pubkey_to_address(&tx.pubkey);
+
+    let index = SwapIndex::build(chain);
+    let mtp = median_time_past(chain, 11);
+    let escrow = validate_swap_settlement(tx, &index, &signer, mtp)?
+        .escrow
+        .clone();
+
+    let mempool = read_mempool();
+    let expected = expected_nonce(&escrow, chain, &mempool, Some(tx));
+    if tx.nonce != expected {
+        return Err(NodeError::ValidationError(format!(
+            "Invalid nonce (expected {}, got {})",
+            expected, tx.nonce
+        )));
+    }
+
+    let escrow_balance = calculate_balance(&escrow, chain);
+    let spend = (tx.amount as i128).saturating_add(tx.fee as i128);
+    if escrow_balance < spend {
+        return Err(NodeError::ValidationError(
+            "Swap escrow has already been spent".to_string(),
+        ));
+    }
+
+    if tx_already_known(tx, chain, &mempool, check_mempool_duplicates) {
+        return Err(NodeError::ValidationError(
+            "Transaction already exists".to_string(),
+        ));
+    }
+
+    verify_tx_signature(tx, &tx.pubkey, &signer_pubkey)?;
+    Ok(())
+}
+
 fn is_tx_valid_inner(
     tx: &Transaction,
     chain: &[Block],
@@ -409,6 +483,13 @@ fn is_tx_valid_inner(
         return Err(NodeError::ValidationError(
             "Coinbase transaction is block-only".to_string(),
         ));
+    }
+    if tx.kind.is_swap() {
+        // Transactions enter the mempool for the next block, hence chain.len().
+        validate_swap_common(tx, chain.len() as u64)?;
+    }
+    if matches!(tx.kind, TxKind::SwapClaim | TxKind::SwapRefund) {
+        return is_settlement_valid_inner(tx, chain, check_mempool_duplicates);
     }
 
     let (pubkey_str, from_pubkey, derived_addr) = resolve_sender(tx)?;
@@ -462,6 +543,17 @@ fn is_tx_valid_inner(
     }
 
     verify_tx_signature(tx, &pubkey_str, &from_pubkey)?;
+
+    if tx.kind == TxKind::SwapLock {
+        validate_swap_lock(tx, &derived_addr, median_time_past(chain, 11))?;
+        if let Some(payload) = tx.swap.as_ref() {
+            if SwapIndex::build(chain).get(&payload.swap_id).is_some() {
+                return Err(NodeError::ValidationError(
+                    "Swap id already used on chain".to_string(),
+                ));
+            }
+        }
+    }
 
     Ok(())
 }
@@ -546,6 +638,11 @@ pub fn validate_block(
     }
 
     let mut balances = calculate_balances(chain);
+    let mut swap_index = SwapIndex::build(chain);
+    // Timelocks are compared against the median time past of the preceding
+    // blocks, never against this block's own timestamp: a miner must not be
+    // able to move the deadline of somebody else's swap.
+    let block_mtp = median_time_past(chain, 11);
     let mut seen = HashSet::new();
     let mut chain_seen = HashSet::new();
     let mut next_nonces = HashMap::new();
@@ -584,35 +681,85 @@ pub fn validate_block(
 
         if idx == 0 {
             continue;
-        } else if tx.kind != TxKind::Transfer || tx.from.is_empty() {
+        }
+        if tx.from.is_empty() || tx.kind == TxKind::Coinbase {
             return Err(NodeError::ValidationError(
-                "Only transfer transactions are allowed after coinbase".to_string(),
+                "Only transfer and swap transactions are allowed after coinbase".to_string(),
             ));
-        } else {
-            let (pubkey_str, from_pubkey, from_addr) = resolve_sender(tx)?;
-            verify_tx_signature(tx, &pubkey_str, &from_pubkey)?;
-            let expected = *next_nonces
-                .entry(from_addr.clone())
-                .or_insert_with(|| confirmed_next_nonce(&from_addr, chain));
-            if tx.nonce != expected {
-                return Err(NodeError::ValidationError(format!(
-                    "Invalid nonce (expected {}, got {})",
-                    expected, tx.nonce
-                )));
+        }
+        if tx.kind.is_swap() {
+            validate_swap_common(tx, block.index)?;
+        }
+
+        // Every spender is charged the same way (`amount + fee` leaves the
+        // account named in `from`); the kinds differ only in who is allowed to
+        // authorise that spend.
+        let from_addr = match tx.kind {
+            TxKind::Transfer | TxKind::SwapLock => {
+                let (pubkey_str, from_pubkey, from_addr) = resolve_sender(tx)?;
+                verify_tx_signature(tx, &pubkey_str, &from_pubkey)?;
+                if tx.kind == TxKind::SwapLock {
+                    validate_swap_lock(tx, &from_addr, block_mtp)?;
+                    if let Some(payload) = tx.swap.as_ref() {
+                        if swap_index.get(&payload.swap_id).is_some() {
+                            return Err(NodeError::ValidationError(
+                                "Swap id already used on chain".to_string(),
+                            ));
+                        }
+                    }
+                }
+                from_addr
             }
-            next_nonces.insert(from_addr.clone(), expected.saturating_add(1));
-            let bal = balances.entry(from_addr.clone()).or_insert(0);
-            let spend = (tx.amount as i128) + (tx.fee as i128);
-            if *bal < spend {
+            TxKind::SwapClaim | TxKind::SwapRefund => {
+                if tx.pubkey.is_empty() {
+                    return Err(NodeError::ValidationError(
+                        "Swap settlement must carry the signer pubkey".to_string(),
+                    ));
+                }
+                let signer_pubkey = tx
+                    .pubkey
+                    .parse::<PublicKey>()
+                    .map_err(|_| NodeError::ValidationError("Invalid public key".to_string()))?;
+                verify_tx_signature(tx, &tx.pubkey, &signer_pubkey)?;
+                let signer = pubkey_to_address(&tx.pubkey);
+                validate_swap_settlement(tx, &swap_index, &signer, block_mtp)?
+                    .escrow
+                    .clone()
+            }
+            // Guarded above, but consensus code never panics on block data.
+            TxKind::Coinbase => {
                 return Err(NodeError::ValidationError(
-                    "Insufficient balance".to_string(),
+                    "Coinbase transaction is only allowed at index 0".to_string(),
                 ));
             }
-            *bal -= spend;
-            fees_sum = fees_sum.saturating_add(tx.fee);
+        };
+
+        let expected = *next_nonces
+            .entry(from_addr.clone())
+            .or_insert_with(|| confirmed_next_nonce(&from_addr, chain));
+        if tx.nonce != expected {
+            return Err(NodeError::ValidationError(format!(
+                "Invalid nonce (expected {}, got {})",
+                expected, tx.nonce
+            )));
         }
+        next_nonces.insert(from_addr.clone(), expected.saturating_add(1));
+        let bal = balances.entry(from_addr.clone()).or_insert(0);
+        let spend = (tx.amount as i128) + (tx.fee as i128);
+        if *bal < spend {
+            return Err(NodeError::ValidationError(
+                "Insufficient balance".to_string(),
+            ));
+        }
+        *bal -= spend;
+        fees_sum = fees_sum.saturating_add(tx.fee);
+
         let to_addr = normalize_addr(&tx.to);
         *balances.entry(to_addr).or_insert(0) += tx.amount as i128;
+
+        if tx.kind.is_swap() {
+            swap_index.apply(tx, block.index);
+        }
     }
 
     let expected_reward = block_subsidy(block.index).saturating_add(fees_sum);

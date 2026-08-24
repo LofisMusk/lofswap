@@ -35,6 +35,7 @@ cargo run -p wallet-cli -- --l2
 - `.default_wallet` (legacy plaintext format; migrated when possible)
 - `wallet_mempool.json` (locally queued pending tx)
 - `wallet_raw_signed.json` (raw signed tx cache)
+- `wallet-cache/swap_secrets.json` (HTLC preimages for open cross-chain swaps — back this up while a swap is open)
 - `wallet-cache/peers_cache.json` (default peer cache)
 - `wallet-cache/peers_cache_l2.json` (peer cache used when `--l2` selects a non-default network profile)
 
@@ -66,9 +67,25 @@ cargo run -p wallet-cli -- --l2
 - `faucet [address]`
 - `tx-history [address]`
 - `tx-info <txid|signature>`
+- `swap-secret`
+- `swap-lock --to <address> --amount <n> [--hours <h>] [--hashlock <hex>] [--foreign <chain>,<asset>,<amount>,<beneficiary>[,<ref>]]`
+- `swap-claim <swap_id> [secret]`
+- `swap-refund <swap_id>`
+- `swap-show <swap_id|escrow>`
+- `swap-list [address|open]`
 - `list-peers`
 - `print-mempool`
 - `exit`
+
+## Cross-Chain Swaps
+
+The `swap-*` commands drive the HTLC protocol described in
+[`cross-chain-swaps.md`](./cross-chain-swaps.md). Two rules matter in practice:
+
+1. When you answer somebody else's hashlock, your timelock must be clearly
+   shorter than theirs.
+2. Keep `wallet-cache/swap_secrets.json` while a swap is open — it holds the
+   preimage you need in order to claim.
 
 ## Important Emission Note
 

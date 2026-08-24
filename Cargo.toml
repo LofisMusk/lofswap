@@ -6,3 +6,5 @@ members = [
     "wallet-cli",
     "node-cli",
 ]
+# Built with the Solana toolchain, not with the node workspace.
+exclude = ["contracts/solana"]

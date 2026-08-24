@@ -1,5 +1,5 @@
 use axum::{
-    extract::{ConnectInfo, State},
+    extract::{ConnectInfo, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -25,6 +25,9 @@ const MAX_PEER_RESPONSE_BYTES: u64 = 32 * 1024 * 1024; // 32 MB
 
 /// HTTP rate limit: max requests per IP per minute on all REST endpoints.
 const HTTP_RATE_LIMIT_PER_MIN: u32 = 120;
+
+/// Max swap records returned by a single swap query.
+const SWAP_PAGE_LIMIT: usize = 200;
 
 /// Max blocks accepted from a peer before rejecting the chain (sanity cap).
 const MAX_PEER_CHAIN_BLOCKS: usize = 10_000_000;
@@ -918,6 +921,137 @@ async fn address_txs(
     json_response(StatusCode::OK, txs)
 }
 
+// ──────────────────────────────────────────────
+// Cross-chain swaps (HTLC)
+// ──────────────────────────────────────────────
+
+/// Folds the swap transactions of a chain into one record per swap.
+///
+/// The explorer works on raw block JSON pulled from nodes, so this mirrors the
+/// node's `SwapIndex` without depending on the node crate. Records keep the
+/// same field names the node exposes on `/swap/{id}`.
+fn collect_swaps(chain: &[Value]) -> Vec<Value> {
+    let mut order: Vec<String> = Vec::new();
+    let mut swaps: HashMap<String, Value> = HashMap::new();
+
+    for block in chain {
+        let height = block.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
+        let Some(Value::Array(txs)) = block.get("transactions") else {
+            continue;
+        };
+        for tx in txs {
+            let kind = tx.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+            let Some(payload) = tx.get("swap") else {
+                continue;
+            };
+            let swap_id = payload
+                .get("swap_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            if swap_id.is_empty() {
+                continue;
+            }
+            match kind {
+                "swaplock" => {
+                    if swaps.contains_key(&swap_id) {
+                        continue;
+                    }
+                    order.push(swap_id.clone());
+                    swaps.insert(
+                        swap_id.clone(),
+                        serde_json::json!({
+                            "swap_id": swap_id,
+                            "escrow": tx.get("to").cloned().unwrap_or(Value::Null),
+                            "maker": tx.get("from").cloned().unwrap_or(Value::Null),
+                            "recipient": payload.get("recipient").cloned().unwrap_or(Value::Null),
+                            "amount": tx.get("amount").cloned().unwrap_or(Value::Null),
+                            "hashlock": payload.get("hashlock").cloned().unwrap_or(Value::Null),
+                            "timelock": payload.get("timelock").cloned().unwrap_or(Value::Null),
+                            "foreign": payload.get("foreign").cloned().unwrap_or(Value::Null),
+                            "status": "open",
+                            "lock_txid": tx.get("txid").cloned().unwrap_or(Value::Null),
+                            "lock_height": height,
+                            "lock_time": tx.get("timestamp").cloned().unwrap_or(Value::Null),
+                            "secret": "",
+                            "settle_txid": "",
+                            "settle_height": Value::Null,
+                            "payout": 0,
+                        }),
+                    );
+                }
+                "swapclaim" | "swaprefund" => {
+                    let Some(record) = swaps.get_mut(&swap_id) else {
+                        continue;
+                    };
+                    if record.get("status").and_then(|v| v.as_str()) != Some("open") {
+                        continue;
+                    }
+                    record["status"] = Value::String(
+                        if kind == "swapclaim" {
+                            "claimed"
+                        } else {
+                            "refunded"
+                        }
+                        .to_string(),
+                    );
+                    if kind == "swapclaim" {
+                        record["secret"] = payload.get("secret").cloned().unwrap_or(Value::Null);
+                    }
+                    record["settle_txid"] = tx.get("txid").cloned().unwrap_or(Value::Null);
+                    record["settle_height"] = Value::from(height);
+                    record["payout"] = tx.get("amount").cloned().unwrap_or(Value::Null);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    order
+        .iter()
+        .rev()
+        .filter_map(|id| swaps.get(id).cloned())
+        .collect()
+}
+
+async fn api_swaps(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let cache = state.cache.read().unwrap();
+    let mut swaps = collect_swaps(&cache.chain);
+    if let Some(status) = params.get("status") {
+        swaps.retain(|s| s.get("status").and_then(|v| v.as_str()) == Some(status.as_str()));
+    }
+    if let Some(addr) = params.get("address") {
+        swaps.retain(|s| {
+            ["maker", "recipient", "escrow"]
+                .iter()
+                .any(|k| s.get(*k).and_then(|v| v.as_str()) == Some(addr.as_str()))
+        });
+    }
+    swaps.truncate(SWAP_PAGE_LIMIT);
+    json_response(StatusCode::OK, swaps)
+}
+
+async fn api_swap(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    let cache = state.cache.read().unwrap();
+    let found = collect_swaps(&cache.chain).into_iter().find(|s| {
+        s.get("swap_id").and_then(|v| v.as_str()) == Some(id.as_str())
+            || s.get("escrow").and_then(|v| v.as_str()) == Some(id.as_str())
+    });
+    match found {
+        Some(swap) => json_response(StatusCode::OK, swap),
+        None => json_response(
+            StatusCode::NOT_FOUND,
+            serde_json::json!({ "error": "swap not found" }),
+        ),
+    }
+}
+
 async fn node_ip() -> Response {
     let ip = if let Ok(sock) = UdpSocket::bind("0.0.0.0:0") {
         if sock.connect("8.8.8.8:80").is_ok() {
@@ -1006,6 +1140,9 @@ async fn main() {
         // address endpoints
         .route("/address/:addr/balance", get(address_balance).options(options_handler))
         .route("/address/:addr/txs",     get(address_txs).options(options_handler))
+        // cross-chain swaps (HTLC)
+        .route("/api/swaps",            get(api_swaps).options(options_handler))
+        .route("/api/swap/:id",         get(api_swap).options(options_handler))
         .layer(middleware::from_fn_with_state(state.clone(), rate_limit_middleware))
         .with_state(state);
 
@@ -1018,4 +1155,97 @@ async fn main() {
     // Use into_make_service_with_connect_info so ConnectInfo<SocketAddr> is available
     // in middleware for per-IP rate limiting.
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::collect_swaps;
+    use serde_json::json;
+
+    fn block(index: u64, txs: Vec<serde_json::Value>) -> serde_json::Value {
+        json!({ "index": index, "transactions": txs })
+    }
+
+    #[test]
+    fn collect_swaps_tracks_lock_then_claim() {
+        let chain = vec![
+            block(
+                1,
+                vec![json!({
+                    "kind": "swaplock",
+                    "from": "LFSmaker",
+                    "to": "LFSescrow",
+                    "amount": 50,
+                    "txid": "lock-tx",
+                    "timestamp": 10,
+                    "swap": {
+                        "swap_id": "abc",
+                        "hashlock": "aa",
+                        "timelock": 999,
+                        "recipient": "LFStaker",
+                        "foreign": { "chain": "solana:mainnet", "asset": "USDC", "amount": "25000000", "beneficiary": "sol1", "htlc_ref": "" }
+                    }
+                })],
+            ),
+            block(
+                2,
+                vec![json!({
+                    "kind": "swapclaim",
+                    "from": "LFSescrow",
+                    "to": "LFStaker",
+                    "amount": 49,
+                    "txid": "claim-tx",
+                    "swap": { "swap_id": "abc", "hashlock": "aa", "timelock": 999, "secret": "s3cr3t" }
+                })],
+            ),
+        ];
+
+        let swaps = collect_swaps(&chain);
+        assert_eq!(swaps.len(), 1);
+        let swap = &swaps[0];
+        assert_eq!(swap["status"], "claimed");
+        assert_eq!(swap["secret"], "s3cr3t");
+        assert_eq!(swap["payout"], 49);
+        assert_eq!(swap["settle_txid"], "claim-tx");
+        assert_eq!(swap["foreign"]["chain"], "solana:mainnet");
+    }
+
+    #[test]
+    fn collect_swaps_ignores_settlements_without_a_lock_and_double_spends() {
+        let chain = vec![
+            block(
+                1,
+                vec![json!({
+                    "kind": "swapclaim",
+                    "from": "LFSescrow",
+                    "to": "LFStaker",
+                    "amount": 1,
+                    "swap": { "swap_id": "ghost", "secret": "x" }
+                })],
+            ),
+            block(
+                2,
+                vec![json!({
+                    "kind": "swaplock",
+                    "from": "LFSmaker",
+                    "to": "LFSescrow",
+                    "amount": 10,
+                    "swap": { "swap_id": "real", "hashlock": "bb", "timelock": 5, "recipient": "LFStaker" }
+                })],
+            ),
+            block(
+                3,
+                vec![
+                    json!({ "kind": "swaprefund", "from": "LFSescrow", "to": "LFSmaker", "amount": 9, "txid": "refund-tx", "swap": { "swap_id": "real" } }),
+                    json!({ "kind": "swapclaim", "from": "LFSescrow", "to": "LFStaker", "amount": 9, "txid": "late-claim", "swap": { "swap_id": "real", "secret": "y" } }),
+                ],
+            ),
+        ];
+
+        let swaps = collect_swaps(&chain);
+        assert_eq!(swaps.len(), 1);
+        assert_eq!(swaps[0]["swap_id"], "real");
+        assert_eq!(swaps[0]["status"], "refunded");
+        assert_eq!(swaps[0]["settle_txid"], "refund-tx");
+    }
 }
