@@ -1,0 +1,177 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" />
+  <style>
+    body { margin: 0; background: #000000; color: #e6e6e6; font-family: 'Space Grotesk', 'Segoe UI', system-ui, sans-serif;
+           -webkit-font-smoothing: antialiased; }
+    a { color: #d8647e; text-decoration: none; }
+    a:hover { color: #f07a93; }
+    * { box-sizing: border-box; }
+  </style>
+</helmet>
+<div style="width: 1100px; height: 740px; display: flex; background: #000000;
+            overflow: hidden">
+  <div style="width: 232px; flex-shrink: 0; background: #0d0d0d;
+            border-right: 1px solid #242424; display: flex; flex-direction: column;
+            padding: 22px 16px 18px">
+  <div style="display: flex; align-items: center; gap: 11px; padding: 0 6px 24px">
+    <img src="logo.png" width="30" height="30" alt="LofSwap" />
+    <div style="display: flex; flex-direction: column; gap: 1px">
+      <div style="font-size: 15px; font-weight: 600; letter-spacing: -0.01em">LofSwap</div>
+      <div style="font-size: 10px; font-weight: 500; letter-spacing: 0.12em; color: #6b6b6b">WALLET</div>
+    </div>
+  </div>
+  <div style="display: flex; flex-direction: column; gap: 3px; flex-grow: 1">
+      <div style="position: relative; display: flex; align-items: center; gap: 12px; height: 40px; padding: 0 14px; border-radius: 8px; background: #1a0710"><div style="position: absolute; left: 0; top: 8px; bottom: 8px; width: 2px; border-radius: 1px; background: #d8647e"></div><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#d8647e" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg><span style="font-size: 14px; font-weight: 500; color: #e6e6e6">Dashboard</span></div>
+      <div style="position: relative; display: flex; align-items: center; gap: 12px; height: 40px; padding: 0 14px; border-radius: 8px; background: transparent"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#8c8c8c" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0"><path d="M12 19V5"/><path d="M5.5 11.5 12 5l6.5 6.5"/></svg><span style="font-size: 14px; font-weight: 400; color: #8c8c8c">Send</span></div>
+      <div style="position: relative; display: flex; align-items: center; gap: 12px; height: 40px; padding: 0 14px; border-radius: 8px; background: transparent"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#8c8c8c" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0"><path d="M12 5v14"/><path d="M18.5 12.5 12 19l-6.5-6.5"/></svg><span style="font-size: 14px; font-weight: 400; color: #8c8c8c">Receive</span></div>
+      <div style="position: relative; display: flex; align-items: center; gap: 12px; height: 40px; padding: 0 14px; border-radius: 8px; background: transparent"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#8c8c8c" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0"><path d="M3 12h4l2.5-6 4 12 2.5-6H21"/></svg><span style="font-size: 14px; font-weight: 400; color: #8c8c8c">Activity</span></div>
+      <div style="position: relative; display: flex; align-items: center; gap: 12px; height: 40px; padding: 0 14px; border-radius: 8px; background: transparent"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#8c8c8c" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0"><path d="M4 7.5h5M13 7.5h7M4 16.5h7M15 16.5h5"/><circle cx="11" cy="7.5" r="2"/><circle cx="13" cy="16.5" r="2"/></svg><span style="font-size: 14px; font-weight: 400; color: #8c8c8c">Settings</span></div>
+  </div>
+  <div style="display: flex; flex-direction: column; gap: 9px; padding: 14px 12px 0;
+              border-top: 1px solid #242424">
+    <div style="display: flex; align-items: center; gap: 8px">
+      <div style="width: 7px; height: 7px; border-radius: 4px; background: #47be8b; flex-shrink: 0"></div><span style="font-size: 12px; color: #b2b2b2">3 peers online</span>
+    </div>
+    <div style="display: flex; align-items: center; justify-content: space-between">
+      <span style="font-size: 12px; color: #6b6b6b">Height</span>
+      <span style="font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; font-weight: 500; color: #8c8c8c">41,208</span>
+    </div>
+    <div style="display: flex; align-items: center; justify-content: space-between">
+      <span style="font-size: 12px; color: #6b6b6b">Chain</span>
+      <span style="font-size: 12px; color: #8c8c8c">lofswap-testnet</span>
+    </div>
+  </div>
+</div>
+  <div style="flex-grow: 1; display: flex; flex-direction: column; min-width: 0">
+    <div style="display: flex; align-items: center; justify-content: space-between;
+            height: 74px; padding: 0 28px; border-bottom: 1px solid #242424; flex-shrink: 0">
+  <div>
+    <div style="font-size: 19px; font-weight: 600; letter-spacing: -0.01em">Dashboard</div>
+    <div style="font-size: 12px; color: #8c8c8c; margin-top: 2px">Balances and activity for this wallet</div>
+  </div>
+  <div style="display: flex; align-items: center; gap: 10px">
+    <div style="display: flex; align-items: center; gap: 10px; height: 34px; padding: 0 12px;
+                background: #0d0d0d; border: 1px solid #242424; border-radius: 8px">
+      <span style="font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; font-weight: 500; color: #b2b2b2">LFS2aWgYK…DgXu</span><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#8c8c8c" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0"><rect x="8.5" y="8.5" width="11" height="11" rx="2"/><path d="M15.5 5.5h-11v11"/></svg>
+    </div>
+    <div style="display: flex; align-items: center; justify-content: center; width: 34px;
+                height: 34px; background: #0d0d0d; border: 1px solid #242424; border-radius: 8px">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#8c8c8c" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0"><rect x="4.5" y="10" width="15" height="10" rx="2.2"/><path d="M8.2 10V7.5a3.8 3.8 0 0 1 7.6 0V10"/></svg>
+    </div>
+  </div>
+</div>
+    <div style="flex-grow: 1; padding: 28px; overflow: hidden">
+      <div style="display: flex; flex-direction: column; gap: 16px">
+        <div style="background: #0d0d0d; border: 1px solid #242424; border-radius: 12px; padding: 26px; "><div style="display: flex; align-items: flex-start; justify-content: space-between">
+    <div style="display: flex; flex-direction: column; gap: 12px">
+      <div style="font-size: 11px; font-weight: 500; letter-spacing: 0.09em; text-transform: uppercase; color: #8c8c8c">Spendable balance</div>
+      <div style="display: flex; align-items: baseline; gap: 10px">
+        <div style="font-size: 46px; font-weight: 600; letter-spacing: -0.03em;
+                    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; line-height: 1">1,284</div>
+        <div style="font-size: 18px; font-weight: 500; color: #b2b2b2">LFS</div>
+      </div>
+      <div style="display: flex; align-items: center; gap: 8px">
+        <div style="width: 7px; height: 7px; border-radius: 4px; background: #e5ac4c; flex-shrink: 0"></div>
+        <span style="font-size: 13px; color: #8c8c8c">20 LFS awaiting confirmation</span>
+      </div>
+    </div>
+    <div style="display: flex; gap: 10px">
+      <div style="display: flex; align-items: center; gap: 8px; height: 38px; padding: 0 18px; border-radius: 8px; font-size: 14px; font-weight: 500; background: #7a0033; color: #ffffff; border: 1px solid #7a0033; width: 118px; justify-content: center; white-space: nowrap;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0"><path d="M12 19V5"/><path d="M5.5 11.5 12 5l6.5 6.5"/></svg> <span>Send</span></div>
+      <div style="display: flex; align-items: center; gap: 8px; height: 38px; padding: 0 18px; border-radius: 8px; font-size: 14px; font-weight: 500; background: #141414; color: #e6e6e6; border: 1px solid #333333; width: 128px; justify-content: center; white-space: nowrap;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#b2b2b2" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0"><path d="M12 5v14"/><path d="M18.5 12.5 12 19l-6.5-6.5"/></svg> <span>Receive</span></div>
+    </div>
+  </div></div>
+        <div style="display: flex; gap: 16px">
+    <div style="background: #0d0d0d; border: 1px solid #242424; border-radius: 12px; padding: 18px; flex-grow: 1"><div style="display: flex; flex-direction: column; gap: 9px">
+    <div style="font-size: 11px; font-weight: 500; letter-spacing: 0.09em; text-transform: uppercase; color: #8c8c8c">Network</div>
+    <div style="font-size: 22px; font-weight: 600; letter-spacing: -0.02em; font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace">3 / 7</div>
+    <div style="font-size: 12px; color: #47be8b">peers reachable</div>
+  </div></div>
+    <div style="background: #0d0d0d; border: 1px solid #242424; border-radius: 12px; padding: 18px; flex-grow: 1"><div style="display: flex; flex-direction: column; gap: 9px">
+    <div style="font-size: 11px; font-weight: 500; letter-spacing: 0.09em; text-transform: uppercase; color: #8c8c8c">Chain height</div>
+    <div style="font-size: 22px; font-weight: 600; letter-spacing: -0.02em; font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace">41,208</div>
+    <div style="font-size: 12px; color: #6b6b6b">synced 2 min ago</div>
+  </div></div>
+    <div style="background: #0d0d0d; border: 1px solid #242424; border-radius: 12px; padding: 18px; flex-grow: 1"><div style="display: flex; flex-direction: column; gap: 9px">
+    <div style="font-size: 11px; font-weight: 500; letter-spacing: 0.09em; text-transform: uppercase; color: #8c8c8c">Network fee</div>
+    <div style="font-size: 22px; font-weight: 600; letter-spacing: -0.02em; font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace">1 LFS</div>
+    <div style="font-size: 12px; color: #6b6b6b">flat, per transaction</div>
+  </div></div>
+  </div>
+        <div style="background: #0d0d0d; border: 1px solid #242424; border-radius: 12px; padding: 20px; "><div style="display: flex; align-items: center; justify-content: space-between;
+              padding-bottom: 6px">
+    <div style="font-size: 15px; font-weight: 600">Recent activity</div>
+    <div style="display: flex; align-items: center; gap: 6px; font-size: 13px; color: #d8647e">
+      <span>View all</span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#d8647e" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0"><path d="M9.5 5.5 16 12l-6.5 6.5"/></svg>
+    </div>
+  </div>
+  <div style="display: flex; align-items: center; gap: 14px; height: 58px;
+            padding: 0 4px; border-bottom: 1px solid #242424;">
+  <div style="display: flex; align-items: center; justify-content: center; width: 32px;
+              height: 32px; border-radius: 8px; background: #141414;
+              border: 1px solid #242424"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#47be8b" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0"><path d="M12 5v14"/><path d="M18.5 12.5 12 19l-6.5-6.5"/></svg></div>
+  <div style="display: flex; flex-direction: column; gap: 3px; flex-grow: 1; min-width: 0">
+    <div style="font-size: 13px; font-weight: 500; color: #e6e6e6">Received</div>
+    <span style="font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; font-weight: 400; color: #8c8c8c">LFS3Hwzn6s…DQVW5S</span>
+  </div>
+  <div style="display: flex; flex-direction: column; gap: 3px; align-items: flex-end">
+    <div style="font-size: 14px; font-weight: 600; color: #47be8b; font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace">+10 LFS</div>
+    <div style="font-size: 11px; color: #6b6b6b">2 min ago · 12 conf</div>
+  </div>
+</div>
+  <div style="display: flex; align-items: center; gap: 14px; height: 58px;
+            padding: 0 4px; border-bottom: 1px solid #242424;">
+  <div style="display: flex; align-items: center; justify-content: center; width: 32px;
+              height: 32px; border-radius: 8px; background: #141414;
+              border: 1px solid #242424"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#b2b2b2" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0"><path d="M12 19V5"/><path d="M5.5 11.5 12 5l6.5 6.5"/></svg></div>
+  <div style="display: flex; flex-direction: column; gap: 3px; flex-grow: 1; min-width: 0">
+    <div style="font-size: 13px; font-weight: 500; color: #e6e6e6">Sent</div>
+    <span style="font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; font-weight: 400; color: #8c8c8c">LFS3vE3ery…svNpzZ</span>
+  </div>
+  <div style="display: flex; flex-direction: column; gap: 3px; align-items: flex-end">
+    <div style="font-size: 14px; font-weight: 600; color: #e6e6e6; font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace">−250 LFS</div>
+    <div style="font-size: 11px; color: #6b6b6b">26 min ago · 24 conf</div>
+  </div>
+</div>
+  <div style="display: flex; align-items: center; gap: 14px; height: 58px;
+            padding: 0 4px; border-bottom: 1px solid #242424;">
+  <div style="display: flex; align-items: center; justify-content: center; width: 32px;
+              height: 32px; border-radius: 8px; background: #141414;
+              border: 1px solid #242424"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#47be8b" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0"><path d="M12 5v14"/><path d="M18.5 12.5 12 19l-6.5-6.5"/></svg></div>
+  <div style="display: flex; flex-direction: column; gap: 3px; flex-grow: 1; min-width: 0">
+    <div style="font-size: 13px; font-weight: 500; color: #e6e6e6">Received</div>
+    <span style="font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; font-weight: 400; color: #8c8c8c">LFS4UvEMRM…Fer6a6</span>
+  </div>
+  <div style="display: flex; flex-direction: column; gap: 3px; align-items: flex-end">
+    <div style="font-size: 14px; font-weight: 600; color: #47be8b; font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace">+480 LFS</div>
+    <div style="font-size: 11px; color: #6b6b6b">1 h ago · 49 conf</div>
+  </div>
+</div>
+  <div style="display: flex; align-items: center; gap: 14px; height: 58px;
+            padding: 0 4px; ">
+  <div style="display: flex; align-items: center; justify-content: center; width: 32px;
+              height: 32px; border-radius: 8px; background: #141414;
+              border: 1px solid #242424"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#b2b2b2" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0"><path d="M12 19V5"/><path d="M5.5 11.5 12 5l6.5 6.5"/></svg></div>
+  <div style="display: flex; flex-direction: column; gap: 3px; flex-grow: 1; min-width: 0">
+    <div style="font-size: 13px; font-weight: 500; color: #e6e6e6">Sent</div>
+    <span style="font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; font-weight: 400; color: #8c8c8c">LFS3ANZ4ME…rNgGwr</span>
+  </div>
+  <div style="display: flex; flex-direction: column; gap: 3px; align-items: flex-end">
+    <div style="font-size: 14px; font-weight: 600; color: #e6e6e6; font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace">−35 LFS</div>
+    <div style="font-size: 11px; color: #6b6b6b">3 h ago · 80 conf</div>
+  </div>
+</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

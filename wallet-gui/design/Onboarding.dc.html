@@ -1,0 +1,78 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" />
+  <style>
+    body { margin: 0; background: #000000; color: #e6e6e6; font-family: 'Space Grotesk', 'Segoe UI', system-ui, sans-serif;
+           -webkit-font-smoothing: antialiased; }
+    a { color: #d8647e; text-decoration: none; }
+    a:hover { color: #f07a93; }
+    * { box-sizing: border-box; }
+  </style>
+</helmet>
+<div style="width: 1100px; height: 740px; display: flex; align-items: center;
+            justify-content: center; background: #000000">
+<div style="display: flex; flex-direction: column; align-items: center; gap: 28px; width: 520px">
+  <div style="display: flex; flex-direction: column; align-items: center; gap: 16px">
+    <img src="logo.png" width="64" height="64" alt="LofSwap" />
+    <div style="display: flex; flex-direction: column; align-items: center; gap: 7px">
+      <div style="font-size: 26px; font-weight: 600; letter-spacing: -0.02em">Set up your wallet</div>
+      <div style="font-size: 13px; color: #8c8c8c; text-align: center; line-height: 1.6; max-width: 400px">
+        Keys are generated and encrypted on this machine. Nothing is uploaded, and no
+        account is created anywhere.
+      </div>
+    </div>
+  </div>
+  <div style="display: flex; flex-direction: column; gap: 12px; width: 520px">
+    <div style="display: flex; align-items: center; gap: 16px; padding: 18px;
+            background: #1a0710; border: 1px solid #3a1220; border-radius: 12px">
+  <div style="display: flex; align-items: center; justify-content: center; width: 40px; height: 40px;
+              border-radius: 10px; background: #141414; border: 1px solid #242424">
+    <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#d8647e" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0"><path d="M12 5.5v13M5.5 12h13"/></svg>
+  </div>
+  <div style="display: flex; flex-direction: column; gap: 4px; flex-grow: 1; min-width: 0">
+    <div style="font-size: 14px; font-weight: 600; color: #e6e6e6">Create a new wallet</div>
+    <div style="font-size: 12px; color: #8c8c8c; line-height: 1.5">Generates a 12-word recovery phrase and a fresh keystore.</div>
+  </div>
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#6b6b6b" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0"><path d="M9.5 5.5 16 12l-6.5 6.5"/></svg>
+</div>
+    <div style="display: flex; align-items: center; gap: 16px; padding: 18px;
+            background: #0d0d0d; border: 1px solid #242424; border-radius: 12px">
+  <div style="display: flex; align-items: center; justify-content: center; width: 40px; height: 40px;
+              border-radius: 10px; background: #141414; border: 1px solid #242424">
+    <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#b2b2b2" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0"><circle cx="8" cy="12" r="3.5"/><path d="M11.5 12H21"/><path d="M17.5 12v3.5M20 12v2.5"/></svg>
+  </div>
+  <div style="display: flex; flex-direction: column; gap: 4px; flex-grow: 1; min-width: 0">
+    <div style="font-size: 14px; font-weight: 600; color: #e6e6e6">Import a private key</div>
+    <div style="font-size: 12px; color: #8c8c8c; line-height: 1.5">Paste a 32-byte secp256k1 key in hex.</div>
+  </div>
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#6b6b6b" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0"><path d="M9.5 5.5 16 12l-6.5 6.5"/></svg>
+</div>
+    <div style="display: flex; align-items: center; gap: 16px; padding: 18px;
+            background: #0d0d0d; border: 1px solid #242424; border-radius: 12px">
+  <div style="display: flex; align-items: center; justify-content: center; width: 40px; height: 40px;
+              border-radius: 10px; background: #141414; border: 1px solid #242424">
+    <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#b2b2b2" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0"><path d="M13.5 3.5H7a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9z"/><path d="M13.5 3.5V9H19"/></svg>
+  </div>
+  <div style="display: flex; flex-direction: column; gap: 4px; flex-grow: 1; min-width: 0">
+    <div style="font-size: 14px; font-weight: 600; color: #e6e6e6">Import a .dat file</div>
+    <div style="font-size: 12px; color: #8c8c8c; line-height: 1.5">Restore a raw key file exported from the CLI wallet.</div>
+  </div>
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#6b6b6b" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0"><path d="M9.5 5.5 16 12l-6.5 6.5"/></svg>
+</div>
+  </div>
+  <div style="display: flex; align-items: center; gap: 10px">
+    <div style="display: flex; align-items: center; height: 26px; padding: 0 10px; border-radius: 6px; background: transparent; border: 1px solid #242424; font-size: 12px; font-weight: 500; color: #8c8c8c">lofswap-testnet</div>
+    <span style="font-size: 12px; color: #6b6b6b">wallet 0.1.0</span>
+  </div>
+</div>
+</div>
+</x-dc>
+</body>
+</html>
