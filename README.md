@@ -14,6 +14,7 @@ Transfers between LofSwap participants are settled by the chain itself; cross-ch
 - [Cross-Chain Swaps](docs/cross-chain-swaps.md)
 - [Foreign Legs (EVM / Solana contracts)](contracts/README.md)
 - [Node CLI](docs/node-cli.md)
+- [Running a Node for Free](docs/deploy-free.md)
 - [Wallet CLI](docs/wallet-cli.md)
 - [Desktop Wallet](docs/wallet-gui.md)
 - [Explorer](docs/explorer.md)

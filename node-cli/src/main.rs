@@ -1,4 +1,5 @@
-use std::sync::{Arc, atomic::AtomicUsize};
+use std::net::ToSocketAddrs;
+use std::sync::{Arc, OnceLock, atomic::AtomicUsize};
 
 use once_cell::sync::Lazy;
 use tokio::sync::{Mutex, RwLock};
@@ -27,9 +28,58 @@ pub const NODE_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub static ACTIVE_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
 
 pub const LISTEN_PORT: u16 = 6000;
-pub const BOOTSTRAP_NODES: &[&str] = &["89.168.107.239:6000", "79.76.116.108:6000"];
 pub const MAX_CONNECTIONS: usize = 50;
 pub const BUFFER_SIZE: usize = 8192;
+
+/// Seed nodes compiled into this build. `--peer` and `LOFSWAP_BOOTSTRAP`
+/// override them, so a network whose seeds move does not need a new release.
+pub const DEFAULT_BOOTSTRAP_NODES: &[&str] = &["89.168.107.239:6000", "79.76.116.108:6000"];
+pub const BOOTSTRAP_ENV: &str = "LOFSWAP_BOOTSTRAP";
+
+/// Seeds passed on the command line, filled in before the node starts.
+static CLI_BOOTSTRAP: OnceLock<Vec<String>> = OnceLock::new();
+
+pub static BOOTSTRAP_NODES: Lazy<Vec<String>> = Lazy::new(resolve_bootstrap_nodes);
+
+/// Peers are tracked as `ip:port`, so host names are resolved once at startup.
+fn resolve_bootstrap_nodes() -> Vec<String> {
+    let configured: Vec<String> = CLI_BOOTSTRAP
+        .get()
+        .cloned()
+        .filter(|peers| !peers.is_empty())
+        .or_else(|| {
+            std::env::var(BOOTSTRAP_ENV).ok().map(|value| {
+                value
+                    .split(',')
+                    .map(|peer| peer.trim().to_string())
+                    .filter(|peer| !peer.is_empty())
+                    .collect()
+            })
+        })
+        .filter(|peers: &Vec<String>| !peers.is_empty())
+        .unwrap_or_else(|| {
+            DEFAULT_BOOTSTRAP_NODES
+                .iter()
+                .map(|peer| (*peer).to_string())
+                .collect()
+        });
+
+    let mut resolved = Vec::new();
+    for peer in configured {
+        match peer.to_socket_addrs() {
+            Ok(addrs) => {
+                for addr in addrs {
+                    let addr = addr.to_string();
+                    if !resolved.contains(&addr) {
+                        resolved.push(addr);
+                    }
+                }
+            }
+            Err(e) => eprintln!("[STARTUP] Ignoring seed node {}: {}", peer, e),
+        }
+    }
+    resolved
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
@@ -37,6 +87,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut no_peer_exchange = false;
     let mut miner_reward_arg: Option<String> = None;
     let mut _fullnode_mode = false;
+    let mut cli_peers: Vec<String> = Vec::new();
 
     let mut i = 1;
     while i < args.len() {
@@ -61,6 +112,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 miner_reward_arg = Some(addr);
             }
             "--fullnode" => _fullnode_mode = true,
+            "--peer" => {
+                let Some(peer) = args.get(i + 1) else {
+                    return Err("Usage: node-cli --peer <HOST:PORT>".into());
+                };
+                cli_peers.push(peer.clone());
+                i += 1;
+            }
+            flag if flag.starts_with("--peer=") => {
+                cli_peers.push(flag.trim_start_matches("--peer=").trim().to_string());
+            }
             _ => {}
         }
         i += 1;
@@ -72,7 +133,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    let _ = CLI_BOOTSTRAP.set(cli_peers);
+
     println!("[STARTUP] Starting blockchain node...");
+    if BOOTSTRAP_NODES.is_empty() {
+        println!("[STARTUP] No seed nodes configured; waiting for inbound peers only");
+    } else {
+        println!("[STARTUP] Seed nodes: {}", BOOTSTRAP_NODES.join(", "));
+    }
     ensure_data_dir()?;
 
     // Build a Tokio runtime manually to avoid relying on the #[tokio::main] proc-macro.

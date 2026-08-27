@@ -20,6 +20,9 @@ Release binary:
   Skip bootstrap peer exchange and public IP discovery.
 - `--miner <LFS_ADDRESS>` (or `--miner=LFS_ADDRESS`)
   Enable continuous auto-mining to the provided reward address.
+- `--peer <HOST:PORT>` (or `--peer=HOST:PORT`, repeatable)
+  Seed nodes to sync from, overriding the compiled-in list. Host names are
+  resolved to addresses at startup. Must be port `6000`.
 - `--fullnode`
   Currently parsed; reserved behavior.
 
@@ -27,6 +30,9 @@ Release binary:
 
 - `DATA_DIR`
   Node data directory. Default: `data`.
+- `LOFSWAP_BOOTSTRAP`
+  Comma-separated seed nodes, used when `--peer` is not given. Overrides the
+  compiled-in list.
 - `BIND_ADDR`
   Bind IP for TCP server. Default: `0.0.0.0`.
 - `MINER_REWARD_ADDRESS`
@@ -104,6 +110,11 @@ Node also accepts single `Transaction` and single `Block` JSON payloads over TCP
 
 ## Notes
 
-- Default listen port: `6000`.
-- Bootstrap peers are compiled in (`89.168.107.239:6000`, `79.76.116.108:6000`).
+- Default listen port: `6000`. It is not configurable: peers announced on any
+  other port are rejected.
+- Seed nodes are taken from `--peer`, then `LOFSWAP_BOOTSTRAP`, then the list
+  compiled into `DEFAULT_BOOTSTRAP_NODES`.
+- Proof of work runs on a blocking thread, so a mining node keeps answering
+  peers and wallets while it hashes.
 - `clear-chain` wipes chain storage; use with care.
+- To put a node on the public internet, see [`deploy-free.md`](./deploy-free.md).
