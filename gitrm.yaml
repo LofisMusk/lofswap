@@ -6,6 +6,7 @@ build:
   binaries:
     - explorer-api
     - wallet-cli
+    - wallet-gui
     - node-cli
 deps: []
 custom_script:
