@@ -17,7 +17,9 @@ This folder contains project documentation for development, local testing, and o
 - [`wallet-cli.md`](./wallet-cli.md)
   Wallet CLI command reference, env vars, and storage details.
 - [`wallet-gui.md`](./wallet-gui.md)
-  Desktop wallet build/run instructions and runtime configuration.
+  Desktop wallet: what it does, how it talks to nodes, and where it stores keys.
+- [`deploy-free.md`](./deploy-free.md)
+  Getting a reachable node onto the internet without paying for hosting.
 - [`explorer.md`](./explorer.md)
   Explorer UI and Explorer API setup and endpoint reference.
 

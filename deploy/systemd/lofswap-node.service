@@ -1,0 +1,37 @@
+[Unit]
+Description=LofSwap node
+Documentation=https://github.com/LofisMusk/lofswap/blob/main/docs/deploy-free.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lofswap
+Group=lofswap
+WorkingDirectory=/var/lib/lofswap
+Environment=DATA_DIR=/var/lib/lofswap/data
+# Other seed nodes to sync from, comma separated. Leave unset to use the
+# addresses compiled into the binary.
+#Environment=LOFSWAP_BOOTSTRAP=203.0.113.10:6000,203.0.113.11:6000
+# Append `--miner LFS...` to also mine.
+ExecStart=/usr/local/bin/node-cli --no-upnp
+Restart=always
+RestartSec=5
+# The node reads commands from stdin; there is nobody to type them here.
+StandardInput=null
+StandardOutput=journal
+StandardError=journal
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/lofswap
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+# Mining is CPU-bound; keep it from starving everything else on a small VM.
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

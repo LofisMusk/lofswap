@@ -4,6 +4,7 @@ members = [
     "blockchain-core",
     "explorer-api",
     "wallet-cli",
+    "wallet-gui",
     "node-cli",
 ]
 # Built with the Solana toolchain, not with the node workspace.

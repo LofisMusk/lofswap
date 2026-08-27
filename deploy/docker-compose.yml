@@ -1,0 +1,26 @@
+# Run a seed node with `docker compose -f deploy/docker-compose.yml up -d`
+# from the repository root.
+services:
+  node:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: lofswap-node
+    container_name: lofswap-node
+    restart: unless-stopped
+    # Port 6000 is not configurable: nodes only accept peers announced on it.
+    ports:
+      - "6000:6000"
+    volumes:
+      - lofswap-data:/data
+    environment:
+      # Other seed nodes to sync from, comma separated. Leave unset to use the
+      # addresses compiled into this build.
+      LOFSWAP_BOOTSTRAP: "${LOFSWAP_BOOTSTRAP:-}"
+    # Add `--miner LFS...` to also mine. A seed node does not have to: it
+    # relays blocks and answers wallets either way.
+    command: ["--no-upnp"]
+    stop_grace_period: 30s
+
+volumes:
+  lofswap-data:

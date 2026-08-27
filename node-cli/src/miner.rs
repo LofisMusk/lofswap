@@ -109,7 +109,7 @@ pub async fn mine_block(blockchain: &Arc<Mutex<Vec<Block>>>, explicit_reward_add
     block_txs.push(coinbase);
     block_txs.extend(transactions);
 
-    let mut block = Block {
+    let block = Block {
         version: 1,
         index: target_index,
         timestamp: now_unix_secs(),
@@ -120,7 +120,24 @@ pub async fn mine_block(blockchain: &Arc<Mutex<Vec<Block>>>, explicit_reward_add
         miner,
         difficulty: target_difficulty,
     };
-    block.mine(target_difficulty as usize);
+
+    // Proof of work is a tight CPU loop that never yields. Run it on a
+    // blocking thread so the node keeps answering peers and wallets while it
+    // hashes — on a small VPS the async workers would otherwise starve and the
+    // node would look offline for the whole block interval.
+    let block = match tokio::task::spawn_blocking(move || {
+        let mut block = block;
+        block.mine(target_difficulty as usize);
+        block
+    })
+    .await
+    {
+        Ok(block) => block,
+        Err(e) => {
+            eprintln!("[mining] proof-of-work task failed: {}", e);
+            return;
+        }
+    };
 
     println!("[mining] solved block: {}", block.hash);
     {

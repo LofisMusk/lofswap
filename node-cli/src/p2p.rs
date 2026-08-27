@@ -824,7 +824,7 @@ fn peers_in_subnet(peers: &[String], key: &str) -> usize {
 fn is_anchor_peer_addr(addr: &str) -> bool {
     BOOTSTRAP_NODES
         .iter()
-        .any(|anchor| normalize_peer_address(anchor).as_deref() == Some(addr) || *anchor == addr)
+        .any(|anchor| normalize_peer_address(anchor).as_deref() == Some(addr) || anchor == addr)
 }
 
 fn is_anchor_peer(node_id: &str) -> bool {
@@ -2354,7 +2354,7 @@ pub async fn bootstrap_and_discover_ip(peers: &Arc<Mutex<Vec<String>>>) {
         }
     }
 
-    for &bootstrap_node in BOOTSTRAP_NODES {
+    for bootstrap_node in BOOTSTRAP_NODES.iter() {
         println!("[STARTUP] Trying bootstrap node: {}", bootstrap_node);
         match handshake_with_peer(bootstrap_node, peers).await {
             Some(info) => {

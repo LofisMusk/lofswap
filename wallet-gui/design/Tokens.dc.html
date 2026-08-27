@@ -1,0 +1,278 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" />
+  <style>
+    body { margin: 0; background: #000000; color: #e6e6e6; font-family: 'Space Grotesk', 'Segoe UI', system-ui, sans-serif;
+           -webkit-font-smoothing: antialiased; }
+    a { color: #d8647e; text-decoration: none; }
+    a:hover { color: #f07a93; }
+    * { box-sizing: border-box; }
+  </style>
+</helmet>
+<div style="width: 1100px; height: 740px; background: #000000; padding: 30px;
+            display: flex; flex-direction: column; gap: 20px; overflow: hidden">
+  <div style="display: flex; align-items: center; gap: 12px">
+    <img src="logo.png" width="26" height="26" alt="LofSwap" />
+    <div style="font-size: 17px; font-weight: 600">Wallet design tokens</div>
+    <div style="flex-grow: 1"></div>
+    <div style="font-size: 12px; color: #6b6b6b">mirrored by <span style="font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace">wallet-gui/src/theme.rs</span></div>
+  </div>
+  <div style="display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 14px">
+    <div style="display: flex; flex-direction: column; gap: 8px">
+  <div style="height: 52px; border-radius: 8px; background: #000000;
+              border: 1px solid #333333"></div>
+  <div style="display: flex; flex-direction: column; gap: 2px">
+    <div style="font-size: 12px; font-weight: 600; color: #e6e6e6">bg</div>
+    <span style="font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; font-weight: 400; color: #8c8c8c">#000000</span>
+    <div style="font-size: 11px; color: #6b6b6b; line-height: 1.45">window canvas</div>
+  </div>
+</div><div style="display: flex; flex-direction: column; gap: 8px">
+  <div style="height: 52px; border-radius: 8px; background: #0d0d0d;
+              border: 1px solid #333333"></div>
+  <div style="display: flex; flex-direction: column; gap: 2px">
+    <div style="font-size: 12px; font-weight: 600; color: #e6e6e6">surface</div>
+    <span style="font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; font-weight: 400; color: #8c8c8c">#0d0d0d</span>
+    <div style="font-size: 11px; color: #6b6b6b; line-height: 1.45">panels, cards, rail</div>
+  </div>
+</div><div style="display: flex; flex-direction: column; gap: 8px">
+  <div style="height: 52px; border-radius: 8px; background: #141414;
+              border: 1px solid #333333"></div>
+  <div style="display: flex; flex-direction: column; gap: 2px">
+    <div style="font-size: 12px; font-weight: 600; color: #e6e6e6">surface_hi</div>
+    <span style="font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; font-weight: 400; color: #8c8c8c">#141414</span>
+    <div style="font-size: 11px; color: #6b6b6b; line-height: 1.45">inputs, hovered rows</div>
+  </div>
+</div><div style="display: flex; flex-direction: column; gap: 8px">
+  <div style="height: 52px; border-radius: 8px; background: #242424;
+              border: 1px solid #333333"></div>
+  <div style="display: flex; flex-direction: column; gap: 2px">
+    <div style="font-size: 12px; font-weight: 600; color: #e6e6e6">line</div>
+    <span style="font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; font-weight: 400; color: #8c8c8c">#242424</span>
+    <div style="font-size: 11px; color: #6b6b6b; line-height: 1.45">hairlines</div>
+  </div>
+</div><div style="display: flex; flex-direction: column; gap: 8px">
+  <div style="height: 52px; border-radius: 8px; background: #333333;
+              border: 1px solid #333333"></div>
+  <div style="display: flex; flex-direction: column; gap: 2px">
+    <div style="font-size: 12px; font-weight: 600; color: #e6e6e6">line_strong</div>
+    <span style="font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; font-weight: 400; color: #8c8c8c">#333333</span>
+    <div style="font-size: 11px; color: #6b6b6b; line-height: 1.45">control borders</div>
+  </div>
+</div><div style="display: flex; flex-direction: column; gap: 8px">
+  <div style="height: 52px; border-radius: 8px; background: #7a0033;
+              border: 1px solid #333333"></div>
+  <div style="display: flex; flex-direction: column; gap: 2px">
+    <div style="font-size: 12px; font-weight: 600; color: #e6e6e6">accent</div>
+    <span style="font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; font-weight: 400; color: #8c8c8c">#7a0033</span>
+    <div style="font-size: 11px; color: #6b6b6b; line-height: 1.45">brand crimson, filled buttons</div>
+  </div>
+</div><div style="display: flex; flex-direction: column; gap: 8px">
+  <div style="height: 52px; border-radius: 8px; background: #942545;
+              border: 1px solid #333333"></div>
+  <div style="display: flex; flex-direction: column; gap: 2px">
+    <div style="font-size: 12px; font-weight: 600; color: #e6e6e6">accent_hover</div>
+    <span style="font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; font-weight: 400; color: #8c8c8c">#942545</span>
+    <div style="font-size: 11px; color: #6b6b6b; line-height: 1.45">button hover</div>
+  </div>
+</div><div style="display: flex; flex-direction: column; gap: 8px">
+  <div style="height: 52px; border-radius: 8px; background: #d8647e;
+              border: 1px solid #333333"></div>
+  <div style="display: flex; flex-direction: column; gap: 2px">
+    <div style="font-size: 12px; font-weight: 600; color: #e6e6e6">accent_lit</div>
+    <span style="font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; font-weight: 400; color: #8c8c8c">#d8647e</span>
+    <div style="font-size: 11px; color: #6b6b6b; line-height: 1.45">links, active nav, focus ring</div>
+  </div>
+</div><div style="display: flex; flex-direction: column; gap: 8px">
+  <div style="height: 52px; border-radius: 8px; background: #47be8b;
+              border: 1px solid #333333"></div>
+  <div style="display: flex; flex-direction: column; gap: 2px">
+    <div style="font-size: 12px; font-weight: 600; color: #e6e6e6">positive</div>
+    <span style="font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; font-weight: 400; color: #8c8c8c">#47be8b</span>
+    <div style="font-size: 11px; color: #6b6b6b; line-height: 1.45">incoming amounts</div>
+  </div>
+</div><div style="display: flex; flex-direction: column; gap: 8px">
+  <div style="height: 52px; border-radius: 8px; background: #e5ac4c;
+              border: 1px solid #333333"></div>
+  <div style="display: flex; flex-direction: column; gap: 2px">
+    <div style="font-size: 12px; font-weight: 600; color: #e6e6e6">warning</div>
+    <span style="font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; font-weight: 400; color: #8c8c8c">#e5ac4c</span>
+    <div style="font-size: 11px; color: #6b6b6b; line-height: 1.45">pending, unconfirmed</div>
+  </div>
+</div><div style="display: flex; flex-direction: column; gap: 8px">
+  <div style="height: 52px; border-radius: 8px; background: #e45d53;
+              border: 1px solid #333333"></div>
+  <div style="display: flex; flex-direction: column; gap: 2px">
+    <div style="font-size: 12px; font-weight: 600; color: #e6e6e6">danger</div>
+    <span style="font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; font-weight: 400; color: #8c8c8c">#e45d53</span>
+    <div style="font-size: 11px; color: #6b6b6b; line-height: 1.45">errors, destructive</div>
+  </div>
+</div><div style="display: flex; flex-direction: column; gap: 8px">
+  <div style="height: 52px; border-radius: 8px; background: #e6e6e6;
+              border: 1px solid #333333"></div>
+  <div style="display: flex; flex-direction: column; gap: 2px">
+    <div style="font-size: 12px; font-weight: 600; color: #e6e6e6">text</div>
+    <span style="font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; font-weight: 400; color: #8c8c8c">#e6e6e6</span>
+    <div style="font-size: 11px; color: #6b6b6b; line-height: 1.45">primary copy</div>
+  </div>
+</div><div style="display: flex; flex-direction: column; gap: 8px">
+  <div style="height: 52px; border-radius: 8px; background: #b2b2b2;
+              border: 1px solid #333333"></div>
+  <div style="display: flex; flex-direction: column; gap: 2px">
+    <div style="font-size: 12px; font-weight: 600; color: #e6e6e6">text_dim</div>
+    <span style="font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; font-weight: 400; color: #8c8c8c">#b2b2b2</span>
+    <div style="font-size: 11px; color: #6b6b6b; line-height: 1.45">secondary copy</div>
+  </div>
+</div><div style="display: flex; flex-direction: column; gap: 8px">
+  <div style="height: 52px; border-radius: 8px; background: #8c8c8c;
+              border: 1px solid #333333"></div>
+  <div style="display: flex; flex-direction: column; gap: 2px">
+    <div style="font-size: 12px; font-weight: 600; color: #e6e6e6">text_muted</div>
+    <span style="font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; font-weight: 400; color: #8c8c8c">#8c8c8c</span>
+    <div style="font-size: 11px; color: #6b6b6b; line-height: 1.45">labels, metadata</div>
+  </div>
+</div><div style="display: flex; flex-direction: column; gap: 8px">
+  <div style="height: 52px; border-radius: 8px; background: #6b6b6b;
+              border: 1px solid #333333"></div>
+  <div style="display: flex; flex-direction: column; gap: 2px">
+    <div style="font-size: 12px; font-weight: 600; color: #e6e6e6">text_faint</div>
+    <span style="font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; font-weight: 400; color: #8c8c8c">#6b6b6b</span>
+    <div style="font-size: 11px; color: #6b6b6b; line-height: 1.45">placeholders, disabled</div>
+  </div>
+</div>
+  </div>
+  <div style="display: flex; gap: 20px; flex-grow: 1; min-height: 0">
+    <div style="flex-grow: 1; display: flex; flex-direction: column; gap: 8px">
+      <div style="font-size: 11px; font-weight: 500; letter-spacing: 0.09em; text-transform: uppercase; color: #8c8c8c">Type ramp — Space Grotesk, JetBrains Mono for figures</div>
+      <div><div style="display: flex; align-items: center; gap: 16px;
+            padding: 7px 0; border-bottom: 1px solid #242424">
+    <div style="width: 132px; flex-shrink: 0; display: flex; flex-direction: column; gap: 1px">
+      <div style="font-size: 12px; color: #b2b2b2">Display</div>
+      <div style="font-size: 11px; color: #6b6b6b">balance figure</div>
+    </div>
+    <div style="width: 62px; flex-shrink: 0; font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: #6b6b6b">40/600</div>
+    <div style="flex-grow: 1; min-width: 0; font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 40px; font-weight: 600;
+                color: #e6e6e6; line-height: 1.15; white-space: nowrap; overflow: hidden;
+                ">1,284</div>
+  </div><div style="display: flex; align-items: center; gap: 16px;
+            padding: 7px 0; border-bottom: 1px solid #242424">
+    <div style="width: 132px; flex-shrink: 0; display: flex; flex-direction: column; gap: 1px">
+      <div style="font-size: 12px; color: #b2b2b2">Title</div>
+      <div style="font-size: 11px; color: #6b6b6b">empty-state headline</div>
+    </div>
+    <div style="width: 62px; flex-shrink: 0; font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: #6b6b6b">24/600</div>
+    <div style="flex-grow: 1; min-width: 0; font-family: 'Space Grotesk', 'Segoe UI', system-ui, sans-serif; font-size: 24px; font-weight: 600;
+                color: #e6e6e6; line-height: 1.15; white-space: nowrap; overflow: hidden;
+                ">Set up your wallet</div>
+  </div><div style="display: flex; align-items: center; gap: 16px;
+            padding: 7px 0; border-bottom: 1px solid #242424">
+    <div style="width: 132px; flex-shrink: 0; display: flex; flex-direction: column; gap: 1px">
+      <div style="font-size: 12px; color: #b2b2b2">Heading</div>
+      <div style="font-size: 11px; color: #6b6b6b">top bar</div>
+    </div>
+    <div style="width: 62px; flex-shrink: 0; font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: #6b6b6b">19/600</div>
+    <div style="flex-grow: 1; min-width: 0; font-family: 'Space Grotesk', 'Segoe UI', system-ui, sans-serif; font-size: 19px; font-weight: 600;
+                color: #e6e6e6; line-height: 1.15; white-space: nowrap; overflow: hidden;
+                ">Dashboard</div>
+  </div><div style="display: flex; align-items: center; gap: 16px;
+            padding: 7px 0; border-bottom: 1px solid #242424">
+    <div style="width: 132px; flex-shrink: 0; display: flex; flex-direction: column; gap: 1px">
+      <div style="font-size: 12px; color: #b2b2b2">Subheading</div>
+      <div style="font-size: 11px; color: #6b6b6b">card headers</div>
+    </div>
+    <div style="width: 62px; flex-shrink: 0; font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: #6b6b6b">15/600</div>
+    <div style="flex-grow: 1; min-width: 0; font-family: 'Space Grotesk', 'Segoe UI', system-ui, sans-serif; font-size: 15px; font-weight: 600;
+                color: #e6e6e6; line-height: 1.15; white-space: nowrap; overflow: hidden;
+                ">Recent activity</div>
+  </div><div style="display: flex; align-items: center; gap: 16px;
+            padding: 7px 0; border-bottom: 1px solid #242424">
+    <div style="width: 132px; flex-shrink: 0; display: flex; flex-direction: column; gap: 1px">
+      <div style="font-size: 12px; color: #b2b2b2">Body</div>
+      <div style="font-size: 11px; color: #6b6b6b">controls and rows</div>
+    </div>
+    <div style="width: 62px; flex-shrink: 0; font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: #6b6b6b">14/400</div>
+    <div style="flex-grow: 1; min-width: 0; font-family: 'Space Grotesk', 'Segoe UI', system-ui, sans-serif; font-size: 14px; font-weight: 400;
+                color: #e6e6e6; line-height: 1.15; white-space: nowrap; overflow: hidden;
+                ">Sign & broadcast</div>
+  </div><div style="display: flex; align-items: center; gap: 16px;
+            padding: 7px 0; border-bottom: 1px solid #242424">
+    <div style="width: 132px; flex-shrink: 0; display: flex; flex-direction: column; gap: 1px">
+      <div style="font-size: 12px; color: #b2b2b2">Small</div>
+      <div style="font-size: 11px; color: #6b6b6b">secondary copy</div>
+    </div>
+    <div style="width: 62px; flex-shrink: 0; font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: #6b6b6b">13/400</div>
+    <div style="flex-grow: 1; min-width: 0; font-family: 'Space Grotesk', 'Segoe UI', system-ui, sans-serif; font-size: 13px; font-weight: 400;
+                color: #e6e6e6; line-height: 1.15; white-space: nowrap; overflow: hidden;
+                ">3 peers reachable now</div>
+  </div><div style="display: flex; align-items: center; gap: 16px;
+            padding: 7px 0; border-bottom: 1px solid #242424">
+    <div style="width: 132px; flex-shrink: 0; display: flex; flex-direction: column; gap: 1px">
+      <div style="font-size: 12px; color: #b2b2b2">Meta</div>
+      <div style="font-size: 11px; color: #6b6b6b">timestamps, counts</div>
+    </div>
+    <div style="width: 62px; flex-shrink: 0; font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: #6b6b6b">12/400</div>
+    <div style="flex-grow: 1; min-width: 0; font-family: 'Space Grotesk', 'Segoe UI', system-ui, sans-serif; font-size: 12px; font-weight: 400;
+                color: #e6e6e6; line-height: 1.15; white-space: nowrap; overflow: hidden;
+                ">26 min ago · 24 conf</div>
+  </div><div style="display: flex; align-items: center; gap: 16px;
+            padding: 7px 0; border-bottom: 1px solid #242424">
+    <div style="width: 132px; flex-shrink: 0; display: flex; flex-direction: column; gap: 1px">
+      <div style="font-size: 12px; color: #b2b2b2">Label</div>
+      <div style="font-size: 11px; color: #6b6b6b">0.09em tracking</div>
+    </div>
+    <div style="width: 62px; flex-shrink: 0; font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: #6b6b6b">11/500</div>
+    <div style="flex-grow: 1; min-width: 0; font-family: 'Space Grotesk', 'Segoe UI', system-ui, sans-serif; font-size: 11px; font-weight: 500;
+                color: #e6e6e6; line-height: 1.15; white-space: nowrap; overflow: hidden;
+                letter-spacing: 0.09em; text-transform: uppercase;">SPENDABLE BALANCE</div>
+  </div></div>
+    </div>
+    <div style="width: 400px; flex-shrink: 0; display: flex; flex-direction: column; gap: 8px">
+      <div style="font-size: 11px; font-weight: 500; letter-spacing: 0.09em; text-transform: uppercase; color: #8c8c8c">Metrics</div>
+      <div><div style="display: flex; align-items: center; gap: 14px;
+            padding: 8px 0; border-bottom: 1px solid #242424">
+    <div style="width: 118px; flex-shrink: 0; font-size: 12px; color: #b2b2b2">Window</div>
+    <div style="width: 118px; flex-shrink: 0; font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: #e6e6e6">1100 × 740</div>
+    <div style="font-size: 11px; color: #6b6b6b; white-space: nowrap">minimum 940 × 640</div>
+  </div><div style="display: flex; align-items: center; gap: 14px;
+            padding: 8px 0; border-bottom: 1px solid #242424">
+    <div style="width: 118px; flex-shrink: 0; font-size: 12px; color: #b2b2b2">Side rail</div>
+    <div style="width: 118px; flex-shrink: 0; font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: #e6e6e6">232 px</div>
+    <div style="font-size: 11px; color: #6b6b6b; white-space: nowrap">nav item height 40</div>
+  </div><div style="display: flex; align-items: center; gap: 14px;
+            padding: 8px 0; border-bottom: 1px solid #242424">
+    <div style="width: 118px; flex-shrink: 0; font-size: 12px; color: #b2b2b2">Top bar</div>
+    <div style="width: 118px; flex-shrink: 0; font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: #e6e6e6">74 px</div>
+    <div style="font-size: 11px; color: #6b6b6b; white-space: nowrap">content padding 28</div>
+  </div><div style="display: flex; align-items: center; gap: 14px;
+            padding: 8px 0; border-bottom: 1px solid #242424">
+    <div style="width: 118px; flex-shrink: 0; font-size: 12px; color: #b2b2b2">Card radius</div>
+    <div style="width: 118px; flex-shrink: 0; font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: #e6e6e6">12 px</div>
+    <div style="font-size: 11px; color: #6b6b6b; white-space: nowrap">controls 8, chips 6</div>
+  </div><div style="display: flex; align-items: center; gap: 14px;
+            padding: 8px 0; border-bottom: 1px solid #242424">
+    <div style="width: 118px; flex-shrink: 0; font-size: 12px; color: #b2b2b2">Control height</div>
+    <div style="width: 118px; flex-shrink: 0; font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: #e6e6e6">44 / 38 / 34</div>
+    <div style="font-size: 11px; color: #6b6b6b; white-space: nowrap">input / button / chip</div>
+  </div><div style="display: flex; align-items: center; gap: 14px;
+            padding: 8px 0; border-bottom: 1px solid #242424">
+    <div style="width: 118px; flex-shrink: 0; font-size: 12px; color: #b2b2b2">Gap scale</div>
+    <div style="width: 118px; flex-shrink: 0; font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: #e6e6e6">6 · 10 · 16 · 22</div>
+    <div style="font-size: 11px; color: #6b6b6b; white-space: nowrap">card padding 18–26</div>
+  </div><div style="display: flex; align-items: center; gap: 14px;
+            padding: 8px 0; border-bottom: 1px solid #242424">
+    <div style="width: 118px; flex-shrink: 0; font-size: 12px; color: #b2b2b2">Icons</div>
+    <div style="width: 118px; flex-shrink: 0; font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: #e6e6e6">18 px stroke 1.6</div>
+    <div style="font-size: 11px; color: #6b6b6b; white-space: nowrap">drawn with the painter</div>
+  </div></div>
+    </div>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

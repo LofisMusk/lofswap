@@ -1,0 +1,50 @@
+#cloud-config
+# Paste this into the "cloud-init script" / "user data" box when creating a free
+# VM (Oracle Cloud Always Free, Google Cloud e2-micro, or any Debian/Ubuntu
+# host). It installs Docker, builds the node from source and starts it.
+#
+# Two things this cannot do for you:
+#   1. open port 6000 in the provider's own firewall (security list / VPC rule)
+#   2. tell other people the machine's public IP once it is up
+#
+# See docs/deploy-free.md for both.
+
+package_update: true
+packages:
+  - git
+  - docker.io
+
+write_files:
+  - path: /etc/systemd/system/lofswap-node.service
+    content: |
+      [Unit]
+      Description=LofSwap node (container)
+      After=docker.service
+      Requires=docker.service
+
+      [Service]
+      Type=simple
+      ExecStartPre=-/usr/bin/docker rm -f lofswap-node
+      ExecStart=/usr/bin/docker run --rm --name lofswap-node \
+        -p 6000:6000 \
+        -v lofswap-data:/data \
+        -e LOFSWAP_BOOTSTRAP="${LOFSWAP_BOOTSTRAP}" \
+        lofswap-node
+      ExecStop=/usr/bin/docker stop lofswap-node
+      Restart=always
+      RestartSec=10
+
+      [Install]
+      WantedBy=multi-user.target
+
+runcmd:
+  # Oracle's images ship an iptables REJECT rule that blocks everything but SSH,
+  # so the provider-side firewall rule alone is not enough.
+  - [ sh, -c, "iptables -I INPUT 1 -p tcp --dport 6000 -j ACCEPT || true" ]
+  - [ sh, -c, "netfilter-persistent save || iptables-save > /etc/iptables/rules.v4 || true" ]
+  - [ systemctl, enable, --now, docker ]
+  - [ git, clone, --depth, "1", "https://github.com/LofisMusk/lofswap.git", /opt/lofswap ]
+  - [ sh, -c, "cd /opt/lofswap && docker build -f deploy/Dockerfile -t lofswap-node ." ]
+  - [ systemctl, enable, --now, lofswap-node ]
+  # Print the address to announce as a seed node.
+  - [ sh, -c, "echo \"seed node: $(curl -s https://api.ipify.org):6000\" > /root/lofswap-seed-address" ]

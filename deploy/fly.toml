@@ -1,0 +1,48 @@
+# Fly.io deployment for a seed node.
+#
+#   fly launch --no-deploy --copy-config --config deploy/fly.toml
+#   fly volumes create lofswap_data --size 1
+#   fly ips allocate-v6            # free
+#   fly ips allocate-v4            # ~$2/month, needed for IPv4 peers
+#   fly deploy --config deploy/fly.toml --dockerfile deploy/Dockerfile
+#
+# Read the caveat first: Fly only routes raw TCP (which this node speaks) to a
+# *dedicated* IP. A dedicated IPv6 is free but only reaches peers that have
+# IPv6; a dedicated IPv4 is billed. If you want a genuinely free node with an
+# IPv4 address, use one of the always-free VM options in
+# docs/deploy-free.md instead.
+
+app = "lofswap-seed"
+primary_region = "fra"
+
+[build]
+  dockerfile = "../deploy/Dockerfile"
+
+[env]
+  DATA_DIR = "/data"
+  # Other seed nodes to sync from, comma separated.
+  # LOFSWAP_BOOTSTRAP = "203.0.113.10:6000"
+
+[mounts]
+  source = "lofswap_data"
+  destination = "/data"
+
+# Raw TCP, no TLS and no HTTP handler: the node speaks its own protocol.
+[[services]]
+  protocol = "tcp"
+  internal_port = 6000
+  auto_stop_machines = false
+  auto_start_machines = false
+  min_machines_running = 1
+
+  [[services.ports]]
+    port = 6000
+
+  [[services.tcp_checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "30s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
